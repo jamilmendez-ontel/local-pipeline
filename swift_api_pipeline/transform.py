@@ -562,6 +562,114 @@ def run_qa_forms_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
+def transform_timer_activities(client, run_id: str):
+    """Transform raw_timer_activities to stg_timer_activities"""
+    print(f"[{datetime.now():%H:%M:%S}] Transforming timer activities...")
+
+    # Get run metadata
+    raw_result = client.table("raw_timer_activities").select("run_date, start_date, end_date").eq("run_id", run_id).limit(1).execute()
+    if not raw_result.data:
+        print(f"[{datetime.now():%H:%M:%S}] No timer data found for run_id: {run_id}")
+        return 0
+
+    run_date = raw_result.data[0]["run_date"]
+    start_date = raw_result.data[0]["start_date"]
+    end_date = raw_result.data[0]["end_date"]
+
+    print(f"[{datetime.now():%H:%M:%S}] Run date: {run_date}, Date range: {start_date} to {end_date}")
+
+    # Delete existing staging data for this run_id (to allow re-runs)
+    client.table("stg_timer_activities").delete().eq("run_id", run_id).execute()
+
+    total_transformed = 0
+    batch_size = 1000
+    offset = 0
+
+    while True:
+        result = client.table("raw_timer_activities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        rows = []
+        for record in result.data:
+            data = record["data"]
+            project = data.get("Project", "")
+            project_number = extract_project_number(project)
+
+            # Parse timestamps
+            start_time = data.get("Start Time")
+            end_time = data.get("End Time")
+
+            rows.append({
+                # Project info
+                "project": project,
+                "project_number": project_number,
+                "project_did": record["project_did"],
+                # Site info
+                "site_name": data.get("Site Name"),
+                "site_id": data.get("Site ID"),
+                "task": data.get("Task"),
+                # Location data
+                "site_lat": data.get("Site Lat"),
+                "site_long": data.get("Site Long"),
+                "user_lat": data.get("User Lat"),
+                "user_long": data.get("User Long"),
+                "user_accuracy_m": data.get("User Accuracy (m)"),
+                "site_vs_user_km": data.get("Site vs User (km)"),
+                # Time data
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_min": data.get("Duration (min)"),
+                # User info
+                "user_name": data.get("User Name"),
+                "user_email": data.get("User Email"),
+                "user_role": data.get("User Role"),
+                # Metadata
+                "run_id": run_id,
+                "run_date": run_date
+            })
+
+        if rows:
+            client.table("stg_timer_activities").insert(rows).execute()
+            total_transformed += len(rows)
+
+        offset += batch_size
+
+        if len(result.data) < batch_size:
+            break
+
+    print(f"[{datetime.now():%H:%M:%S}] Total timer activities transformed: {total_transformed:,}")
+    return total_transformed
+
+
+def run_timer_transform(run_id: str = None):
+    """Run timer activities transformation only"""
+    print(f"\n{'='*60}")
+    print(f"Timer Activities Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    client = get_supabase_client()
+
+    # Get latest timer_extract run_id if not specified
+    if not run_id:
+        result = client.table("pipeline_runs").select("run_id").eq("pipeline_name", "timer_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest timer run_id: {run_id}")
+        else:
+            print("No successful timer pipeline runs found")
+            return
+
+    timer_count = transform_timer_activities(client, run_id)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  Timer Activities: {timer_count:,}")
+    print(f"{'='*60}\n")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
@@ -571,8 +679,11 @@ if __name__ == "__main__":
         elif sys.argv[1] == "qa_forms":
             run_id = sys.argv[2] if len(sys.argv) > 2 else None
             run_qa_forms_transform(run_id)
+        elif sys.argv[1] == "timer":
+            run_id = sys.argv[2] if len(sys.argv) > 2 else None
+            run_timer_transform(run_id)
         else:
             print(f"Unknown transform type: {sys.argv[1]}")
-            print("Usage: python transform.py [asset_tasks|qa_forms] [run_id]")
+            print("Usage: python transform.py [asset_tasks|qa_forms|timer] [run_id]")
     else:
         run_transform()
