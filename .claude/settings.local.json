@@ -19,7 +19,9 @@
       "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u \"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\extract_asset_tasks.py\":*)",
       "Bash(git add:*)",
       "Bash(git reset:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd Swift API data pipeline for local Supabase\n\nImplements ETL pipeline to extract data from Swift Projects API and load into local Supabase:\n\n- Extract user priorities, organizations, and projects via API\n- Parallel asset-task extraction using ThreadPoolExecutor \\(3 workers\\)\n- Stream data to database during extraction for memory efficiency\n- Medallion architecture: raw JSONB tables -> flattened staging tables\n- DID-based relationships between staging tables\n- Reference table for TECH-OPS projects \\(TS13-TS18\\)\n\nExtracts ~2.2 million asset-task records across 6 projects.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate Claude local settings\n\nAdd git commit permission to allowed commands.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }
