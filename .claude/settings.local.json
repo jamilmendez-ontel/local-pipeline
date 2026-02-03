@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv:*)",
+      "Bash(venvScriptspip install -r requirements.txt)",
+      "Bash(venv\\\\Scripts\\\\pip.exe install:*)",
+      "Bash(./venv/Scripts/pip.exe install:*)",
+      "Bash(psql:*)",
+      "Bash(docker ps:*)",
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(docker exec:*)",
+      "Bash(python extract_asset_tasks.py:*)",
+      "Bash(python:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\extract_asset_tasks.py\")",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\test_extract.py\")",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\":*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u \"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\extract_asset_tasks.py\":*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rm:*)"
+    ]
+  }
+}
