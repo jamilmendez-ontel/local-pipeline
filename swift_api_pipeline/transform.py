@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
 Transform raw JSONB data into staging tables
+All timestamps are converted to America/New_York timezone for consistency
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from config import (
     get_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE
 )
+
+# Timezone for all date conversions
+TZ_ET = ZoneInfo("America/New_York")
+
+
+def epoch_to_datetime(epoch_ms: int) -> str:
+    """Convert epoch milliseconds to ISO datetime string in America/New_York timezone"""
+    if not epoch_ms:
+        return None
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=TZ_ET).isoformat()
 
 
 def transform_organizations(client, run_id: str):
@@ -37,8 +49,8 @@ def transform_organizations(client, run_id: str):
             "poc_name": poc.get("name"),
             "poc_email": poc.get("email"),
             "created_by_id": created_by.get("id"),
-            "date_created": datetime.fromtimestamp(data["dateCreated"] / 1000).isoformat() if data.get("dateCreated") else None,
-            "last_updated": datetime.fromtimestamp(data["lastUpdated"] / 1000).isoformat() if data.get("lastUpdated") else None,
+            "date_created": epoch_to_datetime(data.get("dateCreated")),
+            "last_updated": epoch_to_datetime(data.get("lastUpdated")),
             "run_id": run_id
         })
 
@@ -102,9 +114,9 @@ def transform_projects(client, run_id: str):
                 "project_task_approved": project_metrics.get("taskApproved"),
                 # Metadata
                 "created_by_id": created_by.get("id"),
-                "date_created": datetime.fromtimestamp(data["dateCreated"] / 1000).isoformat() if data.get("dateCreated") else None,
-                "last_updated": datetime.fromtimestamp(data["lastUpdated"] / 1000).isoformat() if data.get("lastUpdated") else None,
-                "metrics_last_updated": datetime.fromtimestamp(metrics["lastUpdated"] / 1000).isoformat() if metrics.get("lastUpdated") else None,
+                "date_created": epoch_to_datetime(data.get("dateCreated")),
+                "last_updated": epoch_to_datetime(data.get("lastUpdated")),
+                "metrics_last_updated": epoch_to_datetime(metrics.get("lastUpdated")),
                 "run_id": run_id
             })
 
@@ -143,12 +155,13 @@ def transform_user_priorities(client, run_id: str):
         for record in result.data:
             data = record["data"]
 
-            # Parse dates safely
+            # Parse dates safely - convert to America/New_York
             def parse_date(val):
                 if not val:
                     return None
                 try:
-                    return datetime.fromisoformat(val.replace("Z", "+00:00")).isoformat()
+                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    return dt.astimezone(TZ_ET).isoformat()
                 except:
                     return None
 
@@ -284,6 +297,7 @@ def transform_asset_tasks(client, run_id: str):
             project_did = record["project_did"]
 
             # Parse dates safely (API returns yyyy-MM-dd format, but some edge cases have epoch ms)
+            # All dates converted to America/New_York timezone
             def parse_date(val):
                 if not val:
                     return None
@@ -291,10 +305,10 @@ def transform_asset_tasks(client, run_id: str):
                 if isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()):
                     try:
                         ts = int(val) / 1000 if int(val) > 9999999999 else int(val)
-                        return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+                        return datetime.fromtimestamp(ts, tz=TZ_ET).strftime('%Y-%m-%d')
                     except:
                         return None
-                return val  # Already in yyyy-MM-dd format from API
+                return val  # Already in yyyy-MM-dd format from API (requested in ET)
 
             rows.append({
                 # DID fields
