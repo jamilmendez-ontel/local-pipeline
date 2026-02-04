@@ -222,7 +222,28 @@ def epoch_to_datetime(epoch_ms: int) -> str:
 
 ---
 
-## 5. Data Model
+## 5. Data Dictionary for AI Agent
+
+Created `docs/data_dictionary.md` to support integration with a Data Analyst AI Agent project.
+
+### Contents
+- **Business Context**: Telecom construction project overview
+- **Table Documentation**: All 5 staging tables with column descriptions
+- **Example Queries**: Common analysis patterns (project progress, technician productivity, QA issues, time analysis)
+- **Relationships**: How tables connect via foreign keys
+- **AI Agent Notes**: Schema prefixes, performance tips, NULL handling
+
+### Purpose
+Allows an AI Agent to understand the data structure and write accurate SQL queries to answer user questions about:
+- Project completion status
+- Technician performance
+- QA pass/fail rates
+- Time tracking analysis
+- Site-level metrics
+
+---
+
+## 6. Data Model
 
 ```
 data_staging.stg_organizations (300 rows)
@@ -236,9 +257,11 @@ data_staging.stg_organizations (300 rows)
 
 ---
 
-## 6. Git Commits
+## 7. Git Commits
 
 ```
+3085687 Add data dictionary for AI Agent integration
+71447f6 Update docs with timezone standardization details
 d5b6ce9 Fix timezone handling - use America/New_York consistently
 1295695 Update session docs with schema reorganization details
 4c8d5c0 Reorganize tables into schemas (data_raw, data_staging, reference, pipeline)
@@ -253,7 +276,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 7. Files Created/Modified
+## 8. Files Created/Modified
 
 ### New Files
 - `swift_api_pipeline/extract_forms.py`
@@ -264,6 +287,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 - `swift_api_pipeline/migrations/006_stg_qa_form_all_columns.sql`
 - `swift_api_pipeline/migrations/007_timer_tables.sql`
 - `swift_api_pipeline/migrations/008_create_schemas_v2.sql`
+- `docs/data_dictionary.md` - Comprehensive data documentation for AI Agent integration
 
 ### Modified Files
 - `swift_api_pipeline/config.py` - Added schema constants
@@ -275,7 +299,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 8. Known Issues / TODO
+## 9. Known Issues / TODO
 
 1. **TS18 Timer January Data Incomplete**: Extraction stopped at ~10,000 rows due to API 500 errors. Can retry later.
 
@@ -290,7 +314,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 9. Quick Reference Commands
+## 10. Quick Reference Commands
 
 ```bash
 # Activate virtual environment
@@ -317,7 +341,7 @@ docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt d
 
 ---
 
-## 10. Environment
+## 11. Environment
 
 - **Local Supabase**: Docker container `supabase_db_supabase-local`
 - **Python**: 3.x with venv in `swift_api_pipeline/venv`
