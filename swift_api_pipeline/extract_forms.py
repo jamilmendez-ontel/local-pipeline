@@ -121,6 +121,7 @@ class FormsExtractor:
         next_cursor = None
         page_count = 0
         total_rows = 0
+        csv_fieldnames = None  # Store headers from first page
 
         print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Starting extraction...")
 
@@ -140,8 +141,24 @@ class FormsExtractor:
                     resp.raise_for_status()
 
                     # Parse CSV response
-                    reader = csv.DictReader(io.StringIO(resp.text))
-                    rows = list(reader)
+                    # First page has headers, subsequent pages may not
+                    if csv_fieldnames is None:
+                        # First page - let DictReader detect headers
+                        reader = csv.DictReader(io.StringIO(resp.text))
+                        rows = list(reader)
+                        csv_fieldnames = reader.fieldnames
+                    else:
+                        # Subsequent pages - use saved headers
+                        # Check if first line looks like a header (matches our saved fieldnames)
+                        lines = resp.text.strip().split('\n')
+                        if lines and lines[0].startswith(csv_fieldnames[0]):
+                            # Has header row - skip it
+                            reader = csv.DictReader(io.StringIO(resp.text), fieldnames=None)
+                            rows = list(reader)
+                        else:
+                            # No header row - use saved fieldnames
+                            reader = csv.DictReader(io.StringIO(resp.text), fieldnames=csv_fieldnames)
+                            rows = list(reader)
 
                     if not rows:
                         print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Complete - {total_rows:,} rows")
