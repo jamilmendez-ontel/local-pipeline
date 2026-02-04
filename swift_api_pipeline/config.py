@@ -18,6 +18,12 @@ PAGE_SIZE = 2000
 MAX_RETRIES = 5
 TIMEZONE = "America/New_York"
 
+# Schema Configuration
+SCHEMA_RAW = "data_raw"
+SCHEMA_STAGING = "data_staging"
+SCHEMA_REFERENCE = "reference"
+SCHEMA_PIPELINE = "pipeline"
+
 def get_supabase_client() -> Client:
     """Initialize Supabase client with service role key"""
     if not SUPABASE_URL or not SUPABASE_KEY:

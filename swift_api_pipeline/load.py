@@ -2,7 +2,7 @@ import uuid
 from typing import List, Dict, Any
 from datetime import datetime
 from supabase import Client
-from config import get_supabase_client
+from config import get_supabase_client, SCHEMA_RAW, SCHEMA_PIPELINE
 
 class SupabaseLoader:
     def __init__(self):
@@ -11,7 +11,7 @@ class SupabaseLoader:
 
     def start_pipeline_run(self, pipeline_name: str) -> uuid.UUID:
         """Record pipeline run start"""
-        result = self.client.table("pipeline_runs").insert({
+        result = self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
             "run_id": str(self.run_id),
             "pipeline_name": pipeline_name,
             "status": "running",
@@ -34,7 +34,7 @@ class SupabaseLoader:
         if error_message:
             update_data["error_message"] = error_message
 
-        self.client.table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
+        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
 
         print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
 
@@ -57,7 +57,7 @@ class SupabaseLoader:
                 for record in batch
             ]
 
-            self.client.table("raw_user_priorities").insert(rows).execute()
+            self.client.schema(SCHEMA_RAW).table("raw_user_priorities").insert(rows).execute()
             total_loaded += len(batch)
 
             print(f"[{datetime.now():%H:%M:%S}] Loaded {total_loaded:,} / {len(records):,} user priorities")
@@ -77,7 +77,7 @@ class SupabaseLoader:
             for org in orgs
         ]
 
-        self.client.table("raw_organizations").insert(rows).execute()
+        self.client.schema(SCHEMA_RAW).table("raw_organizations").insert(rows).execute()
 
         print(f"[{datetime.now():%H:%M:%S}] Loaded {len(orgs)} organizations")
         return len(orgs)
@@ -100,7 +100,7 @@ class SupabaseLoader:
                 for proj in batch
             ]
 
-            self.client.table("raw_projects").insert(rows).execute()
+            self.client.schema(SCHEMA_RAW).table("raw_projects").insert(rows).execute()
             total_loaded += len(batch)
 
             print(f"[{datetime.now():%H:%M:%S}] Loaded {total_loaded:,} / {len(projects):,} projects")

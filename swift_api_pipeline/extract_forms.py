@@ -15,7 +15,10 @@ from queue import Queue
 from threading import Thread, Lock, Event
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
-from config import SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client
+from config import (
+    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
+    SCHEMA_RAW, SCHEMA_PIPELINE
+)
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -184,7 +187,7 @@ class FormsExtractor:
             for record in batch
         ]
 
-        self.client.table(table_name).insert(rows).execute()
+        self.client.schema(SCHEMA_RAW).table(table_name).insert(rows).execute()
 
         with self.load_lock:
             self.total_loaded += len(batch)
@@ -228,7 +231,7 @@ class FormsExtractor:
 
     def start_pipeline_run(self):
         """Record pipeline run start"""
-        self.client.table("pipeline_runs").insert({
+        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
             "run_id": str(self.run_id),
             "pipeline_name": "forms_extract",
             "status": "running",
@@ -247,7 +250,7 @@ class FormsExtractor:
         if error:
             update_data["error_message"] = error
 
-        self.client.table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
+        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
         print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
 
 

@@ -4,7 +4,9 @@ Transform raw JSONB data into staging tables
 """
 
 from datetime import datetime
-from config import get_supabase_client
+from config import (
+    get_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE
+)
 
 
 def transform_organizations(client, run_id: str):
@@ -12,14 +14,14 @@ def transform_organizations(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming organizations...")
 
     # Fetch raw data
-    result = client.table("raw_organizations").select("*").eq("run_id", run_id).execute()
+    result = client.schema(SCHEMA_RAW).table("raw_organizations").select("*").eq("run_id", run_id).execute()
 
     if not result.data:
         print(f"[{datetime.now():%H:%M:%S}] No organizations to transform")
         return 0
 
     # Clear existing staging data for this run
-    client.table("stg_organizations").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_organizations").delete().eq("run_id", run_id).execute()
 
     rows = []
     for record in result.data:
@@ -44,7 +46,7 @@ def transform_organizations(client, run_id: str):
     batch_size = 500
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
-        client.table("stg_organizations").upsert(batch, on_conflict="org_did").execute()
+        client.schema(SCHEMA_STAGING).table("stg_organizations").upsert(batch, on_conflict="org_did").execute()
 
     print(f"[{datetime.now():%H:%M:%S}] Transformed {len(rows)} organizations")
     return len(rows)
@@ -55,7 +57,7 @@ def transform_projects(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming projects...")
 
     # Clear existing staging data for this run
-    client.table("stg_projects").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_projects").delete().eq("run_id", run_id).execute()
 
     # Fetch raw data in batches
     batch_size = 1000
@@ -63,7 +65,7 @@ def transform_projects(client, run_id: str):
     total_transformed = 0
 
     while True:
-        result = client.table("raw_projects").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+        result = client.schema(SCHEMA_RAW).table("raw_projects").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
 
         if not result.data:
             break
@@ -106,7 +108,7 @@ def transform_projects(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.table("stg_projects").upsert(rows, on_conflict="project_did").execute()
+        client.schema(SCHEMA_STAGING).table("stg_projects").upsert(rows, on_conflict="project_did").execute()
         total_transformed += len(rows)
 
         print(f"[{datetime.now():%H:%M:%S}] Transformed {total_transformed:,} projects...")
@@ -124,7 +126,7 @@ def transform_user_priorities(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming user priorities...")
 
     # Clear existing staging data for this run
-    client.table("stg_user_priorities").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_user_priorities").delete().eq("run_id", run_id).execute()
 
     # Fetch raw data in batches (large table)
     batch_size = 1000
@@ -132,7 +134,7 @@ def transform_user_priorities(client, run_id: str):
     total_transformed = 0
 
     while True:
-        result = client.table("raw_user_priorities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+        result = client.schema(SCHEMA_RAW).table("raw_user_priorities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
 
         if not result.data:
             break
@@ -185,7 +187,7 @@ def transform_user_priorities(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.table("stg_user_priorities").insert(rows).execute()
+        client.schema(SCHEMA_STAGING).table("stg_user_priorities").insert(rows).execute()
         total_transformed += len(rows)
 
         print(f"[{datetime.now():%H:%M:%S}] Transformed {total_transformed:,} user priorities...")
@@ -210,7 +212,7 @@ def run_transform(run_id: str = None):
 
     # Get latest run_id if not specified
     if not run_id:
-        result = client.table("pipeline_runs").select("run_id").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").order("started_at", desc=True).limit(1).execute()
         if result.data:
             run_id = result.data[0]["run_id"]
             print(f"Using latest run_id: {run_id}")
@@ -242,7 +244,7 @@ def run_asset_tasks_transform(run_id: str = None):
 
     # Get latest asset_tasks_extract run_id if not specified
     if not run_id:
-        result = client.table("pipeline_runs").select("run_id").eq("pipeline_name", "asset_tasks_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("pipeline_name", "asset_tasks_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
         if result.data:
             run_id = result.data[0]["run_id"]
             print(f"Using latest asset_tasks run_id: {run_id}")
@@ -263,7 +265,7 @@ def transform_asset_tasks(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks...")
 
     # Clear existing staging data for this run
-    client.table("stg_asset_tasks").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_asset_tasks").delete().eq("run_id", run_id).execute()
 
     # Fetch raw data in batches (large table)
     batch_size = 1000
@@ -271,7 +273,7 @@ def transform_asset_tasks(client, run_id: str):
     total_transformed = 0
 
     while True:
-        result = client.table("raw_asset_tasks").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+        result = client.schema(SCHEMA_RAW).table("raw_asset_tasks").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
 
         if not result.data:
             break
@@ -332,7 +334,7 @@ def transform_asset_tasks(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.table("stg_asset_tasks").insert(rows).execute()
+        client.schema(SCHEMA_STAGING).table("stg_asset_tasks").insert(rows).execute()
         total_transformed += len(rows)
 
         if total_transformed % 10000 == 0:
@@ -372,7 +374,7 @@ def transform_qa_forms(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming QA forms...")
 
     # Clear existing staging data for this run
-    client.table("stg_qa_form").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_qa_form").delete().eq("run_id", run_id).execute()
 
     total_transformed = 0
     batch_size = 1000
@@ -388,7 +390,7 @@ def transform_qa_forms(client, run_id: str):
         form_count = 0
 
         while True:
-            result = client.table(table_name).select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+            result = client.schema(SCHEMA_RAW).table(table_name).select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
 
             if not result.data:
                 break
@@ -520,7 +522,7 @@ def transform_qa_forms(client, run_id: str):
                 })
 
             if rows:
-                client.table("stg_qa_form").insert(rows).execute()
+                client.schema(SCHEMA_STAGING).table("stg_qa_form").insert(rows).execute()
                 form_count += len(rows)
                 total_transformed += len(rows)
 
@@ -546,7 +548,7 @@ def run_qa_forms_transform(run_id: str = None):
 
     # Get latest forms_extract run_id if not specified
     if not run_id:
-        result = client.table("pipeline_runs").select("run_id").eq("pipeline_name", "forms_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("pipeline_name", "forms_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
         if result.data:
             run_id = result.data[0]["run_id"]
             print(f"Using latest forms run_id: {run_id}")
@@ -567,7 +569,7 @@ def transform_timer_activities(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Transforming timer activities...")
 
     # Get run metadata
-    raw_result = client.table("raw_timer_activities").select("run_date, start_date, end_date").eq("run_id", run_id).limit(1).execute()
+    raw_result = client.schema(SCHEMA_RAW).table("raw_timer_activities").select("run_date, start_date, end_date").eq("run_id", run_id).limit(1).execute()
     if not raw_result.data:
         print(f"[{datetime.now():%H:%M:%S}] No timer data found for run_id: {run_id}")
         return 0
@@ -579,14 +581,14 @@ def transform_timer_activities(client, run_id: str):
     print(f"[{datetime.now():%H:%M:%S}] Run date: {run_date}, Date range: {start_date} to {end_date}")
 
     # Delete existing staging data for this run_id (to allow re-runs)
-    client.table("stg_timer_activities").delete().eq("run_id", run_id).execute()
+    client.schema(SCHEMA_STAGING).table("stg_timer_activities").delete().eq("run_id", run_id).execute()
 
     total_transformed = 0
     batch_size = 1000
     offset = 0
 
     while True:
-        result = client.table("raw_timer_activities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+        result = client.schema(SCHEMA_RAW).table("raw_timer_activities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
 
         if not result.data:
             break
@@ -631,7 +633,7 @@ def transform_timer_activities(client, run_id: str):
             })
 
         if rows:
-            client.table("stg_timer_activities").insert(rows).execute()
+            client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(rows).execute()
             total_transformed += len(rows)
 
         offset += batch_size
@@ -654,7 +656,7 @@ def run_timer_transform(run_id: str = None):
 
     # Get latest timer_extract run_id if not specified
     if not run_id:
-        result = client.table("pipeline_runs").select("run_id").eq("pipeline_name", "timer_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("pipeline_name", "timer_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
         if result.data:
             run_id = result.data[0]["run_id"]
             print(f"Using latest timer run_id: {run_id}")

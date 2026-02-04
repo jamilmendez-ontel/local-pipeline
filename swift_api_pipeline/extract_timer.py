@@ -15,7 +15,10 @@ from threading import Thread, Lock, Event
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from typing import List, Dict, Optional, Tuple
-from config import SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client
+from config import (
+    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
+    SCHEMA_RAW, SCHEMA_REFERENCE, SCHEMA_PIPELINE
+)
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -91,7 +94,7 @@ class TimerExtractor:
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
-        result = self.client.table("ref_ontel_techops_projects").select(
+        result = self.client.schema(SCHEMA_REFERENCE).table("ref_ontel_techops_projects").select(
             "project_did, project_name, project_number"
         ).gte("project_number", min_project_number).order("project_number").execute()
 
@@ -206,7 +209,7 @@ class TimerExtractor:
             for record in batch
         ]
 
-        self.client.table("raw_timer_activities").insert(rows).execute()
+        self.client.schema(SCHEMA_RAW).table("raw_timer_activities").insert(rows).execute()
 
         with self.load_lock:
             self.total_loaded += len(batch)
@@ -252,7 +255,7 @@ class TimerExtractor:
 
     def start_pipeline_run(self, start_date: str, end_date: str):
         """Record pipeline run start"""
-        self.client.table("pipeline_runs").insert({
+        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
             "run_id": str(self.run_id),
             "pipeline_name": "timer_extract",
             "status": "running",
@@ -276,7 +279,7 @@ class TimerExtractor:
         if error:
             update_data["error_message"] = error
 
-        self.client.table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
+        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
         print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
 
 
