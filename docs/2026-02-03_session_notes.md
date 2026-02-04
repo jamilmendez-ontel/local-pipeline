@@ -1,7 +1,7 @@
-# Session Notes - February 3, 2026
+# Session Notes - February 3-4, 2026
 
 ## Overview
-Extended the Swift API data pipeline with two new datasets: QA Forms and Timer Activities.
+Extended the Swift API data pipeline with two new datasets (QA Forms and Timer Activities) and reorganized tables into PostgreSQL schemas.
 
 ---
 
@@ -118,23 +118,91 @@ python transform.py timer [run_id]
 
 ---
 
-## 3. Data Model
+## 3. Schema Reorganization
+
+### What was built
+- **Migration**: `008_create_schemas_v2.sql`
+- **Config update**: Added schema constants to `config.py`
+- **Updated all Python files** to use schema-qualified table names
+
+### Schema Structure
+```
+data_raw          (raw JSONB tables)
+├── raw_organizations
+├── raw_projects
+├── raw_asset_tasks
+├── raw_user_priorities
+├── raw_form_qa_ts13
+├── raw_form_qa_ts14
+├── raw_form_qa_ts15
+├── raw_form_qa_ts16
+├── raw_form_qa_ts17
+├── raw_form_qa_ts18
+└── raw_timer_activities
+
+data_staging      (transformed tables)
+├── stg_organizations
+├── stg_projects
+├── stg_asset_tasks
+├── stg_user_priorities
+├── stg_qa_form
+└── stg_timer_activities
+
+reference         (lookup tables)
+└── ref_ontel_techops_projects
+
+pipeline          (tracking tables)
+└── pipeline_runs
+```
+
+### Schema Constants (config.py)
+```python
+SCHEMA_RAW = "data_raw"
+SCHEMA_STAGING = "data_staging"
+SCHEMA_REFERENCE = "reference"
+SCHEMA_PIPELINE = "pipeline"
+```
+
+### Usage in Python
+```python
+# Before (public schema)
+client.table("raw_asset_tasks").insert(rows).execute()
+
+# After (schema-qualified)
+client.schema(SCHEMA_RAW).table("raw_asset_tasks").insert(rows).execute()
+```
+
+### Why data_raw/data_staging instead of raw/staging?
+The `raw` and `staging` schemas already existed and were owned by `supabase_admin`, not `postgres`. To avoid permission issues, we created new schemas (`data_raw`, `data_staging`) that `postgres` can own and manage.
+
+### Migration Notes
+Run `008_create_schemas_v2.sql` in Supabase SQL editor to:
+1. Create `data_raw` and `data_staging` schemas
+2. Move all raw_* tables to `data_raw`
+3. Move all stg_* tables to `data_staging`
+4. Grant appropriate permissions to anon, authenticated, service_role
+
+---
+
+## 4. Data Model
 
 ```
-stg_organizations (300 rows)
-    └── stg_projects (1,108 rows) [org_did]
-            ├── stg_asset_tasks (2,202,035 rows) [project_did]
-            ├── stg_qa_form (343,120 rows) [project_number]
-            └── stg_timer_activities (11,683 rows) [project_did, FK]
+data_staging.stg_organizations (300 rows)
+    └── data_staging.stg_projects (1,108 rows) [org_did]
+            ├── data_staging.stg_asset_tasks (2,202,035 rows) [project_did]
+            ├── data_staging.stg_qa_form (343,120 rows) [project_number]
+            └── data_staging.stg_timer_activities (11,683 rows) [project_did, FK]
 ```
 
 ### Total Records: 2,558,246
 
 ---
 
-## 4. Git Commits
+## 5. Git Commits
 
 ```
+4c8d5c0 Reorganize tables into schemas (data_raw, data_staging, reference, pipeline)
+ca847c4 Add session documentation for Feb 3, 2026
 b0e0345 Add Timer Activities pipeline for TS13-TS18
 8fc733c Add QA Forms pipeline for TS13-TS18
 614049b Update Claude local settings
@@ -145,7 +213,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 5. Files Created/Modified
+## 6. Files Created/Modified
 
 ### New Files
 - `swift_api_pipeline/extract_forms.py`
@@ -155,13 +223,19 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 - `swift_api_pipeline/migrations/005_forms_ts18.sql`
 - `swift_api_pipeline/migrations/006_stg_qa_form_all_columns.sql`
 - `swift_api_pipeline/migrations/007_timer_tables.sql`
+- `swift_api_pipeline/migrations/008_create_schemas_v2.sql`
 
 ### Modified Files
-- `swift_api_pipeline/transform.py` - Added QA forms and timer transform functions
+- `swift_api_pipeline/config.py` - Added schema constants
+- `swift_api_pipeline/extract_asset_tasks.py` - Schema-qualified table names
+- `swift_api_pipeline/extract_forms.py` - Schema-qualified table names
+- `swift_api_pipeline/extract_timer.py` - Schema-qualified table names
+- `swift_api_pipeline/load.py` - Schema-qualified table names
+- `swift_api_pipeline/transform.py` - Added QA forms/timer transforms + schema-qualified table names
 
 ---
 
-## 6. Known Issues / TODO
+## 7. Known Issues / TODO
 
 1. **TS18 Timer January Data Incomplete**: Extraction stopped at ~10,000 rows due to API 500 errors. Can retry later.
 
@@ -172,9 +246,11 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
    - Add to `QA_FORMS` config in `extract_forms.py` and `transform.py`
    - Create migration for new `raw_form_qa_tsXX` table
 
+4. **Run Schema Migration**: Need to run `008_create_schemas_v2.sql` in Supabase SQL editor to move tables to new schemas.
+
 ---
 
-## 7. Quick Reference Commands
+## 8. Quick Reference Commands
 
 ```bash
 # Activate virtual environment
@@ -191,13 +267,17 @@ python transform.py asset_tasks [run_id]
 python transform.py qa_forms [run_id]
 python transform.py timer [run_id]
 
-# Check data in Supabase
-docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "SELECT COUNT(*) FROM stg_qa_form;"
+# Check data in Supabase (after schema migration)
+docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "SELECT COUNT(*) FROM data_staging.stg_qa_form;"
+
+# List tables in each schema
+docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt data_raw.*"
+docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt data_staging.*"
 ```
 
 ---
 
-## 8. Environment
+## 9. Environment
 
 - **Local Supabase**: Docker container `supabase_db_supabase-local`
 - **Python**: 3.x with venv in `swift_api_pipeline/venv`
