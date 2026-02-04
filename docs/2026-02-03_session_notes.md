@@ -222,7 +222,65 @@ def epoch_to_datetime(epoch_ms: int) -> str:
 
 ---
 
-## 5. Data Dictionary for AI Agent
+## 5. CSV Parsing Fix for QA Forms
+
+### Problem
+The Swift API returns CSV headers only on the **first page** of paginated responses. Subsequent pages have no header row, causing `csv.DictReader` to use the first data row as headers, corrupting all following records.
+
+### Impact
+- ~2,000 records per form: correct (first page only)
+- ~50,000-67,000 records per form: corrupted (pages 2+)
+- **97% of QA form data was corrupted** with swapped keys/values
+
+### Example of Corrupted Record
+```json
+// Bad - values used as keys!
+{"TECH-OPS: TS12": "TECH-OPS: TS11", "pending": "pending", ...}
+
+// Good - proper structure
+{"Project": "TECH-OPS: TS12", "Requirement Status": "pending", ...}
+```
+
+### Fix
+Save CSV fieldnames from the first page and reuse them for subsequent pages:
+
+```python
+csv_fieldnames = None  # Store headers from first page
+
+# First page - let DictReader detect headers
+if csv_fieldnames is None:
+    reader = csv.DictReader(io.StringIO(resp.text))
+    rows = list(reader)
+    csv_fieldnames = reader.fieldnames
+else:
+    # Subsequent pages - use saved fieldnames
+    reader = csv.DictReader(io.StringIO(resp.text), fieldnames=csv_fieldnames)
+    rows = list(reader)
+```
+
+### Results After Fix
+| Project | Total | Has Project | Has Crew Lead | Has AAT |
+|---------|-------|-------------|---------------|---------|
+| TS13 | 49,792 | 49,792 (100%) | 3,914 | 6,929 |
+| TS14 | 51,864 | 51,864 (100%) | 3,648 | 6,054 |
+| TS15 | 52,059 | 52,059 (100%) | 3,969 | 7,464 |
+| TS16 | 57,490 | 57,490 (100%) | 2,586 | 6,496 |
+| TS17 | 65,415 | 65,415 (100%) | 2,099 | 7,221 |
+| TS18 | 47,914 | 47,914 (100%) | 1,331 | 4,692 |
+
+**Note**: Sparse fields (crew_lead, AAT, etc.) are naturally sparse - not all QA reviews fill all fields.
+
+### Additional Fix: PostgREST Schema Exposure
+The new schemas needed to be exposed to PostgREST:
+```sql
+ALTER ROLE authenticator SET pgrst.db_schemas TO
+    'public, graphql_public, data_raw, data_staging, reference, pipeline';
+NOTIFY pgrst, 'reload config';
+```
+
+---
+
+## 6. Data Dictionary for AI Agent
 
 Created `docs/data_dictionary.md` to support integration with a Data Analyst AI Agent project.
 
@@ -243,23 +301,25 @@ Allows an AI Agent to understand the data structure and write accurate SQL queri
 
 ---
 
-## 6. Data Model
+## 7. Data Model
 
 ```
 data_staging.stg_organizations (300 rows)
     └── data_staging.stg_projects (1,108 rows) [org_did]
             ├── data_staging.stg_asset_tasks (2,202,035 rows) [project_did]
-            ├── data_staging.stg_qa_form (343,120 rows) [project_number]
+            ├── data_staging.stg_qa_form (344,094 rows) [project_number]
             └── data_staging.stg_timer_activities (11,683 rows) [project_did, FK]
 ```
 
-### Total Records: 2,558,246
+### Total Records: 2,559,220
 
 ---
 
-## 7. Git Commits
+## 8. Git Commits
 
 ```
+c4bba19 Fix CSV parsing for paginated form responses
+9b5a1e7 Update session notes with data dictionary section
 3085687 Add data dictionary for AI Agent integration
 71447f6 Update docs with timezone standardization details
 d5b6ce9 Fix timezone handling - use America/New_York consistently
@@ -276,7 +336,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 8. Files Created/Modified
+## 9. Files Created/Modified
 
 ### New Files
 - `swift_api_pipeline/extract_forms.py`
@@ -292,14 +352,14 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 ### Modified Files
 - `swift_api_pipeline/config.py` - Added schema constants
 - `swift_api_pipeline/extract_asset_tasks.py` - Schema-qualified table names
-- `swift_api_pipeline/extract_forms.py` - Schema-qualified table names
+- `swift_api_pipeline/extract_forms.py` - Schema-qualified table names, CSV pagination fix
 - `swift_api_pipeline/extract_timer.py` - Schema-qualified table names
 - `swift_api_pipeline/load.py` - Schema-qualified table names
 - `swift_api_pipeline/transform.py` - Added QA forms/timer transforms, schema-qualified table names, timezone fix
 
 ---
 
-## 9. Known Issues / TODO
+## 10. Known Issues / TODO
 
 1. **TS18 Timer January Data Incomplete**: Extraction stopped at ~10,000 rows due to API 500 errors. Can retry later.
 
@@ -314,7 +374,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 10. Quick Reference Commands
+## 11. Quick Reference Commands
 
 ```bash
 # Activate virtual environment
@@ -341,7 +401,7 @@ docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt d
 
 ---
 
-## 11. Environment
+## 12. Environment
 
 - **Local Supabase**: Docker container `supabase_db_supabase-local`
 - **Python**: 3.x with venv in `swift_api_pipeline/venv`
