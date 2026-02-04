@@ -1,7 +1,7 @@
 # Session Notes - February 3-4, 2026
 
 ## Overview
-Extended the Swift API data pipeline with two new datasets (QA Forms and Timer Activities) and reorganized tables into PostgreSQL schemas.
+Extended the Swift API data pipeline with two new datasets (QA Forms and Timer Activities), reorganized tables into PostgreSQL schemas, and standardized timezone handling.
 
 ---
 
@@ -184,7 +184,45 @@ Run `008_create_schemas_v2.sql` in Supabase SQL editor to:
 
 ---
 
-## 4. Data Model
+## 4. Timezone Standardization
+
+### Problem
+Date conversions in `transform.py` were using `datetime.fromtimestamp()` without specifying a timezone, which meant dates would be converted using the local system timezone. If the pipeline ran on a system not in America/New_York, dates could be off by hours (potentially shifting to the wrong day).
+
+### Solution
+All datetime conversions now explicitly use America/New_York timezone:
+
+```python
+from zoneinfo import ZoneInfo
+
+TZ_ET = ZoneInfo("America/New_York")
+
+def epoch_to_datetime(epoch_ms: int) -> str:
+    """Convert epoch milliseconds to ISO datetime string in America/New_York timezone"""
+    if not epoch_ms:
+        return None
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=TZ_ET).isoformat()
+```
+
+### What was updated
+| Transform | Change |
+|-----------|--------|
+| Organizations | `epoch_to_datetime()` for date_created, last_updated |
+| Projects | `epoch_to_datetime()` for date_created, last_updated, metrics_last_updated |
+| User Priorities | `parse_date()` converts UTC to ET with `astimezone(TZ_ET)` |
+| Asset Tasks | `parse_date()` uses `tz=TZ_ET` for epoch conversions |
+
+### Timezone Summary
+| Component | Timezone |
+|-----------|----------|
+| API Requests | America/New_York (requested via `tz` param) |
+| Raw Data | America/New_York (as received from API) |
+| Staging Data | America/New_York (explicitly converted) |
+| Pipeline Metadata | UTC (started_at, completed_at) |
+
+---
+
+## 5. Data Model
 
 ```
 data_staging.stg_organizations (300 rows)
@@ -198,9 +236,11 @@ data_staging.stg_organizations (300 rows)
 
 ---
 
-## 5. Git Commits
+## 6. Git Commits
 
 ```
+d5b6ce9 Fix timezone handling - use America/New_York consistently
+1295695 Update session docs with schema reorganization details
 4c8d5c0 Reorganize tables into schemas (data_raw, data_staging, reference, pipeline)
 ca847c4 Add session documentation for Feb 3, 2026
 b0e0345 Add Timer Activities pipeline for TS13-TS18
@@ -213,7 +253,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 6. Files Created/Modified
+## 7. Files Created/Modified
 
 ### New Files
 - `swift_api_pipeline/extract_forms.py`
@@ -231,11 +271,11 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 - `swift_api_pipeline/extract_forms.py` - Schema-qualified table names
 - `swift_api_pipeline/extract_timer.py` - Schema-qualified table names
 - `swift_api_pipeline/load.py` - Schema-qualified table names
-- `swift_api_pipeline/transform.py` - Added QA forms/timer transforms + schema-qualified table names
+- `swift_api_pipeline/transform.py` - Added QA forms/timer transforms, schema-qualified table names, timezone fix
 
 ---
 
-## 7. Known Issues / TODO
+## 8. Known Issues / TODO
 
 1. **TS18 Timer January Data Incomplete**: Extraction stopped at ~10,000 rows due to API 500 errors. Can retry later.
 
@@ -246,11 +286,11 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
    - Add to `QA_FORMS` config in `extract_forms.py` and `transform.py`
    - Create migration for new `raw_form_qa_tsXX` table
 
-4. **Run Schema Migration**: Need to run `008_create_schemas_v2.sql` in Supabase SQL editor to move tables to new schemas.
+4. ~~**Run Schema Migration**~~: ✅ Completed - tables moved to new schemas.
 
 ---
 
-## 8. Quick Reference Commands
+## 9. Quick Reference Commands
 
 ```bash
 # Activate virtual environment
@@ -277,7 +317,7 @@ docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt d
 
 ---
 
-## 9. Environment
+## 10. Environment
 
 - **Local Supabase**: Docker container `supabase_db_supabase-local`
 - **Python**: 3.x with venv in `swift_api_pipeline/venv`
