@@ -163,7 +163,7 @@ LIMIT 10;
 | conditional_pass | text | Conditional pass notes |
 | ... | text | (81 total columns for all QA fields) |
 
-**Row Count**: ~343,000 QA responses
+**Row Count**: ~344,000 QA responses
 
 **Example Queries**:
 ```sql
