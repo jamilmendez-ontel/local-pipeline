@@ -4,6 +4,7 @@ Transform raw JSONB data into staging tables
 All timestamps are converted to America/New_York timezone for consistency
 """
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from config import (
@@ -12,6 +13,20 @@ from config import (
 
 # Timezone for all date conversions
 TZ_ET = ZoneInfo("America/New_York")
+
+# Regex patterns for cleaning task names
+# Removes leading sequence numbers (e.g., "1. ", "10. ") and trailing revision numbers (e.g., " 2", " 3")
+TASK_NAME_PREFIX_PATTERN = re.compile(r'^\d+\.\s*')
+TASK_NAME_SUFFIX_PATTERN = re.compile(r'\s+\d+$')
+
+
+def clean_task_name(task_name: str) -> str:
+    """Remove sequence prefix and revision suffix from task name"""
+    if not task_name:
+        return None
+    cleaned = TASK_NAME_PREFIX_PATTERN.sub('', task_name)
+    cleaned = TASK_NAME_SUFFIX_PATTERN.sub('', cleaned)
+    return cleaned.strip()
 
 
 def epoch_to_datetime(epoch_ms: int) -> str:
@@ -165,13 +180,15 @@ def transform_user_priorities(client, run_id: str):
                 except:
                     return None
 
+            task_name = data.get("Task Name")
             rows.append({
                 "task_did": data.get("Task DID"),
                 "asset_did": data.get("Asset DID"),
                 "org_did": data.get("Organization DID"),
                 "project_did": data.get("Project DID"),
                 # Task info
-                "task_name": data.get("Task Name"),
+                "task_name": task_name,
+                "task_name_clean": clean_task_name(task_name),
                 "milestone": data.get("Milestone"),
                 "status": data.get("Status"),
                 "calendar_status": data.get("Calendar Status"),
@@ -273,6 +290,123 @@ def run_asset_tasks_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
+def transform_assets(client, run_id: str):
+    """Transform raw_asset_tasks to stg_assets by extracting unique assets"""
+    print(f"[{datetime.now():%H:%M:%S}] Transforming assets...")
+
+    # Clear existing staging data for this run
+    client.schema(SCHEMA_STAGING).table("stg_assets").delete().eq("run_id", run_id).execute()
+
+    # We'll aggregate asset data from raw_asset_tasks
+    # Use SQL to do the heavy lifting efficiently
+    # First, get the raw data and aggregate in Python (could also use RPC/SQL)
+
+    batch_size = 1000
+    offset = 0
+    assets_map = {}  # (project_did, asset_did) -> asset_data
+
+    print(f"[{datetime.now():%H:%M:%S}] Scanning raw_asset_tasks for unique assets...")
+
+    while True:
+        result = client.schema(SCHEMA_RAW).table("raw_asset_tasks").select("project_did, data").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        for record in result.data:
+            data = record["data"]
+            project_did = record["project_did"]
+            asset_did = data.get("Asset_DID")
+
+            if not asset_did:
+                continue
+
+            key = (project_did, asset_did)
+
+            if key not in assets_map:
+                assets_map[key] = {
+                    "project_did": project_did,
+                    "asset_did": asset_did,
+                    "asset_id": data.get("Asset_ID"),
+                    "asset_name": data.get("Asset_Name"),
+                    "requirement_count": data.get("Asset_Requirement_Count"),
+                    "task_count": 0,
+                    "tasks_pending": 0,
+                    "tasks_in_progress": 0,
+                    "tasks_submitted": 0,
+                    "tasks_approved": 0,
+                    "tasks_rejected": 0,
+                    "tasks_cancelled": 0,
+                }
+
+            # Count task statuses
+            assets_map[key]["task_count"] += 1
+            status = data.get("Task_Status", "").lower()
+            if status == "pending":
+                assets_map[key]["tasks_pending"] += 1
+            elif status == "in_progress":
+                assets_map[key]["tasks_in_progress"] += 1
+            elif status == "submitted":
+                assets_map[key]["tasks_submitted"] += 1
+            elif status == "approved":
+                assets_map[key]["tasks_approved"] += 1
+            elif status == "rejected":
+                assets_map[key]["tasks_rejected"] += 1
+            elif status == "cancelled":
+                assets_map[key]["tasks_cancelled"] += 1
+
+        offset += batch_size
+
+        if offset % 100000 == 0:
+            print(f"[{datetime.now():%H:%M:%S}] Scanned {offset:,} records, found {len(assets_map):,} unique assets...")
+
+        if len(result.data) < batch_size:
+            break
+
+    print(f"[{datetime.now():%H:%M:%S}] Found {len(assets_map):,} unique assets")
+
+    # Insert assets in batches
+    assets_list = list(assets_map.values())
+    insert_batch_size = 500
+
+    for i in range(0, len(assets_list), insert_batch_size):
+        batch = assets_list[i:i + insert_batch_size]
+        rows = [{**asset, "run_id": run_id} for asset in batch]
+        client.schema(SCHEMA_STAGING).table("stg_assets").upsert(
+            rows, on_conflict="project_did,asset_did"
+        ).execute()
+
+    print(f"[{datetime.now():%H:%M:%S}] Inserted {len(assets_list):,} assets")
+    return len(assets_list)
+
+
+def run_assets_transform(run_id: str = None):
+    """Run assets transformation only"""
+    print(f"\n{'='*60}")
+    print(f"Assets Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    client = get_supabase_client()
+
+    # Get latest asset_tasks_extract run_id if not specified
+    if not run_id:
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("pipeline_name", "asset_tasks_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest asset_tasks run_id: {run_id}")
+        else:
+            print("No successful asset_tasks pipeline runs found")
+            return
+
+    asset_count = transform_assets(client, run_id)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  Assets: {asset_count:,}")
+    print(f"{'='*60}\n")
+
+
 def transform_asset_tasks(client, run_id: str):
     """Transform raw_asset_tasks to stg_asset_tasks"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks...")
@@ -310,6 +444,7 @@ def transform_asset_tasks(client, run_id: str):
                         return None
                 return val  # Already in yyyy-MM-dd format from API (requested in ET)
 
+            task_name = data.get("Task_Name")
             rows.append({
                 # DID fields
                 "project_did": project_did,
@@ -321,7 +456,8 @@ def transform_asset_tasks(client, run_id: str):
                 "asset_name": data.get("Asset_Name"),
                 "asset_requirement_count": data.get("Asset_Requirement_Count"),
                 # Task info
-                "task_name": data.get("Task_Name"),
+                "task_name": task_name,
+                "task_name_clean": clean_task_name(task_name),
                 "task_status": data.get("Task_Status"),
                 "task_scheduled": parse_date(data.get("Task_Scheduled")),
                 # Assignment
@@ -423,6 +559,7 @@ def transform_qa_forms(client, run_id: str):
                             return v
                     return data.get(keys[0])
 
+                task = data.get("Task")
                 rows.append({
                     # Source tracking
                     "form_name": form_name,
@@ -432,7 +569,8 @@ def transform_qa_forms(client, run_id: str):
                     "project_number": project_number,
                     "site_name": data.get("Site Name"),
                     "site_id": data.get("Site ID"),
-                    "task": data.get("Task"),
+                    "task": task,
+                    "task_clean": clean_task_name(task),
                     "requirement": data.get("Requirement"),
                     "requirement_status": data.get("Requirement Status"),
                     # QA fields
@@ -579,7 +717,7 @@ def run_qa_forms_transform(run_id: str = None):
 
 
 def transform_timer_activities(client, run_id: str):
-    """Transform raw_timer_activities to stg_timer_activities"""
+    """Transform raw_timer_activities to stg_timer_activities (append mode - preserves all runs)"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming timer activities...")
 
     # Get run metadata
@@ -594,7 +732,8 @@ def transform_timer_activities(client, run_id: str):
 
     print(f"[{datetime.now():%H:%M:%S}] Run date: {run_date}, Date range: {start_date} to {end_date}")
 
-    # Delete existing staging data for this run_id (to allow re-runs)
+    # Delete existing staging data for this run_id only (allows re-runs without duplicates)
+    # Data from other run_ids is preserved (append mode)
     client.schema(SCHEMA_STAGING).table("stg_timer_activities").delete().eq("run_id", run_id).execute()
 
     total_transformed = 0
@@ -617,6 +756,7 @@ def transform_timer_activities(client, run_id: str):
             start_time = data.get("Start Time")
             end_time = data.get("End Time")
 
+            task = data.get("Task")
             rows.append({
                 # Project info
                 "project": project,
@@ -625,7 +765,8 @@ def transform_timer_activities(client, run_id: str):
                 # Site info
                 "site_name": data.get("Site Name"),
                 "site_id": data.get("Site ID"),
-                "task": data.get("Task"),
+                "task": task,
+                "task_clean": clean_task_name(task),
                 # Location data
                 "site_lat": data.get("Site Lat"),
                 "site_long": data.get("Site Long"),
@@ -641,9 +782,11 @@ def transform_timer_activities(client, run_id: str):
                 "user_name": data.get("User Name"),
                 "user_email": data.get("User Email"),
                 "user_role": data.get("User Role"),
-                # Metadata
+                # Metadata (matching raw table structure)
                 "run_id": run_id,
-                "run_date": run_date
+                "run_date": run_date,
+                "start_date": start_date,
+                "end_date": end_date
             })
 
         if rows:
@@ -686,10 +829,131 @@ def run_timer_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
+def transform_requirements(client, run_id: str):
+    """Transform raw_asset_task_requirements to stg_asset_task_requirements"""
+    print(f"[{datetime.now():%H:%M:%S}] Transforming requirements...")
+
+    # Clear existing staging data for this run
+    client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").delete().eq("run_id", run_id).execute()
+
+    total_transformed = 0
+    batch_size = 1000
+    offset = 0
+
+    while True:
+        result = client.schema(SCHEMA_RAW).table("raw_asset_task_requirements").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        rows = []
+        for record in result.data:
+            data = record["data"]
+            project_did = record["project_did"]
+            task_did = record["task_did"]
+
+            # Extract nested objects safely
+            assigned_to = data.get("assignedTo") or {}
+            completed_by = data.get("completedBy") or {}
+            submitted_by = data.get("submittedBy") or {}
+            approved_by = data.get("approvedBy") or {}
+            rejected_by = data.get("rejectedBy") or {}
+
+            rows.append({
+                # Hierarchy identifiers
+                "project_did": project_did,
+                "asset_did": data.get("_asset_did"),
+                "task_did": task_did,
+                "requirement_did": data.get("id") or data.get("_id"),
+                # Requirement info
+                "requirement_name": data.get("name"),
+                "requirement_type": data.get("type") or data.get("requirementType"),
+                "requirement_status": data.get("status"),
+                "requirement_description": data.get("description"),
+                # Media/attachments
+                "has_photo": data.get("hasPhoto"),
+                "has_document": data.get("hasDocument"),
+                "photo_count": data.get("photoCount"),
+                "document_count": data.get("documentCount"),
+                # Assignment
+                "assigned_to_did": assigned_to.get("id"),
+                "assigned_to_name": assigned_to.get("name"),
+                "assigned_to_email": assigned_to.get("email"),
+                # Completion
+                "completed_by_did": completed_by.get("id"),
+                "completed_by_name": completed_by.get("name"),
+                "completed_on": epoch_to_datetime(data.get("completedOn")),
+                # Submission
+                "submitted_on": epoch_to_datetime(data.get("submittedOn")),
+                "submitted_by_did": submitted_by.get("id"),
+                "submitted_by_name": submitted_by.get("name"),
+                # Approval
+                "approved_on": epoch_to_datetime(data.get("approvedOn")),
+                "approved_by_did": approved_by.get("id"),
+                "approved_by_name": approved_by.get("name"),
+                # Rejection
+                "rejected_on": epoch_to_datetime(data.get("rejectedOn")),
+                "rejected_by_did": rejected_by.get("id"),
+                "rejected_by_name": rejected_by.get("name"),
+                # Form data
+                "form_id": data.get("formId"),
+                "form_response_id": data.get("formResponseId"),
+                # Metadata
+                "date_created": epoch_to_datetime(data.get("dateCreated")),
+                "last_updated": epoch_to_datetime(data.get("lastUpdated")),
+                "run_id": run_id
+            })
+
+        if rows:
+            client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").insert(rows).execute()
+            total_transformed += len(rows)
+
+        if total_transformed % 10000 == 0 and total_transformed > 0:
+            print(f"[{datetime.now():%H:%M:%S}] Transformed {total_transformed:,} requirements...")
+
+        offset += batch_size
+
+        if len(result.data) < batch_size:
+            break
+
+    print(f"[{datetime.now():%H:%M:%S}] Total requirements transformed: {total_transformed:,}")
+    return total_transformed
+
+
+def run_requirements_transform(run_id: str = None):
+    """Run requirements transformation only"""
+    print(f"\n{'='*60}")
+    print(f"Requirements Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    client = get_supabase_client()
+
+    # Get latest requirements_extract run_id if not specified
+    if not run_id:
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("pipeline_name", "requirements_extract").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest requirements run_id: {run_id}")
+        else:
+            print("No successful requirements pipeline runs found")
+            return
+
+    req_count = transform_requirements(client, run_id)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  Requirements: {req_count:,}")
+    print(f"{'='*60}\n")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
-        if sys.argv[1] == "asset_tasks":
+        if sys.argv[1] == "assets":
+            run_id = sys.argv[2] if len(sys.argv) > 2 else None
+            run_assets_transform(run_id)
+        elif sys.argv[1] == "asset_tasks":
             run_id = sys.argv[2] if len(sys.argv) > 2 else None
             run_asset_tasks_transform(run_id)
         elif sys.argv[1] == "qa_forms":
@@ -698,8 +962,11 @@ if __name__ == "__main__":
         elif sys.argv[1] == "timer":
             run_id = sys.argv[2] if len(sys.argv) > 2 else None
             run_timer_transform(run_id)
+        elif sys.argv[1] == "requirements":
+            run_id = sys.argv[2] if len(sys.argv) > 2 else None
+            run_requirements_transform(run_id)
         else:
             print(f"Unknown transform type: {sys.argv[1]}")
-            print("Usage: python transform.py [asset_tasks|qa_forms|timer] [run_id]")
+            print("Usage: python transform.py [assets|asset_tasks|qa_forms|timer|requirements] [run_id]")
     else:
         run_transform()

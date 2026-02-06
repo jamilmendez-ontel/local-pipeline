@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from config import (
     SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_PIPELINE
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE
 )
 
 # Unbuffered output
@@ -246,6 +246,16 @@ class FormsExtractor:
                     self.load_batch(table_name, batch)
         print(f"[{datetime.now():%H:%M:%S}] Loader complete")
 
+    def clear_tables(self):
+        """Clear raw and staging tables before loading new data"""
+        print(f"[{datetime.now():%H:%M:%S}] Clearing existing data...")
+        # Clear staging first
+        self.client.schema(SCHEMA_STAGING).table("stg_qa_form").delete().neq("id", 0).execute()
+        # Clear raw tables for each form
+        for form_config in QA_FORMS.values():
+            self.client.schema(SCHEMA_RAW).table(form_config["table_name"]).delete().neq("id", 0).execute()
+        print(f"[{datetime.now():%H:%M:%S}] Tables cleared")
+
     def start_pipeline_run(self):
         """Record pipeline run start"""
         self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
@@ -288,6 +298,7 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
     try:
         extractor.start_pipeline_run()
         extractor.authenticate()
+        extractor.clear_tables()  # Clear old data before loading new
 
         print(f"[{datetime.now():%H:%M:%S}] Processing {len(forms)} forms\n")
 

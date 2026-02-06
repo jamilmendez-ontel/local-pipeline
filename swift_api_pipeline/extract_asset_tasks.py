@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional, Generator
 from config import (
     SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_REFERENCE, SCHEMA_PIPELINE
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, SCHEMA_PIPELINE
 )
 
 # Unbuffered output
@@ -203,6 +203,39 @@ class AssetTaskExtractor:
                     self.load_batch(project_did, batch)
         print(f"[{datetime.now():%H:%M:%S}] Loader complete")
 
+    def batch_delete_table(self, schema: str, table: str):
+        """Delete all rows from a table in batches to avoid memory issues"""
+        # Get ID range
+        min_result = self.client.schema(schema).table(table).select('id').order('id').limit(1).execute()
+        max_result = self.client.schema(schema).table(table).select('id').order('id', desc=True).limit(1).execute()
+
+        if not min_result.data or not max_result.data:
+            return  # Table is empty
+
+        min_id = min_result.data[0]['id']
+        max_id = max_result.data[0]['id']
+
+        batch_size = 50000
+        current_id = min_id
+
+        while current_id <= max_id:
+            end_id = current_id + batch_size
+            self.client.schema(schema).table(table).delete().gte('id', current_id).lt('id', end_id).execute()
+            current_id = end_id
+
+    def clear_tables(self):
+        """Clear raw and staging tables before loading new data"""
+        print(f"[{datetime.now():%H:%M:%S}] Clearing existing data...")
+        # Clear staging first (may have FK constraints)
+        print(f"[{datetime.now():%H:%M:%S}] Clearing stg_asset_tasks...")
+        self.batch_delete_table(SCHEMA_STAGING, "stg_asset_tasks")
+        print(f"[{datetime.now():%H:%M:%S}] Clearing stg_assets...")
+        self.batch_delete_table(SCHEMA_STAGING, "stg_assets")
+        # Clear raw table
+        print(f"[{datetime.now():%H:%M:%S}] Clearing raw_asset_tasks...")
+        self.batch_delete_table(SCHEMA_RAW, "raw_asset_tasks")
+        print(f"[{datetime.now():%H:%M:%S}] Tables cleared")
+
     def start_pipeline_run(self):
         """Record pipeline run start"""
         self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
@@ -242,6 +275,7 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
     try:
         extractor.start_pipeline_run()
         extractor.authenticate()
+        extractor.clear_tables()  # Clear old data before loading new
 
         # Get projects from reference table
         projects = extractor.get_project_dids(min_project_number)
