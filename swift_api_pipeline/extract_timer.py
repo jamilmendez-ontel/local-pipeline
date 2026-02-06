@@ -4,24 +4,21 @@ Extract Timer Activities data from Swift API
 Supports incremental loads with automatic date range calculation
 """
 
-import sys
-import uuid
 import requests
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
-from threading import Thread, Lock, Event
+from threading import Thread, Event
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_REFERENCE, SCHEMA_PIPELINE
+    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger
 )
+from base_extractor import BaseExtractor
 
-# Unbuffered output
-sys.stdout.reconfigure(line_buffering=True)
+logger = get_logger("timer")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
@@ -41,7 +38,9 @@ def calculate_date_range() -> Tuple[str, str]:
     Returns:
         Tuple of (start_date, end_date) in YYYY-MM-DD format
     """
-    today = datetime.now().date()
+    import zoneinfo
+    tz = zoneinfo.ZoneInfo(TIMEZONE)
+    today = datetime.now(tz).date()
 
     if today.day == 1:
         # Today is the 1st - use previous month
@@ -56,41 +55,11 @@ def calculate_date_range() -> Tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
-class TimerExtractor:
+class TimerExtractor(BaseExtractor):
     def __init__(self):
-        self.base_url = SWIFT_BASE_URL
-        self.token: Optional[str] = None
-        self.token_lock = Lock()
-        self.client = get_supabase_client()
-        self.run_id = uuid.uuid4()
-        self.run_date = datetime.now().date()
-        self.total_loaded = 0
-        self.load_lock = Lock()
-
-    def authenticate(self) -> str:
-        """Obtain authentication token (thread-safe)"""
-        with self.token_lock:
-            if self.token:
-                return self.token
-
-            url = f"{self.base_url}/api/auth/token"
-            payload = {
-                "grantType": "password",
-                "include": ["profile", "firebaseToken"],
-                "username": SWIFT_USERNAME,
-                "password": SWIFT_PASSWORD,
-                "scope": "openid"
-            }
-
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload
-            )
-            response.raise_for_status()
-            self.token = response.json()["idToken"]
-            print(f"[{datetime.now():%H:%M:%S}] Authenticated successfully")
-            return self.token
+        super().__init__(pipeline_name="timer_extract")
+        import zoneinfo
+        self.run_date = datetime.now(zoneinfo.ZoneInfo(TIMEZONE)).date()
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
@@ -118,14 +87,18 @@ class TimerExtractor:
         headers = {"Authorization": f"Bearer {self.token}"}
         url = f"{self.base_url}/api/timer-activities/_report"
 
-        # Convert dates to timestamps
-        from_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
-        to_ts = int(datetime.strptime(end_date + " 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+        # Convert dates to timestamps (timezone-aware)
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo(TIMEZONE)
+        from_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=tz)
+        to_dt = datetime.strptime(end_date + " 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
+        from_ts = int(from_dt.timestamp() * 1000)
+        to_ts = int(to_dt.timestamp() * 1000)
 
         page = 0
         total_rows = 0
 
-        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Starting extraction ({start_date} to {end_date})...")
+        logger.info(f"[TS{project_number}] Starting extraction ({start_date} to {end_date})...")
 
         while True:
             params = {
@@ -150,7 +123,7 @@ class TimerExtractor:
 
                     # Check for empty response
                     if resp.status_code == 204 or not resp.content.strip():
-                        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Complete - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     resp.raise_for_status()
@@ -159,11 +132,11 @@ class TimerExtractor:
                     try:
                         data = resp.json().get("list", [])
                     except ValueError:
-                        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Complete - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     if not data:
-                        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Complete - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     # Stream batch to queue with metadata
@@ -172,25 +145,23 @@ class TimerExtractor:
                     page += 1
 
                     if page % 5 == 0:
-                        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Page {page} - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] Page {page} - {total_rows:,} rows")
 
                     # Check if last page
                     if len(data) < PAGE_SIZE:
-                        print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Complete - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     break
 
                 except requests.RequestException as e:
                     wait_time = min(0.5 * (2 ** attempt), 30)
-                    print(f"[{datetime.now():%H:%M:%S}] [TS{project_number}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
+                    logger.error(f"[TS{project_number}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
                     time.sleep(wait_time)
 
                     # Re-authenticate on 401
                     if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
-                        with self.token_lock:
-                            self.token = None
-                        self.authenticate()
+                        self.reauthenticate()
                         headers = {"Authorization": f"Bearer {self.token}"}
             else:
                 raise RuntimeError(f"[TS{project_number}] Failed after {MAX_RETRIES} attempts")
@@ -210,9 +181,7 @@ class TimerExtractor:
         ]
 
         self.client.schema(SCHEMA_RAW).table("raw_timer_activities").insert(rows).execute()
-
-        with self.load_lock:
-            self.total_loaded += len(batch)
+        self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):
         """Background worker that loads batches from queue to database"""
@@ -241,46 +210,20 @@ class TimerExtractor:
                 if stop_event.is_set() and result_queue.empty():
                     break
             except Exception as e:
-                print(f"[{datetime.now():%H:%M:%S}] Loader error: {e}")
+                logger.error(f"Loader error: {e}")
+                result_queue.task_done()
 
         # Load all remaining data
-        print(f"[{datetime.now():%H:%M:%S}] Flushing remaining data...")
+        logger.info("Flushing remaining data...")
         for key, data in pending_batches.items():
             if data:
                 project_did, start_date, end_date = key
                 for i in range(0, len(data), LOAD_BATCH_SIZE):
                     batch = data[i:i + LOAD_BATCH_SIZE]
                     self.load_batch(project_did, start_date, end_date, batch)
-        print(f"[{datetime.now():%H:%M:%S}] Loader complete")
+        logger.info("Loader complete")
 
-    def start_pipeline_run(self, start_date: str, end_date: str):
-        """Record pipeline run start"""
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
-            "run_id": str(self.run_id),
-            "pipeline_name": "timer_extract",
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "metadata": {
-                "start_date": start_date,
-                "end_date": end_date,
-                "run_date": str(self.run_date)
-            }
-        }).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run started: {self.run_id}")
-
-    def complete_pipeline_run(self, status: str, records: int = None, error: str = None):
-        """Update pipeline run status"""
-        update_data = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }
-        if records:
-            update_data["records_extracted"] = records
-        if error:
-            update_data["error_message"] = error
-
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
+    # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
 
 def run_timer_pipeline(
@@ -295,27 +238,31 @@ def run_timer_pipeline(
     if start_date is None or end_date is None:
         start_date, end_date = calculate_date_range()
 
-    print(f"\n{'='*60}")
-    print(f"Timer Activities Extraction Pipeline")
-    print(f"Date Range: {start_date} to {end_date}")
-    print(f"Projects: TS{min_project_number}+")
-    print(f"Workers: {max_workers}")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Timer Activities Extraction Pipeline")
+    logger.info(f"Date Range: {start_date} to {end_date}")
+    logger.info(f"Projects: TS{min_project_number}+")
+    logger.info(f"Workers: {max_workers}")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     extractor = TimerExtractor()
 
     try:
-        extractor.start_pipeline_run(start_date, end_date)
+        extractor.start_pipeline_run(metadata={
+            "start_date": start_date,
+            "end_date": end_date,
+            "run_date": str(extractor.run_date)
+        })
         extractor.authenticate()
 
         # Get projects to extract
         projects = extractor.get_project_dids(min_project_number)
-        print(f"[{datetime.now():%H:%M:%S}] Found {len(projects)} projects to extract\n")
+        logger.info(f"Found {len(projects)} projects to extract\n")
 
         for p in projects:
-            print(f"  - TS{p['project_number']}: {p['project_did']}")
-        print()
+            logger.info(f"  - TS{p['project_number']}: {p['project_did']}")
+        logger.info("")
 
         # Create queue for results
         result_queue = Queue()
@@ -349,11 +296,11 @@ def run_timer_pipeline(
                     rows = future.result()
                     project_rows[f"TS{project['project_number']}"] = rows
                 except Exception as e:
-                    print(f"[{datetime.now():%H:%M:%S}] [TS{project['project_number']}] FAILED: {e}")
+                    logger.error(f"[TS{project['project_number']}] FAILED: {e}")
                     project_rows[f"TS{project['project_number']}"] = 0
 
         # Wait for queue to be fully processed
-        print(f"[{datetime.now():%H:%M:%S}] Waiting for loader to finish...")
+        logger.info("Waiting for loader to finish...")
         result_queue.join()
 
         # Signal loader to stop and wait for it
@@ -363,22 +310,22 @@ def run_timer_pipeline(
         total_records = extractor.total_loaded
         extractor.complete_pipeline_run("success", total_records)
 
-        print(f"\n{'='*60}")
-        print(f"Pipeline completed successfully")
-        print(f"\nRecords by project:")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Pipeline completed successfully")
+        logger.info(f"\nRecords by project:")
         for name, count in sorted(project_rows.items()):
-            print(f"  {name}: {count:,}")
-        print(f"\nTotal loaded: {total_records:,}")
-        print(f"Date Range: {start_date} to {end_date}")
-        print(f"Run ID: {extractor.run_id}")
-        print(f"{'='*60}\n")
+            logger.info(f"  {name}: {count:,}")
+        logger.info(f"\nTotal loaded: {total_records:,}")
+        logger.info(f"Date Range: {start_date} to {end_date}")
+        logger.info(f"Run ID: {extractor.run_id}")
+        logger.info(f"{'='*60}\n")
 
         return str(extractor.run_id)
 
     except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"Pipeline failed: {e}")
-        print(f"{'='*60}\n")
+        logger.error(f"\n{'='*60}")
+        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"{'='*60}\n")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 

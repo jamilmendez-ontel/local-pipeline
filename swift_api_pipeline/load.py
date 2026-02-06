@@ -1,8 +1,10 @@
 import uuid
 from typing import List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from supabase import Client
-from config import get_supabase_client, SCHEMA_RAW, SCHEMA_PIPELINE
+from config import get_supabase_client, SCHEMA_RAW, SCHEMA_PIPELINE, get_logger
+
+logger = get_logger("load")
 
 class SupabaseLoader:
     def __init__(self):
@@ -15,17 +17,17 @@ class SupabaseLoader:
             "run_id": str(self.run_id),
             "pipeline_name": pipeline_name,
             "status": "running",
-            "started_at": datetime.utcnow().isoformat()
+            "started_at": datetime.now(timezone.utc).isoformat()
         }).execute()
 
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run started: {self.run_id}")
+        logger.info(f" Pipeline run started: {self.run_id}")
         return self.run_id
 
     def complete_pipeline_run(self, status: str, records_extracted: int = None, error_message: str = None):
         """Update pipeline run status"""
         update_data = {
             "status": status,
-            "completed_at": datetime.utcnow().isoformat()
+            "completed_at": datetime.now(timezone.utc).isoformat()
         }
 
         if records_extracted is not None:
@@ -36,12 +38,12 @@ class SupabaseLoader:
 
         self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
 
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
+        logger.info(f" Pipeline run completed: {status}")
 
     def load_user_priorities_raw(self, records: List[Dict]) -> int:
         """Load user priorities as individual JSONB rows"""
         if not records:
-            print(f"[{datetime.now():%H:%M:%S}] No user priorities to load")
+            logger.info(f" No user priorities to load")
             return 0
 
         # Insert records in batches for efficiency
@@ -60,15 +62,15 @@ class SupabaseLoader:
             self.client.schema(SCHEMA_RAW).table("raw_user_priorities").insert(rows).execute()
             total_loaded += len(batch)
 
-            print(f"[{datetime.now():%H:%M:%S}] Loaded {total_loaded:,} / {len(records):,} user priorities")
+            logger.info(f" Loaded {total_loaded:,} / {len(records):,} user priorities")
 
-        print(f"[{datetime.now():%H:%M:%S}] Total user priorities loaded: {total_loaded:,}")
+        logger.info(f" Total user priorities loaded: {total_loaded:,}")
         return total_loaded
 
     def load_organizations_raw(self, orgs: List[Dict], user_id: str) -> int:
         """Load organizations as individual JSONB rows"""
         if not orgs:
-            print(f"[{datetime.now():%H:%M:%S}] No organizations to load")
+            logger.info(f" No organizations to load")
             return 0
 
         # Create individual row for each organization
@@ -79,13 +81,13 @@ class SupabaseLoader:
 
         self.client.schema(SCHEMA_RAW).table("raw_organizations").insert(rows).execute()
 
-        print(f"[{datetime.now():%H:%M:%S}] Loaded {len(orgs)} organizations")
+        logger.info(f" Loaded {len(orgs)} organizations")
         return len(orgs)
 
     def load_projects_raw(self, projects: List[Dict]) -> int:
         """Load projects as individual JSONB rows"""
         if not projects:
-            print(f"[{datetime.now():%H:%M:%S}] No projects to load")
+            logger.info(f" No projects to load")
             return 0
 
         # Insert in batches for efficiency
@@ -103,7 +105,7 @@ class SupabaseLoader:
             self.client.schema(SCHEMA_RAW).table("raw_projects").insert(rows).execute()
             total_loaded += len(batch)
 
-            print(f"[{datetime.now():%H:%M:%S}] Loaded {total_loaded:,} / {len(projects):,} projects")
+            logger.info(f" Loaded {total_loaded:,} / {len(projects):,} projects")
 
-        print(f"[{datetime.now():%H:%M:%S}] Total projects loaded: {total_loaded:,}")
+        logger.info(f" Total projects loaded: {total_loaded:,}")
         return total_loaded

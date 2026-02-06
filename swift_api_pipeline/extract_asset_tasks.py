@@ -4,22 +4,19 @@ Extract asset-tasks from Swift API for specified projects
 Uses ThreadPoolExecutor for parallel extraction
 """
 
-import sys
-import uuid
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
-from threading import Thread, Lock
+from threading import Thread, Event
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Generator
+from typing import List, Dict, Optional
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, SCHEMA_PIPELINE
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger
 )
+from base_extractor import BaseExtractor
 
-# Unbuffered output
-sys.stdout.reconfigure(line_buffering=True)
+logger = get_logger("asset_tasks")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
@@ -27,40 +24,9 @@ MAX_WORKERS = 3  # Concurrent API threads
 LOAD_BATCH_SIZE = 500
 
 
-class AssetTaskExtractor:
+class AssetTaskExtractor(BaseExtractor):
     def __init__(self):
-        self.base_url = SWIFT_BASE_URL
-        self.token: Optional[str] = None
-        self.token_lock = Lock()
-        self.client = get_supabase_client()
-        self.run_id = uuid.uuid4()
-        self.total_loaded = 0
-        self.load_lock = Lock()
-
-    def authenticate(self) -> str:
-        """Obtain authentication token (thread-safe)"""
-        with self.token_lock:
-            if self.token:
-                return self.token
-
-            url = f"{self.base_url}/api/auth/token"
-            payload = {
-                "grantType": "password",
-                "include": ["profile", "firebaseToken"],
-                "username": SWIFT_USERNAME,
-                "password": SWIFT_PASSWORD,
-                "scope": "openid"
-            }
-
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload
-            )
-            response.raise_for_status()
-            self.token = response.json()["idToken"]
-            print(f"[{datetime.now():%H:%M:%S}] Authenticated successfully")
-            return self.token
+        super().__init__(pipeline_name="asset_tasks_extract")
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
@@ -94,7 +60,7 @@ class AssetTaskExtractor:
         page_count = 0
         project_rows = 0
 
-        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Starting extraction...")
+        logger.info(f"[{project_name}] Starting extraction...")
 
         while True:
             if after_ap and after_id:
@@ -106,14 +72,14 @@ class AssetTaskExtractor:
                     resp = requests.get(url, headers=headers, params=params, timeout=60)
 
                     if resp.status_code == 204:
-                        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Complete - {project_rows:,} rows")
+                        logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
                         return project_rows
 
                     resp.raise_for_status()
                     data = resp.json().get("list", [])
 
                     if not data:
-                        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Complete - {project_rows:,} rows")
+                        logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
                         return project_rows
 
                     # Stream batch to queue immediately
@@ -122,12 +88,12 @@ class AssetTaskExtractor:
                     page_count += 1
 
                     if page_count % 50 == 0:
-                        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Page {page_count} - {project_rows:,} rows")
+                        logger.info(f"[{project_name}] Page {page_count} - {project_rows:,} rows")
 
                     # Handle keyset pagination
                     next_info = resp.json().get("next")
                     if not next_info:
-                        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Complete - {project_rows:,} rows")
+                        logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
                         return project_rows
 
                     after_ap = next_info.get("ap")
@@ -136,15 +102,13 @@ class AssetTaskExtractor:
 
                 except requests.RequestException as e:
                     wait_time = min(0.5 * (2 ** attempt), 30)
-                    print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
+                    logger.error(f"[{project_name}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
                     time.sleep(wait_time)
 
                     # Re-authenticate on 401
                     if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
-                        with self.token_lock:
-                            self.token = None
-                        self.authenticate()
-                        headers = {"Authorization": f"Bearer {self.token}"}
+                        self.reauthenticate()
+                        headers = self.get_auth_headers()
             else:
                 raise RuntimeError(f"[{project_name}] Failed after {MAX_RETRIES} attempts")
 
@@ -160,9 +124,7 @@ class AssetTaskExtractor:
         ]
 
         self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").insert(rows).execute()
-
-        with self.load_lock:
-            self.total_loaded += len(batch)
+        self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event):
         """Background worker that loads batches from queue to database"""
@@ -192,16 +154,17 @@ class AssetTaskExtractor:
                 if stop_event.is_set() and result_queue.empty():
                     break
             except Exception as e:
-                print(f"[{datetime.now():%H:%M:%S}] Loader error: {e}")
+                logger.error(f"Loader error: {e}")
+                result_queue.task_done()
 
         # Load all remaining data
-        print(f"[{datetime.now():%H:%M:%S}] Flushing remaining data...")
+        logger.info("Flushing remaining data...")
         for project_did, data in pending_batches.items():
             if data:
                 for i in range(0, len(data), LOAD_BATCH_SIZE):
                     batch = data[i:i + LOAD_BATCH_SIZE]
                     self.load_batch(project_did, batch)
-        print(f"[{datetime.now():%H:%M:%S}] Loader complete")
+        logger.info("Loader complete")
 
     def batch_delete_table(self, schema: str, table: str):
         """Delete all rows from a table in batches to avoid memory issues"""
@@ -223,63 +186,35 @@ class AssetTaskExtractor:
             self.client.schema(schema).table(table).delete().gte('id', current_id).lt('id', end_id).execute()
             current_id = end_id
 
-    def clear_tables(self):
-        """Clear raw and staging tables before loading new data"""
-        print(f"[{datetime.now():%H:%M:%S}] Clearing existing data...")
-        # Clear staging first (may have FK constraints)
-        print(f"[{datetime.now():%H:%M:%S}] Clearing stg_asset_tasks...")
-        self.batch_delete_table(SCHEMA_STAGING, "stg_asset_tasks")
-        print(f"[{datetime.now():%H:%M:%S}] Clearing stg_assets...")
-        self.batch_delete_table(SCHEMA_STAGING, "stg_assets")
-        # Clear raw table
-        print(f"[{datetime.now():%H:%M:%S}] Clearing raw_asset_tasks...")
-        self.batch_delete_table(SCHEMA_RAW, "raw_asset_tasks")
-        print(f"[{datetime.now():%H:%M:%S}] Tables cleared")
+    def clear_old_raw_data(self):
+        """Clear old raw data after successful extraction (keep current run_id)."""
+        logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
+        self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").delete().neq(
+            "run_id", str(self.run_id)
+        ).execute()
+        logger.info("Old raw data cleaned up")
 
-    def start_pipeline_run(self):
-        """Record pipeline run start"""
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
-            "run_id": str(self.run_id),
-            "pipeline_name": "asset_tasks_extract",
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run started: {self.run_id}")
-
-    def complete_pipeline_run(self, status: str, records: int = None, error: str = None):
-        """Update pipeline run status"""
-        update_data = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }
-        if records:
-            update_data["records_extracted"] = records
-        if error:
-            update_data["error_message"] = error
-
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
+    # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
 
 def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX_WORKERS):
     """Main pipeline for extracting asset-tasks with parallel processing"""
-    print(f"\n{'='*60}")
-    print(f"Asset-Task Extraction Pipeline (Parallel)")
-    print(f"Projects: TECH-OPS TS{min_project_number}+")
-    print(f"Workers: {max_workers}")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Asset-Task Extraction Pipeline (Parallel)")
+    logger.info(f"Projects: TECH-OPS TS{min_project_number}+")
+    logger.info(f"Workers: {max_workers}")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     extractor = AssetTaskExtractor()
 
     try:
         extractor.start_pipeline_run()
         extractor.authenticate()
-        extractor.clear_tables()  # Clear old data before loading new
 
         # Get projects from reference table
         projects = extractor.get_project_dids(min_project_number)
-        print(f"[{datetime.now():%H:%M:%S}] Found {len(projects)} projects to process\n")
+        logger.info(f"Found {len(projects)} projects to process\n")
 
         # Create queue for results
         result_queue = Queue()
@@ -315,11 +250,11 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
                     rows = future.result()
                     project_rows[proj["project_name"]] = rows
                 except Exception as e:
-                    print(f"[{datetime.now():%H:%M:%S}] [{proj['project_name']}] FAILED: {e}")
+                    logger.error(f"[{proj['project_name']}] FAILED: {e}")
                     project_rows[proj["project_name"]] = 0
 
         # Wait for queue to be fully processed first
-        print(f"[{datetime.now():%H:%M:%S}] Waiting for loader to finish...")
+        logger.info("Waiting for loader to finish...")
         result_queue.join()
 
         # Signal loader to stop and wait for it
@@ -327,21 +262,27 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
         loader_thread.join(timeout=120)
 
         total_records = extractor.total_loaded
+
+        # Clean up old raw data now that new extraction succeeded
+        extractor.clear_old_raw_data()
+
         extractor.complete_pipeline_run("success", total_records)
 
-        print(f"\n{'='*60}")
-        print(f"Pipeline completed successfully")
-        print(f"\nRecords by project:")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Pipeline completed successfully")
+        logger.info(f"\nRecords by project:")
         for name, count in sorted(project_rows.items()):
-            print(f"  {name}: {count:,}")
-        print(f"\nTotal loaded: {total_records:,}")
-        print(f"Run ID: {extractor.run_id}")
-        print(f"{'='*60}\n")
+            logger.info(f"  {name}: {count:,}")
+        logger.info(f"\nTotal loaded: {total_records:,}")
+        logger.info(f"Run ID: {extractor.run_id}")
+        logger.info(f"{'='*60}\n")
+
+        return str(extractor.run_id)
 
     except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"Pipeline failed: {e}")
-        print(f"{'='*60}\n")
+        logger.error(f"\n{'='*60}")
+        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"{'='*60}\n")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 

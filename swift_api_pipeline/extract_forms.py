@@ -4,24 +4,21 @@ Extract Forms data from Swift API
 Supports QA Forms for TS13+ projects
 """
 
-import sys
-import uuid
 import requests
 import time
 import csv
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
-from threading import Thread, Lock, Event
+from threading import Thread, Event
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE
+    SCHEMA_RAW, get_logger
 )
+from base_extractor import BaseExtractor
 
-# Unbuffered output
-sys.stdout.reconfigure(line_buffering=True)
+logger = get_logger("forms")
 
 PAGE_SIZE = 2000
 MAX_RETRIES = 10
@@ -63,40 +60,9 @@ QA_FORMS = {
 }
 
 
-class FormsExtractor:
+class FormsExtractor(BaseExtractor):
     def __init__(self):
-        self.base_url = SWIFT_BASE_URL
-        self.token: Optional[str] = None
-        self.token_lock = Lock()
-        self.client = get_supabase_client()
-        self.run_id = uuid.uuid4()
-        self.total_loaded = 0
-        self.load_lock = Lock()
-
-    def authenticate(self) -> str:
-        """Obtain authentication token (thread-safe)"""
-        with self.token_lock:
-            if self.token:
-                return self.token
-
-            url = f"{self.base_url}/api/auth/token"
-            payload = {
-                "grantType": "password",
-                "include": ["profile", "firebaseToken"],
-                "username": SWIFT_USERNAME,
-                "password": SWIFT_PASSWORD,
-                "scope": "openid"
-            }
-
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload
-            )
-            response.raise_for_status()
-            self.token = response.json()["idToken"]
-            print(f"[{datetime.now():%H:%M:%S}] Authenticated successfully")
-            return self.token
+        super().__init__(pipeline_name="forms_extract")
 
     def extract_form(
         self,
@@ -123,7 +89,7 @@ class FormsExtractor:
         total_rows = 0
         csv_fieldnames = None  # Store headers from first page
 
-        print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Starting extraction...")
+        logger.info(f"[{display_name}] Starting extraction...")
 
         while True:
             params = {"pageSize": str(PAGE_SIZE)}
@@ -135,7 +101,7 @@ class FormsExtractor:
                     resp = requests.get(url, headers=headers, params=params, timeout=60)
 
                     if resp.status_code == 204:
-                        print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Complete - {total_rows:,} rows")
+                        logger.info(f"[{display_name}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     resp.raise_for_status()
@@ -161,7 +127,7 @@ class FormsExtractor:
                             rows = list(reader)
 
                     if not rows:
-                        print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Complete - {total_rows:,} rows")
+                        logger.info(f"[{display_name}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     # Stream batch to queue
@@ -170,26 +136,24 @@ class FormsExtractor:
                     page_count += 1
 
                     if page_count % 5 == 0:
-                        print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Page {page_count} - {total_rows:,} rows")
+                        logger.info(f"[{display_name}] Page {page_count} - {total_rows:,} rows")
 
                     # Check for next page
                     next_cursor = resp.headers.get("x-next")
                     if not next_cursor:
-                        print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Complete - {total_rows:,} rows")
+                        logger.info(f"[{display_name}] Complete - {total_rows:,} rows")
                         return total_rows
 
                     break
 
                 except requests.RequestException as e:
                     wait_time = min(0.5 * (2 ** attempt), 30)
-                    print(f"[{datetime.now():%H:%M:%S}] [{display_name}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
+                    logger.info(f"[{display_name}] Retry {attempt + 1}/{MAX_RETRIES}: {e}")
                     time.sleep(wait_time)
 
                     # Re-authenticate on 401
                     if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
-                        with self.token_lock:
-                            self.token = None
-                        self.authenticate()
+                        self.reauthenticate()
                         headers = {"Authorization": f"Bearer {self.token}", "Accept": "text/csv"}
             else:
                 raise RuntimeError(f"[{display_name}] Failed after {MAX_RETRIES} attempts")
@@ -205,9 +169,7 @@ class FormsExtractor:
         ]
 
         self.client.schema(SCHEMA_RAW).table(table_name).insert(rows).execute()
-
-        with self.load_lock:
-            self.total_loaded += len(batch)
+        self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):
         """Background worker that loads batches from queue to database"""
@@ -235,50 +197,28 @@ class FormsExtractor:
                 if stop_event.is_set() and result_queue.empty():
                     break
             except Exception as e:
-                print(f"[{datetime.now():%H:%M:%S}] Loader error: {e}")
+                logger.error(f"Loader error: {e}")
+                result_queue.task_done()
 
         # Load all remaining data
-        print(f"[{datetime.now():%H:%M:%S}] Flushing remaining data...")
+        logger.info("Flushing remaining data...")
         for table_name, data in pending_batches.items():
             if data:
                 for i in range(0, len(data), LOAD_BATCH_SIZE):
                     batch = data[i:i + LOAD_BATCH_SIZE]
                     self.load_batch(table_name, batch)
-        print(f"[{datetime.now():%H:%M:%S}] Loader complete")
+        logger.info("Loader complete")
 
-    def clear_tables(self):
-        """Clear raw and staging tables before loading new data"""
-        print(f"[{datetime.now():%H:%M:%S}] Clearing existing data...")
-        # Clear staging first
-        self.client.schema(SCHEMA_STAGING).table("stg_qa_form").delete().neq("id", 0).execute()
-        # Clear raw tables for each form
+    def clear_old_raw_data(self):
+        """Clear old raw data after successful extraction (keep current run_id)."""
+        logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
         for form_config in QA_FORMS.values():
-            self.client.schema(SCHEMA_RAW).table(form_config["table_name"]).delete().neq("id", 0).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Tables cleared")
+            self.client.schema(SCHEMA_RAW).table(form_config["table_name"]).delete().neq(
+                "run_id", str(self.run_id)
+            ).execute()
+        logger.info("Old raw data cleaned up")
 
-    def start_pipeline_run(self):
-        """Record pipeline run start"""
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
-            "run_id": str(self.run_id),
-            "pipeline_name": "forms_extract",
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run started: {self.run_id}")
-
-    def complete_pipeline_run(self, status: str, records: int = None, error: str = None):
-        """Update pipeline run status"""
-        update_data = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }
-        if records:
-            update_data["records_extracted"] = records
-        if error:
-            update_data["error_message"] = error
-
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
+    # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
 
 def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
@@ -286,21 +226,20 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
     if forms is None:
         forms = QA_FORMS
 
-    print(f"\n{'='*60}")
-    print(f"Forms Extraction Pipeline (Parallel)")
-    print(f"Forms: {len(forms)}")
-    print(f"Workers: {max_workers}")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info("Forms Extraction Pipeline (Parallel)")
+    logger.info(f"Forms: {len(forms)}")
+    logger.info(f"Workers: {max_workers}")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     extractor = FormsExtractor()
 
     try:
         extractor.start_pipeline_run()
         extractor.authenticate()
-        extractor.clear_tables()  # Clear old data before loading new
 
-        print(f"[{datetime.now():%H:%M:%S}] Processing {len(forms)} forms\n")
+        logger.info(f"Processing {len(forms)} forms\n")
 
         # Create queue for results
         result_queue = Queue()
@@ -333,11 +272,11 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
                     rows = future.result()
                     form_rows[form_config["display_name"]] = rows
                 except Exception as e:
-                    print(f"[{datetime.now():%H:%M:%S}] [{form_config['display_name']}] FAILED: {e}")
+                    logger.error(f"[{form_config['display_name']}] FAILED: {e}")
                     form_rows[form_config["display_name"]] = 0
 
         # Wait for queue to be fully processed
-        print(f"[{datetime.now():%H:%M:%S}] Waiting for loader to finish...")
+        logger.info("Waiting for loader to finish...")
         result_queue.join()
 
         # Signal loader to stop and wait for it
@@ -345,23 +284,27 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
         loader_thread.join(timeout=120)
 
         total_records = extractor.total_loaded
+
+        # Clean up old raw data now that new extraction succeeded
+        extractor.clear_old_raw_data()
+
         extractor.complete_pipeline_run("success", total_records)
 
-        print(f"\n{'='*60}")
-        print(f"Pipeline completed successfully")
-        print(f"\nRecords by form:")
+        logger.info(f"\n{'='*60}")
+        logger.info("Pipeline completed successfully")
+        logger.info("\nRecords by form:")
         for name, count in sorted(form_rows.items()):
-            print(f"  {name}: {count:,}")
-        print(f"\nTotal loaded: {total_records:,}")
-        print(f"Run ID: {extractor.run_id}")
-        print(f"{'='*60}\n")
+            logger.info(f"  {name}: {count:,}")
+        logger.info(f"\nTotal loaded: {total_records:,}")
+        logger.info(f"Run ID: {extractor.run_id}")
+        logger.info(f"{'='*60}\n")
 
         return str(extractor.run_id)
 
     except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"Pipeline failed: {e}")
-        print(f"{'='*60}\n")
+        logger.error(f"\n{'='*60}")
+        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"{'='*60}\n")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 

@@ -5,22 +5,19 @@ Fetches requirements for each task via /api/asset-tasks/{task_DID}/requirements
 Processes by project to allow incremental extraction
 """
 
-import sys
-import uuid
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 from threading import Thread, Lock, Event
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, SCHEMA_PIPELINE
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger
 )
+from base_extractor import BaseExtractor
 
-# Unbuffered output
-sys.stdout.reconfigure(line_buffering=True)
+logger = get_logger("requirements")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 5
@@ -29,43 +26,12 @@ LOAD_BATCH_SIZE = 500
 TASK_BATCH_SIZE = 100  # How many tasks to process before logging progress
 
 
-class RequirementsExtractor:
+class RequirementsExtractor(BaseExtractor):
     def __init__(self):
-        self.base_url = SWIFT_BASE_URL
-        self.token: Optional[str] = None
-        self.token_lock = Lock()
-        self.client = get_supabase_client()
-        self.run_id = uuid.uuid4()
-        self.total_loaded = 0
+        super().__init__(pipeline_name="requirements_extract")
         self.total_tasks_processed = 0
         self.total_tasks_with_requirements = 0
-        self.load_lock = Lock()
         self.stats_lock = Lock()
-
-    def authenticate(self) -> str:
-        """Obtain authentication token (thread-safe)"""
-        with self.token_lock:
-            if self.token:
-                return self.token
-
-            url = f"{self.base_url}/api/auth/token"
-            payload = {
-                "grantType": "password",
-                "include": ["profile", "firebaseToken"],
-                "username": SWIFT_USERNAME,
-                "password": SWIFT_PASSWORD,
-                "scope": "openid"
-            }
-
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload
-            )
-            response.raise_for_status()
-            self.token = response.json()["idToken"]
-            print(f"[{datetime.now():%H:%M:%S}] Authenticated successfully")
-            return self.token
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
@@ -157,9 +123,7 @@ class RequirementsExtractor:
 
                     # Re-authenticate on 401
                     if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
-                        with self.token_lock:
-                            self.token = None
-                        self.authenticate()
+                        self.reauthenticate()
                         headers = {"Authorization": f"Bearer {self.token}"}
                     else:
                         time.sleep(wait_time)
@@ -215,9 +179,7 @@ class RequirementsExtractor:
         ]
 
         self.client.schema(SCHEMA_RAW).table("raw_asset_task_requirements").insert(rows).execute()
-
-        with self.load_lock:
-            self.total_loaded += len(batch)
+        self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):
         """Background worker that loads batches from queue to database"""
@@ -245,7 +207,8 @@ class RequirementsExtractor:
                 if stop_event.is_set() and result_queue.empty():
                     break
             except Exception as e:
-                print(f"[{datetime.now():%H:%M:%S}] Loader error: {e}")
+                logger.error(f"Loader error: {e}")
+                result_queue.task_done()
 
         # Load all remaining data
         for (project_did, task_did), data in pending_batches.items():
@@ -261,16 +224,16 @@ class RequirementsExtractor:
         result_queue: Queue
     ) -> Dict:
         """Extract all requirements for a project"""
-        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Getting tasks from staging...")
+        logger.info(f"[{project_name}] Getting tasks from staging...")
 
         tasks = self.get_tasks_for_project(project_did)
         total_tasks = len(tasks)
 
         if not tasks:
-            print(f"[{datetime.now():%H:%M:%S}] [{project_name}] No tasks found")
+            logger.info(f"[{project_name}] No tasks found")
             return {"tasks": 0, "with_requirements": 0, "requirements": 0}
 
-        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Processing {total_tasks:,} tasks...")
+        logger.info(f"[{project_name}] Processing {total_tasks:,} tasks...")
 
         total_processed = 0
         total_with_requirements = 0
@@ -288,9 +251,9 @@ class RequirementsExtractor:
             # Log progress every 1000 tasks
             if total_processed % 1000 == 0 or total_processed == total_tasks:
                 pct = (total_processed / total_tasks) * 100
-                print(f"[{datetime.now():%H:%M:%S}] [{project_name}] {total_processed:,}/{total_tasks:,} tasks ({pct:.1f}%) - {total_requirements:,} requirements")
+                logger.info(f"[{project_name}] {total_processed:,}/{total_tasks:,} tasks ({pct:.1f}%) - {total_requirements:,} requirements")
 
-        print(f"[{datetime.now():%H:%M:%S}] [{project_name}] Complete - {total_tasks:,} tasks, {total_with_requirements:,} with requirements, {total_requirements:,} total requirements")
+        logger.info(f"[{project_name}] Complete - {total_tasks:,} tasks, {total_with_requirements:,} with requirements, {total_requirements:,} total requirements")
 
         return {
             "tasks": total_tasks,
@@ -298,29 +261,7 @@ class RequirementsExtractor:
             "requirements": total_requirements
         }
 
-    def start_pipeline_run(self):
-        """Record pipeline run start"""
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert({
-            "run_id": str(self.run_id),
-            "pipeline_name": "requirements_extract",
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run started: {self.run_id}")
-
-    def complete_pipeline_run(self, status: str, records: int = None, error: str = None):
-        """Update pipeline run status"""
-        update_data = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }
-        if records:
-            update_data["records_extracted"] = records
-        if error:
-            update_data["error_message"] = error
-
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(update_data).eq("run_id", str(self.run_id)).execute()
-        print(f"[{datetime.now():%H:%M:%S}] Pipeline run completed: {status}")
+    # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
 
 def run_requirements_pipeline(
@@ -339,15 +280,15 @@ def run_requirements_pipeline(
     global MAX_WORKERS
     MAX_WORKERS = max_workers
 
-    print(f"\n{'='*60}")
-    print(f"Requirements Extraction Pipeline")
+    logger.info(f"{'='*60}")
+    logger.info(f"Requirements Extraction Pipeline")
     if project_numbers:
-        print(f"Projects: TS{project_numbers}")
+        logger.info(f"Projects: TS{project_numbers}")
     else:
-        print(f"Projects: TECH-OPS TS{min_project_number}+")
-    print(f"Workers: {max_workers}")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+        logger.info(f"Projects: TECH-OPS TS{min_project_number}+")
+    logger.info(f"Workers: {max_workers}")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}")
 
     extractor = RequirementsExtractor()
 
@@ -364,7 +305,7 @@ def run_requirements_pipeline(
         else:
             projects = all_projects
 
-        print(f"[{datetime.now():%H:%M:%S}] Processing {len(projects)} projects\n")
+        logger.info(f"Processing {len(projects)} projects")
 
         # Create queue for results
         result_queue = Queue()
@@ -389,7 +330,7 @@ def run_requirements_pipeline(
             project_stats[proj["project_name"]] = stats
 
         # Wait for queue to be fully processed
-        print(f"\n[{datetime.now():%H:%M:%S}] Waiting for loader to finish...")
+        logger.info("Waiting for loader to finish...")
         result_queue.join()
 
         # Signal loader to stop and wait for it
@@ -399,31 +340,31 @@ def run_requirements_pipeline(
         total_records = extractor.total_loaded
         extractor.complete_pipeline_run("success", total_records)
 
-        print(f"\n{'='*60}")
-        print(f"Pipeline completed successfully")
-        print(f"\nResults by project:")
+        logger.info(f"{'='*60}")
+        logger.info(f"Pipeline completed successfully")
+        logger.info(f"Results by project:")
         total_tasks = 0
         total_with_req = 0
         total_req = 0
         for name, stats in sorted(project_stats.items()):
-            print(f"  {name}: {stats['tasks']:,} tasks, {stats['with_requirements']:,} with requirements, {stats['requirements']:,} requirements")
+            logger.info(f"  {name}: {stats['tasks']:,} tasks, {stats['with_requirements']:,} with requirements, {stats['requirements']:,} requirements")
             total_tasks += stats["tasks"]
             total_with_req += stats["with_requirements"]
             total_req += stats["requirements"]
 
-        print(f"\nTotals:")
-        print(f"  Tasks processed: {total_tasks:,}")
-        print(f"  Tasks with requirements: {total_with_req:,}")
-        print(f"  Requirements loaded: {total_records:,}")
-        print(f"  Run ID: {extractor.run_id}")
-        print(f"{'='*60}\n")
+        logger.info(f"Totals:")
+        logger.info(f"  Tasks processed: {total_tasks:,}")
+        logger.info(f"  Tasks with requirements: {total_with_req:,}")
+        logger.info(f"  Requirements loaded: {total_records:,}")
+        logger.info(f"  Run ID: {extractor.run_id}")
+        logger.info(f"{'='*60}")
 
         return str(extractor.run_id)
 
     except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"Pipeline failed: {e}")
-        print(f"{'='*60}\n")
+        logger.error(f"{'='*60}")
+        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"{'='*60}")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 

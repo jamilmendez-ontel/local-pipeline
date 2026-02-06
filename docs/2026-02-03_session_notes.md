@@ -301,21 +301,122 @@ Allows an AI Agent to understand the data structure and write accurate SQL queri
 
 ---
 
-## 7. Data Model
+## 7. Asset Task Requirements Pipeline (Feb 4)
+
+### What was built
+- **Extract script**: `swift_api_pipeline/extract_requirements.py`
+- **Migrations**:
+  - `009_requirements_tables.sql` - Raw and staging tables for requirements
+  - `010_assets_table.sql` - Separate assets table for proper data hierarchy
+
+### API Endpoint
+```
+/api/asset-tasks/{task_DID}/requirements
+```
+
+### Data Model (Hierarchical)
+```
+stg_projects (6 projects)
+  └── stg_assets (19,862 sites)
+        └── stg_asset_tasks (2.2M tasks)
+              └── stg_asset_task_requirements (millions)
+```
+
+### Key Features
+- **50 workers** (optimal based on benchmarking at 16.5 tasks/s)
+- ThreadPoolExecutor for parallel API calls
+- Fetches requirements per task (no bulk endpoint available)
+- Queue-based streaming to database
+- Can process specific projects: `--projects 17,18`
+
+### Performance Benchmark
+| Workers | Tasks/sec | Notes |
+|---------|-----------|-------|
+| 10 | 6.0 | Baseline |
+| 20 | 11.5 | Good |
+| 30 | 15.1 | Better |
+| **50** | **16.5** | **Optimal** |
+| 75 | 15.3 | Rate limiting |
+| 100 | 14.8 | Rate limiting |
+
+### Usage
+```bash
+# Extract requirements for all projects
+python extract_requirements.py --workers 50
+
+# Extract for specific projects only
+python extract_requirements.py --projects 17,18
+
+# Transform to staging
+python transform.py requirements [run_id]
+```
+
+### Time Estimate
+With ~2.2M tasks and 16.5 tasks/s:
+- Per project (~350K tasks): ~6 hours
+- All 6 projects: ~37 hours
+
+Recommendation: Run per-project overnight.
+
+---
+
+## 8. Assets Table (Feb 4)
+
+### What was built
+- **Migration**: `010_assets_table.sql`
+- **Transform function**: Added `transform_assets()` to `transform.py`
+
+### Purpose
+Separate asset-level data from task-level data for proper data hierarchy. Assets are extracted from the existing `raw_asset_tasks` bulk export.
+
+### Schema
+```sql
+stg_assets (
+  project_did, asset_did,
+  asset_id, asset_name,
+  task_count, requirement_count,
+  tasks_pending, tasks_in_progress,
+  tasks_submitted, tasks_approved,
+  tasks_rejected, tasks_cancelled
+)
+```
+
+### Data Loaded
+| Project | Assets | Total Tasks |
+|---------|--------|-------------|
+| TS13 | 3,215 | 344,172 |
+| TS14 | 3,244 | 362,634 |
+| TS15 | 3,334 | 375,610 |
+| TS16 | 3,681 | 408,212 |
+| TS17 | 3,513 | 389,619 |
+| TS18 | 2,875 | 321,788 |
+| **Total** | **19,862** | **2,202,035** |
+
+### Usage
+```bash
+# Transform assets from existing raw_asset_tasks
+python transform.py assets [run_id]
+```
+
+---
+
+## 9. Updated Data Model
 
 ```
 data_staging.stg_organizations (300 rows)
     └── data_staging.stg_projects (1,108 rows) [org_did]
-            ├── data_staging.stg_asset_tasks (2,202,035 rows) [project_did]
+            ├── data_staging.stg_assets (19,862 rows) [project_did]
+            │       └── data_staging.stg_asset_tasks (2,202,035 rows) [asset_did]
+            │               └── data_staging.stg_asset_task_requirements (TBD) [task_did]
             ├── data_staging.stg_qa_form (344,094 rows) [project_number]
-            └── data_staging.stg_timer_activities (11,683 rows) [project_did, FK]
+            └── data_staging.stg_timer_activities (11,683 rows) [project_did]
 ```
 
-### Total Records: 2,559,220
+### Total Records: 2,579,082 (excluding requirements)
 
 ---
 
-## 8. Git Commits
+## 10. Git Commits
 
 ```
 c4bba19 Fix CSV parsing for paginated form responses
@@ -336,17 +437,20 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 9. Files Created/Modified
+## 11. Files Created/Modified
 
-### New Files
+### New Files (Feb 3-4)
 - `swift_api_pipeline/extract_forms.py`
 - `swift_api_pipeline/extract_timer.py`
+- `swift_api_pipeline/extract_requirements.py` - Requirements extraction with 50 workers
 - `swift_api_pipeline/discover_forms.py`
 - `swift_api_pipeline/migrations/004_forms_tables.sql`
 - `swift_api_pipeline/migrations/005_forms_ts18.sql`
 - `swift_api_pipeline/migrations/006_stg_qa_form_all_columns.sql`
 - `swift_api_pipeline/migrations/007_timer_tables.sql`
 - `swift_api_pipeline/migrations/008_create_schemas_v2.sql`
+- `swift_api_pipeline/migrations/009_requirements_tables.sql` - Raw and staging tables for requirements
+- `swift_api_pipeline/migrations/010_assets_table.sql` - Separate assets table
 - `docs/data_dictionary.md` - Comprehensive data documentation for AI Agent integration
 
 ### Modified Files
@@ -355,11 +459,11 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 - `swift_api_pipeline/extract_forms.py` - Schema-qualified table names, CSV pagination fix
 - `swift_api_pipeline/extract_timer.py` - Schema-qualified table names
 - `swift_api_pipeline/load.py` - Schema-qualified table names
-- `swift_api_pipeline/transform.py` - Added QA forms/timer transforms, schema-qualified table names, timezone fix
+- `swift_api_pipeline/transform.py` - Added assets/QA forms/timer/requirements transforms, timezone fix
 
 ---
 
-## 10. Known Issues / TODO
+## 12. Known Issues / TODO
 
 1. **TS18 Timer January Data Incomplete**: Extraction stopped at ~10,000 rows due to API 500 errors. Can retry later.
 
@@ -374,7 +478,7 @@ All commits pushed to: `https://github.com/jamilmendez-ontel/local-pipeline.git`
 
 ---
 
-## 11. Quick Reference Commands
+## 13. Quick Reference Commands
 
 ```bash
 # Activate virtual environment
@@ -385,14 +489,18 @@ cd swift_api_pipeline
 python extract_asset_tasks.py
 python extract_forms.py
 python extract_timer.py
+python extract_requirements.py --projects 18 --workers 50  # Start with one project
 
 # Run transformations
+python transform.py assets [run_id]       # NEW: Extract assets from bulk data
 python transform.py asset_tasks [run_id]
 python transform.py qa_forms [run_id]
 python transform.py timer [run_id]
+python transform.py requirements [run_id]  # NEW: Transform requirements
 
-# Check data in Supabase (after schema migration)
-docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "SELECT COUNT(*) FROM data_staging.stg_qa_form;"
+# Check data in Supabase
+docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "SELECT COUNT(*) FROM data_staging.stg_assets;"
+docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "SELECT COUNT(*) FROM data_staging.stg_asset_task_requirements;"
 
 # List tables in each schema
 docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt data_raw.*"
@@ -401,7 +509,7 @@ docker exec -i supabase_db_supabase-local psql -U postgres -d postgres -c "\dt d
 
 ---
 
-## 12. Environment
+## 14. Environment
 
 - **Local Supabase**: Docker container `supabase_db_supabase-local`
 - **Python**: 3.x with venv in `swift_api_pipeline/venv`

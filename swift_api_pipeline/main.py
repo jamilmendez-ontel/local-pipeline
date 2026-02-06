@@ -13,9 +13,14 @@ Usage:
 import sys
 import argparse
 from datetime import datetime
+from config import setup_logging, get_logger
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
+
+# Initialize logging for all pipeline modules
+setup_logging()
+logger = get_logger("main")
 
 
 def run_orgs_projects_pipeline():
@@ -23,9 +28,9 @@ def run_orgs_projects_pipeline():
     from pipeline import run_pipeline
     from transform import run_transform
 
-    print(f"\n{'#'*60}")
-    print(f"# ORGANIZATIONS & PROJECTS PIPELINE")
-    print(f"{'#'*60}")
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ORGANIZATIONS & PROJECTS PIPELINE")
+    logger.info(f"{'#'*60}")
 
     # Extract (returns 0 on success)
     result = run_pipeline()
@@ -43,9 +48,9 @@ def run_asset_tasks_pipeline():
     from extract_asset_tasks import run_asset_task_pipeline
     from transform import run_assets_transform, run_asset_tasks_transform
 
-    print(f"\n{'#'*60}")
-    print(f"# ASSET TASKS PIPELINE")
-    print(f"{'#'*60}")
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS PIPELINE")
+    logger.info(f"{'#'*60}")
 
     # Extract (returns run_id or raises)
     run_id = run_asset_task_pipeline()
@@ -64,9 +69,9 @@ def run_forms_pipeline():
     from extract_forms import run_forms_pipeline as extract_forms
     from transform import run_qa_forms_transform
 
-    print(f"\n{'#'*60}")
-    print(f"# QA FORMS PIPELINE")
-    print(f"{'#'*60}")
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# QA FORMS PIPELINE")
+    logger.info(f"{'#'*60}")
 
     # Extract (returns run_id or raises)
     run_id = extract_forms()
@@ -82,9 +87,9 @@ def run_timer_pipeline_full():
     from extract_timer import run_timer_pipeline
     from transform import run_timer_transform
 
-    print(f"\n{'#'*60}")
-    print(f"# TIMER ACTIVITIES PIPELINE")
-    print(f"{'#'*60}")
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# TIMER ACTIVITIES PIPELINE")
+    logger.info(f"{'#'*60}")
 
     # Extract (returns run_id or raises)
     run_id = run_timer_pipeline()
@@ -97,10 +102,10 @@ def run_timer_pipeline_full():
 
 def run_all_pipelines():
     """Run all pipelines in sequence"""
-    print(f"\n{'='*60}")
-    print(f"SWIFT API PIPELINE - FULL RUN")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"SWIFT API PIPELINE - FULL RUN")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}")
 
     pipelines = [
         ("Organizations & Projects", run_orgs_projects_pipeline),
@@ -113,22 +118,22 @@ def run_all_pipelines():
 
     for name, func in pipelines:
         try:
-            print(f"\n[{datetime.now():%H:%M:%S}] Starting: {name}")
+            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: {name}")
             func()
             results[name] = "SUCCESS"
-            print(f"[{datetime.now():%H:%M:%S}] Completed: {name}")
+            logger.info(f"Completed: {name}")
         except Exception as e:
             results[name] = f"FAILED: {e}"
-            print(f"[{datetime.now():%H:%M:%S}] FAILED: {name} - {e}")
+            logger.error(f"FAILED: {name} - {e}")
 
     # Summary
-    print(f"\n{'='*60}")
-    print(f"PIPELINE SUMMARY")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"PIPELINE SUMMARY")
+    logger.info(f"{'='*60}")
     for name, status in results.items():
-        print(f"  {name}: {status}")
-    print(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+        logger.info(f"  {name}: {status}")
+    logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     # Return success if all passed
     return all(status == "SUCCESS" for status in results.values())
@@ -141,16 +146,16 @@ def run_all_extractions():
     from extract_forms import run_forms_pipeline as extract_forms
     from extract_timer import run_timer_pipeline
 
-    print(f"\n{'='*60}")
-    print(f"SWIFT API PIPELINE - EXTRACTIONS ONLY")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"SWIFT API PIPELINE - EXTRACTIONS ONLY")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}")
 
     results = {}
 
     # Organizations & Projects
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Extracting Organizations & Projects...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting Organizations & Projects...")
         run_pipeline()
         results["Organizations & Projects"] = "SUCCESS"
     except Exception as e:
@@ -158,7 +163,7 @@ def run_all_extractions():
 
     # Asset Tasks
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Extracting Asset Tasks...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting Asset Tasks...")
         run_asset_task_pipeline()
         results["Asset Tasks"] = "SUCCESS"
     except Exception as e:
@@ -166,7 +171,7 @@ def run_all_extractions():
 
     # QA Forms
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Extracting QA Forms...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting QA Forms...")
         extract_forms()
         results["QA Forms"] = "SUCCESS"
     except Exception as e:
@@ -174,20 +179,20 @@ def run_all_extractions():
 
     # Timer
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Extracting Timer Activities...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting Timer Activities...")
         run_timer_pipeline()
         results["Timer Activities"] = "SUCCESS"
     except Exception as e:
         results["Timer Activities"] = f"FAILED: {e}"
 
     # Summary
-    print(f"\n{'='*60}")
-    print(f"EXTRACTION SUMMARY")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"EXTRACTION SUMMARY")
+    logger.info(f"{'='*60}")
     for name, status in results.items():
-        print(f"  {name}: {status}")
-    print(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+        logger.info(f"  {name}: {status}")
+    logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     return all(status == "SUCCESS" for status in results.values())
 
@@ -199,16 +204,16 @@ def run_all_transformations():
         run_qa_forms_transform, run_timer_transform
     )
 
-    print(f"\n{'='*60}")
-    print(f"SWIFT API PIPELINE - TRANSFORMATIONS ONLY")
-    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"SWIFT API PIPELINE - TRANSFORMATIONS ONLY")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}")
 
     results = {}
 
     # Organizations & Projects
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Transforming Organizations & Projects...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming Organizations & Projects...")
         run_transform()
         results["Organizations & Projects"] = "SUCCESS"
     except Exception as e:
@@ -216,7 +221,7 @@ def run_all_transformations():
 
     # Assets (from asset tasks raw data)
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Transforming Assets...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming Assets...")
         run_assets_transform()
         results["Assets"] = "SUCCESS"
     except Exception as e:
@@ -224,7 +229,7 @@ def run_all_transformations():
 
     # Asset Tasks
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Transforming Asset Tasks...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming Asset Tasks...")
         run_asset_tasks_transform()
         results["Asset Tasks"] = "SUCCESS"
     except Exception as e:
@@ -232,7 +237,7 @@ def run_all_transformations():
 
     # QA Forms
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Transforming QA Forms...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming QA Forms...")
         run_qa_forms_transform()
         results["QA Forms"] = "SUCCESS"
     except Exception as e:
@@ -240,20 +245,20 @@ def run_all_transformations():
 
     # Timer
     try:
-        print(f"\n[{datetime.now():%H:%M:%S}] Transforming Timer Activities...")
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming Timer Activities...")
         run_timer_transform()
         results["Timer Activities"] = "SUCCESS"
     except Exception as e:
         results["Timer Activities"] = f"FAILED: {e}"
 
     # Summary
-    print(f"\n{'='*60}")
-    print(f"TRANSFORMATION SUMMARY")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TRANSFORMATION SUMMARY")
+    logger.info(f"{'='*60}")
     for name, status in results.items():
-        print(f"  {name}: {status}")
-    print(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
-    print(f"{'='*60}\n")
+        logger.info(f"  {name}: {status}")
+    logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
     return all(status == "SUCCESS" for status in results.values())
 
@@ -308,6 +313,9 @@ Examples:
                 success = run_forms_pipeline()
             elif args.pipeline == "timer":
                 success = run_timer_pipeline_full()
+            else:
+                logger.info(f"Unknown pipeline: {args.pipeline}")
+                success = False
         else:
             # Default: run all
             success = run_all_pipelines()
@@ -315,10 +323,10 @@ Examples:
         return 0 if success else 1
 
     except KeyboardInterrupt:
-        print("\n\nPipeline interrupted by user")
+        logger.warning("Pipeline interrupted by user")
         return 130
     except Exception as e:
-        print(f"\n\nPipeline failed with error: {e}")
+        logger.info(f"\n\nPipeline failed with error: {e}")
         return 1
 
 
