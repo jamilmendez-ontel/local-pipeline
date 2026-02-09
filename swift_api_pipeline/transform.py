@@ -29,6 +29,26 @@ def clean_task_name(task_name: str) -> str:
     return cleaned.strip()
 
 
+def batched_delete_all(client, schema: str, table: str, batch_size: int = 50000):
+    """Delete all rows from a staging table in batches to avoid statement timeout."""
+    min_result = client.schema(schema).table(table).select('id').order('id').limit(1).execute()
+    max_result = client.schema(schema).table(table).select('id').order('id', desc=True).limit(1).execute()
+
+    if not min_result.data or not max_result.data:
+        return  # Table is empty
+
+    min_id = min_result.data[0]['id']
+    max_id = max_result.data[0]['id']
+    current_id = min_id
+
+    while current_id <= max_id:
+        end_id = current_id + batch_size
+        client.schema(schema).table(table).delete().gte('id', current_id).lt('id', end_id).execute()
+        current_id = end_id
+
+    print(f"[{datetime.now():%H:%M:%S}] Cleared old data from {table}")
+
+
 def epoch_to_datetime(epoch_ms: int) -> str:
     """Convert epoch milliseconds to ISO datetime string in America/New_York timezone"""
     if not epoch_ms:
@@ -294,8 +314,8 @@ def transform_assets(client, run_id: str):
     """Transform raw_asset_tasks to stg_assets by extracting unique assets"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming assets...")
 
-    # Clear existing staging data for this run
-    client.schema(SCHEMA_STAGING).table("stg_assets").delete().eq("run_id", run_id).execute()
+    # Clear ALL existing staging data (full refresh)
+    batched_delete_all(client, SCHEMA_STAGING, "stg_assets")
 
     # We'll aggregate asset data from raw_asset_tasks
     # Use SQL to do the heavy lifting efficiently
@@ -411,8 +431,8 @@ def transform_asset_tasks(client, run_id: str):
     """Transform raw_asset_tasks to stg_asset_tasks"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks...")
 
-    # Clear existing staging data for this run
-    client.schema(SCHEMA_STAGING).table("stg_asset_tasks").delete().eq("run_id", run_id).execute()
+    # Clear ALL existing staging data (full refresh)
+    batched_delete_all(client, SCHEMA_STAGING, "stg_asset_tasks")
 
     # Fetch raw data in batches (large table)
     batch_size = 1000
@@ -523,8 +543,8 @@ def transform_qa_forms(client, run_id: str):
     """Transform raw QA form tables to stg_qa_form"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming QA forms...")
 
-    # Clear existing staging data for this run
-    client.schema(SCHEMA_STAGING).table("stg_qa_form").delete().eq("run_id", run_id).execute()
+    # Clear ALL existing staging data (full refresh)
+    batched_delete_all(client, SCHEMA_STAGING, "stg_qa_form")
 
     total_transformed = 0
     batch_size = 1000
@@ -833,8 +853,8 @@ def transform_requirements(client, run_id: str):
     """Transform raw_asset_task_requirements to stg_asset_task_requirements"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming requirements...")
 
-    # Clear existing staging data for this run
-    client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").delete().eq("run_id", run_id).execute()
+    # Clear ALL existing staging data (full refresh)
+    batched_delete_all(client, SCHEMA_STAGING, "stg_asset_task_requirements")
 
     total_transformed = 0
     batch_size = 1000

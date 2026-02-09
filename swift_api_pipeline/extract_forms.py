@@ -210,12 +210,23 @@ class FormsExtractor(BaseExtractor):
         logger.info("Loader complete")
 
     def clear_old_raw_data(self):
-        """Clear old raw data after successful extraction (keep current run_id)."""
+        """Clear old raw data in batches to avoid statement timeout (keep current run_id)."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
+        batch_size = 50000
         for form_config in QA_FORMS.values():
-            self.client.schema(SCHEMA_RAW).table(form_config["table_name"]).delete().neq(
-                "run_id", str(self.run_id)
-            ).execute()
+            table = form_config["table_name"]
+            min_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id').limit(1).execute()
+            max_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id', desc=True).limit(1).execute()
+            if not min_result.data or not max_result.data:
+                continue
+            current_id = min_result.data[0]['id']
+            max_id = max_result.data[0]['id']
+            while current_id <= max_id:
+                end_id = current_id + batch_size
+                self.client.schema(SCHEMA_RAW).table(table).delete().neq(
+                    "run_id", str(self.run_id)
+                ).gte('id', current_id).lt('id', end_id).execute()
+                current_id = end_id
         logger.info("Old raw data cleaned up")
 
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor

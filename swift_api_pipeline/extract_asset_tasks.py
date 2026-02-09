@@ -187,12 +187,36 @@ class AssetTaskExtractor(BaseExtractor):
             current_id = end_id
 
     def clear_old_raw_data(self):
-        """Clear old raw data after successful extraction (keep current run_id)."""
+        """Clear old raw data in batches to avoid statement timeout (keep current run_id)."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
-        self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").delete().neq(
-            "run_id", str(self.run_id)
-        ).execute()
-        logger.info("Old raw data cleaned up")
+
+        table = "raw_asset_tasks"
+        batch_size = 50000
+
+        # Get the full ID range of the table
+        min_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id').limit(1).execute()
+        max_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id', desc=True).limit(1).execute()
+
+        if not min_result.data or not max_result.data:
+            logger.info("No data to clean")
+            return
+
+        min_id = min_result.data[0]['id']
+        max_id = max_result.data[0]['id']
+        current_id = min_id
+        batches = 0
+
+        while current_id <= max_id:
+            end_id = current_id + batch_size
+            self.client.schema(SCHEMA_RAW).table(table).delete().neq(
+                "run_id", str(self.run_id)
+            ).gte('id', current_id).lt('id', end_id).execute()
+            current_id = end_id
+            batches += 1
+            if batches % 10 == 0:
+                logger.info(f"  Cleanup progress: processed {batches * batch_size:,} ID range...")
+
+        logger.info(f"Old raw data cleaned up ({batches} batches)")
 
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
