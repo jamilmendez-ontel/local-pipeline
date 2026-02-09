@@ -8,7 +8,8 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from config import (
-    get_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE
+    get_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE,
+    retry_supabase, QA_FORMS
 )
 
 # Timezone for all date conversions
@@ -43,10 +44,47 @@ def batched_delete_all(client, schema: str, table: str, batch_size: int = 50000)
 
     while current_id <= max_id:
         end_id = current_id + batch_size
-        client.schema(schema).table(table).delete().gte('id', current_id).lt('id', end_id).execute()
+        cid, eid = current_id, end_id
+        retry_supabase(
+            lambda cid=cid, eid=eid: client.schema(schema).table(table).delete().gte('id', cid).lt('id', eid).execute(),
+            description=f"delete {table}"
+        )
         current_id = end_id
 
     print(f"[{datetime.now():%H:%M:%S}] Cleared old data from {table}")
+
+
+def validate_transform_counts(client, raw_tables, stg_table, run_id, transformed_count):
+    """Compare raw and staging row counts after a transform to catch silent data loss.
+
+    Args:
+        raw_tables: Single table name (str) or list of table names to sum
+        stg_table: Staging table name
+        run_id: Pipeline run_id to filter raw rows
+        transformed_count: Number of rows the transform function reported processing
+    """
+    # Count raw rows for this run_id
+    if isinstance(raw_tables, str):
+        raw_tables = [raw_tables]
+
+    raw_count = 0
+    for table in raw_tables:
+        result = client.schema(SCHEMA_RAW).table(table).select('id', count='exact').eq('run_id', run_id).limit(1).execute()
+        raw_count += (result.count or 0)
+
+    # Count staging rows
+    stg_result = client.schema(SCHEMA_STAGING).table(stg_table).select('id', count='exact').limit(1).execute()
+    stg_count = stg_result.count or 0
+
+    if raw_count == transformed_count:
+        status = "OK"
+    else:
+        status = "MISMATCH"
+
+    print(f"  Validation [{stg_table}]: raw={raw_count:,} | transformed={transformed_count:,} | staging={stg_count:,} [{status}]")
+
+    if status == "MISMATCH":
+        print(f"  WARNING: {abs(raw_count - transformed_count):,} rows differ between raw and transformed!")
 
 
 def epoch_to_datetime(epoch_ms: int) -> str:
@@ -93,7 +131,10 @@ def transform_organizations(client, run_id: str):
     batch_size = 500
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
-        client.schema(SCHEMA_STAGING).table("stg_organizations").upsert(batch, on_conflict="org_did").execute()
+        retry_supabase(
+            lambda b=batch: client.schema(SCHEMA_STAGING).table("stg_organizations").upsert(b, on_conflict="org_did").execute(),
+            description="upsert stg_organizations"
+        )
 
     print(f"[{datetime.now():%H:%M:%S}] Transformed {len(rows)} organizations")
     return len(rows)
@@ -155,7 +196,10 @@ def transform_projects(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.schema(SCHEMA_STAGING).table("stg_projects").upsert(rows, on_conflict="project_did").execute()
+        retry_supabase(
+            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_projects").upsert(r, on_conflict="project_did").execute(),
+            description="upsert stg_projects"
+        )
         total_transformed += len(rows)
 
         print(f"[{datetime.now():%H:%M:%S}] Transformed {total_transformed:,} projects...")
@@ -237,7 +281,10 @@ def transform_user_priorities(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.schema(SCHEMA_STAGING).table("stg_user_priorities").insert(rows).execute()
+        retry_supabase(
+            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_user_priorities").insert(r).execute(),
+            description="insert stg_user_priorities"
+        )
         total_transformed += len(rows)
 
         print(f"[{datetime.now():%H:%M:%S}] Transformed {total_transformed:,} user priorities...")
@@ -275,6 +322,12 @@ def run_transform(run_id: str = None):
     proj_count = transform_projects(client, run_id)
     priority_count = transform_user_priorities(client, run_id)
 
+    # Row count validation
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_organizations", "stg_organizations", run_id, org_count)
+    validate_transform_counts(client, "raw_projects", "stg_projects", run_id, proj_count)
+    validate_transform_counts(client, "raw_user_priorities", "stg_user_priorities", run_id, priority_count)
+
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
     print(f"  Organizations: {org_count:,}")
@@ -303,6 +356,10 @@ def run_asset_tasks_transform(run_id: str = None):
             return
 
     asset_count = transform_asset_tasks(client, run_id)
+
+    # Row count validation
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_asset_tasks", "stg_asset_tasks", run_id, asset_count)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
@@ -392,9 +449,12 @@ def transform_assets(client, run_id: str):
     for i in range(0, len(assets_list), insert_batch_size):
         batch = assets_list[i:i + insert_batch_size]
         rows = [{**asset, "run_id": run_id} for asset in batch]
-        client.schema(SCHEMA_STAGING).table("stg_assets").upsert(
-            rows, on_conflict="project_did,asset_did"
-        ).execute()
+        retry_supabase(
+            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_assets").upsert(
+                r, on_conflict="project_did,asset_did"
+            ).execute(),
+            description="upsert stg_assets"
+        )
 
     print(f"[{datetime.now():%H:%M:%S}] Inserted {len(assets_list):,} assets")
     return len(assets_list)
@@ -420,6 +480,11 @@ def run_assets_transform(run_id: str = None):
             return
 
     asset_count = transform_assets(client, run_id)
+
+    # Row count validation (aggregate — staging count won't match raw 1:1)
+    stg_result = client.schema(SCHEMA_STAGING).table("stg_assets").select('id', count='exact').limit(1).execute()
+    print(f"\nRow Count Validation:")
+    print(f"  [stg_assets]: transformed={asset_count:,} | staging={stg_result.count or 0:,} (aggregated from raw_asset_tasks)")
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
@@ -504,7 +569,10 @@ def transform_asset_tasks(client, run_id: str):
                 "run_id": run_id
             })
 
-        client.schema(SCHEMA_STAGING).table("stg_asset_tasks").insert(rows).execute()
+        retry_supabase(
+            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_asset_tasks").insert(r).execute(),
+            description="insert stg_asset_tasks"
+        )
         total_transformed += len(rows)
 
         if total_transformed % 10000 == 0:
@@ -528,15 +596,6 @@ def extract_project_number(project_name: str) -> int:
     return int(match.group(1)) if match else None
 
 
-# QA Forms configuration (must match extract_forms.py)
-QA_FORMS_CONFIG = {
-    "qa_ts13": {"form_id": "-NH1hUPkaKtPdd7BK9cb", "table_name": "raw_form_qa_ts13", "display_name": "QA Form TS13"},
-    "qa_ts14": {"form_id": "-NXCg4vTDNVykN8ioMYp", "table_name": "raw_form_qa_ts14", "display_name": "QA Form TS14"},
-    "qa_ts15": {"form_id": "-Np6o9OCL4RWIJq68HJe", "table_name": "raw_form_qa_ts15", "display_name": "QA Form TS15"},
-    "qa_ts16": {"form_id": "-O9ACLN3je1w7oEoG5hY", "table_name": "raw_form_qa_ts16", "display_name": "QA Form TS16"},
-    "qa_ts17": {"form_id": "-ONMD-cGBq-_3r9ybaAq", "table_name": "raw_form_qa_ts17", "display_name": "QA Form TS17"},
-    "qa_ts18": {"form_id": "-O_J2hPlryTezP9RhujA", "table_name": "raw_form_qa_ts18", "display_name": "QA Form TS18"},
-}
 
 
 def transform_qa_forms(client, run_id: str):
@@ -549,7 +608,7 @@ def transform_qa_forms(client, run_id: str):
     total_transformed = 0
     batch_size = 1000
 
-    for form_name, form_config in QA_FORMS_CONFIG.items():
+    for form_name, form_config in QA_FORMS.items():
         table_name = form_config["table_name"]
         form_id = form_config["form_id"]
         display_name = form_config["display_name"]
@@ -694,7 +753,10 @@ def transform_qa_forms(client, run_id: str):
                 })
 
             if rows:
-                client.schema(SCHEMA_STAGING).table("stg_qa_form").insert(rows).execute()
+                retry_supabase(
+                    lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_qa_form").insert(r).execute(),
+                    description="insert stg_qa_form"
+                )
                 form_count += len(rows)
                 total_transformed += len(rows)
 
@@ -729,6 +791,11 @@ def run_qa_forms_transform(run_id: str = None):
             return
 
     qa_count = transform_qa_forms(client, run_id)
+
+    # Row count validation (sum across all raw form tables)
+    raw_tables = [cfg["table_name"] for cfg in QA_FORMS.values()]
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, raw_tables, "stg_qa_form", run_id, qa_count)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
@@ -810,7 +877,10 @@ def transform_timer_activities(client, run_id: str):
             })
 
         if rows:
-            client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(rows).execute()
+            retry_supabase(
+                lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(r).execute(),
+                description="insert stg_timer_activities"
+            )
             total_transformed += len(rows)
 
         offset += batch_size
@@ -842,6 +912,10 @@ def run_timer_transform(run_id: str = None):
             return
 
     timer_count = transform_timer_activities(client, run_id)
+
+    # Row count validation (append mode — validates current run only)
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_timer_activities", "stg_timer_activities", run_id, timer_count)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
@@ -925,7 +999,10 @@ def transform_requirements(client, run_id: str):
             })
 
         if rows:
-            client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").insert(rows).execute()
+            retry_supabase(
+                lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").insert(r).execute(),
+                description="insert stg_asset_task_requirements"
+            )
             total_transformed += len(rows)
 
         if total_transformed % 10000 == 0 and total_transformed > 0:
@@ -960,6 +1037,10 @@ def run_requirements_transform(run_id: str = None):
             return
 
     req_count = transform_requirements(client, run_id)
+
+    # Row count validation
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_asset_task_requirements", "stg_asset_task_requirements", run_id, req_count)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")

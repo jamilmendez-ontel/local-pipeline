@@ -13,7 +13,7 @@ from threading import Thread, Lock, Event
 from datetime import datetime, timezone
 from typing import List, Dict
 from config import (
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger, retry_supabase
 )
 from base_extractor import BaseExtractor
 
@@ -178,7 +178,10 @@ class RequirementsExtractor(BaseExtractor):
             for record in batch
         ]
 
-        self.client.schema(SCHEMA_RAW).table("raw_asset_task_requirements").insert(rows).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_RAW).table("raw_asset_task_requirements").insert(rows).execute(),
+            description="insert raw_asset_task_requirements"
+        )
         self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):

@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import sys
 from dotenv import load_dotenv
@@ -56,3 +57,58 @@ def get_supabase_client() -> Client:
             raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase_client
+
+
+def retry_supabase(fn, max_retries=3, description="operation"):
+    """Execute a Supabase operation with retry and exponential backoff.
+
+    Args:
+        fn: Callable that performs the Supabase operation
+        max_retries: Number of attempts before re-raising
+        description: Human-readable label for log messages
+    """
+    _logger = get_logger("retry")
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = min(2 ** attempt, 15)
+            _logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+
+# QA Forms configuration (TS13+) — single source of truth
+QA_FORMS = {
+    "qa_ts13": {
+        "form_id": "-NH1hUPkaKtPdd7BK9cb",
+        "table_name": "raw_form_qa_ts13",
+        "display_name": "QA Form TS13"
+    },
+    "qa_ts14": {
+        "form_id": "-NXCg4vTDNVykN8ioMYp",
+        "table_name": "raw_form_qa_ts14",
+        "display_name": "QA Form TS14"
+    },
+    "qa_ts15": {
+        "form_id": "-Np6o9OCL4RWIJq68HJe",
+        "table_name": "raw_form_qa_ts15",
+        "display_name": "QA Form TS15"
+    },
+    "qa_ts16": {
+        "form_id": "-O9ACLN3je1w7oEoG5hY",
+        "table_name": "raw_form_qa_ts16",
+        "display_name": "QA Form TS16"
+    },
+    "qa_ts17": {
+        "form_id": "-ONMD-cGBq-_3r9ybaAq",
+        "table_name": "raw_form_qa_ts17",
+        "display_name": "QA Form TS17"
+    },
+    "qa_ts18": {
+        "form_id": "-O_J2hPlryTezP9RhujA",
+        "table_name": "raw_form_qa_ts18",
+        "display_name": "QA Form TS18"
+    },
+}

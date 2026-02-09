@@ -12,7 +12,7 @@ from threading import Thread, Event
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from config import (
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger, retry_supabase
 )
 from base_extractor import BaseExtractor
 
@@ -123,7 +123,10 @@ class AssetTaskExtractor(BaseExtractor):
             for asset in batch
         ]
 
-        self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").insert(rows).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").insert(rows).execute(),
+            description="insert raw_asset_tasks"
+        )
         self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event):
@@ -208,9 +211,13 @@ class AssetTaskExtractor(BaseExtractor):
 
         while current_id <= max_id:
             end_id = current_id + batch_size
-            self.client.schema(SCHEMA_RAW).table(table).delete().neq(
-                "run_id", str(self.run_id)
-            ).gte('id', current_id).lt('id', end_id).execute()
+            cid, eid = current_id, end_id
+            retry_supabase(
+                lambda cid=cid, eid=eid: self.client.schema(SCHEMA_RAW).table(table).delete().neq(
+                    "run_id", str(self.run_id)
+                ).gte('id', cid).lt('id', eid).execute(),
+                description="delete raw_asset_tasks"
+            )
             current_id = end_id
             batches += 1
             if batches % 10 == 0:

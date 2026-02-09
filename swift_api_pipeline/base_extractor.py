@@ -13,7 +13,7 @@ from typing import Optional
 
 from config import (
     SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
-    SCHEMA_PIPELINE, get_logger
+    SCHEMA_PIPELINE, get_logger, retry_supabase
 )
 
 logger = get_logger("base")
@@ -80,7 +80,10 @@ class BaseExtractor:
         if metadata:
             row["metadata"] = metadata
 
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert(row).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert(row).execute(),
+            description="insert pipeline_runs"
+        )
         logger.info(f"Pipeline run started: {self.run_id}")
 
     def complete_pipeline_run(self, status: str, records: int = None, error: str = None) -> None:
@@ -94,9 +97,12 @@ class BaseExtractor:
         if error:
             update_data["error_message"] = error
 
-        self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(
-            update_data
-        ).eq("run_id", str(self.run_id)).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(
+                update_data
+            ).eq("run_id", str(self.run_id)).execute(),
+            description="update pipeline_runs"
+        )
         logger.info(f"Pipeline run completed: {status}")
 
     def increment_loaded(self, count: int) -> None:

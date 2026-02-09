@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from typing import List, Dict, Tuple
 from config import (
-    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger
+    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger, retry_supabase
 )
 from base_extractor import BaseExtractor
 
@@ -180,7 +180,10 @@ class TimerExtractor(BaseExtractor):
             for record in batch
         ]
 
-        self.client.schema(SCHEMA_RAW).table("raw_timer_activities").insert(rows).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_RAW).table("raw_timer_activities").insert(rows).execute(),
+            description="insert raw_timer_activities"
+        )
         self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):

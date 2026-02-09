@@ -14,7 +14,7 @@ from threading import Thread, Event
 from datetime import datetime, timezone
 from typing import List, Dict
 from config import (
-    SCHEMA_RAW, get_logger
+    SCHEMA_RAW, get_logger, retry_supabase, QA_FORMS
 )
 from base_extractor import BaseExtractor
 
@@ -24,40 +24,6 @@ PAGE_SIZE = 2000
 MAX_RETRIES = 10
 MAX_WORKERS = 3
 LOAD_BATCH_SIZE = 500
-
-# QA Forms configuration (TS13+)
-QA_FORMS = {
-    "qa_ts13": {
-        "form_id": "-NH1hUPkaKtPdd7BK9cb",
-        "table_name": "raw_form_qa_ts13",
-        "display_name": "QA Form TS13"
-    },
-    "qa_ts14": {
-        "form_id": "-NXCg4vTDNVykN8ioMYp",
-        "table_name": "raw_form_qa_ts14",
-        "display_name": "QA Form TS14"
-    },
-    "qa_ts15": {
-        "form_id": "-Np6o9OCL4RWIJq68HJe",
-        "table_name": "raw_form_qa_ts15",
-        "display_name": "QA Form TS15"
-    },
-    "qa_ts16": {
-        "form_id": "-O9ACLN3je1w7oEoG5hY",
-        "table_name": "raw_form_qa_ts16",
-        "display_name": "QA Form TS16"
-    },
-    "qa_ts17": {
-        "form_id": "-ONMD-cGBq-_3r9ybaAq",
-        "table_name": "raw_form_qa_ts17",
-        "display_name": "QA Form TS17"
-    },
-    "qa_ts18": {
-        "form_id": "-O_J2hPlryTezP9RhujA",
-        "table_name": "raw_form_qa_ts18",
-        "display_name": "QA Form TS18"
-    },
-}
 
 
 class FormsExtractor(BaseExtractor):
@@ -168,7 +134,10 @@ class FormsExtractor(BaseExtractor):
             for record in batch
         ]
 
-        self.client.schema(SCHEMA_RAW).table(table_name).insert(rows).execute()
+        retry_supabase(
+            lambda: self.client.schema(SCHEMA_RAW).table(table_name).insert(rows).execute(),
+            description=f"insert {table_name}"
+        )
         self.increment_loaded(len(batch))
 
     def loader_worker(self, result_queue: Queue, stop_event: Event):
@@ -223,9 +192,13 @@ class FormsExtractor(BaseExtractor):
             max_id = max_result.data[0]['id']
             while current_id <= max_id:
                 end_id = current_id + batch_size
-                self.client.schema(SCHEMA_RAW).table(table).delete().neq(
-                    "run_id", str(self.run_id)
-                ).gte('id', current_id).lt('id', end_id).execute()
+                cid, eid = current_id, end_id
+                retry_supabase(
+                    lambda cid=cid, eid=eid, t=table: self.client.schema(SCHEMA_RAW).table(t).delete().neq(
+                        "run_id", str(self.run_id)
+                    ).gte('id', cid).lt('id', eid).execute(),
+                    description=f"delete {table}"
+                )
                 current_id = end_id
         logger.info("Old raw data cleaned up")
 
