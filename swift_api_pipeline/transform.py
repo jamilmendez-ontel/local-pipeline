@@ -299,42 +299,81 @@ def transform_user_priorities(client, run_id: str):
     return total_transformed
 
 
-def run_transform(run_id: str = None):
-    """Run all transformations"""
+def run_orgs_projects_transform(run_id: str = None, client=None):
+    """Run organizations and projects transformations only"""
     print(f"\n{'='*60}")
-    print(f"Raw to Staging Transformation")
+    print(f"Organizations & Projects Transformation")
     print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'='*60}\n")
 
-    client = get_supabase_client()
+    if client is None:
+        client = get_supabase_client()
 
-    # Get latest run_id if not specified
+    # Get latest orgs_projects_extract run_id if not specified
     if not run_id:
-        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").order("started_at", desc=True).limit(1).execute()
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").eq("pipeline_name", "orgs_projects_extract").order("started_at", desc=True).limit(1).execute()
+        if not result.data:
+            # Fallback: try legacy pipeline name
+            result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").eq("pipeline_name", "swift_api_full_refresh").order("started_at", desc=True).limit(1).execute()
         if result.data:
             run_id = result.data[0]["run_id"]
             print(f"Using latest run_id: {run_id}")
         else:
-            print("No successful pipeline runs found")
+            print("No successful orgs/projects pipeline runs found")
             return
 
-    # Transform in order (respecting FK constraints)
     org_count = transform_organizations(client, run_id)
     proj_count = transform_projects(client, run_id)
-    priority_count = transform_user_priorities(client, run_id)
 
-    # Row count validation
     print(f"\nRow Count Validation:")
     validate_transform_counts(client, "raw_organizations", "stg_organizations", run_id, org_count)
     validate_transform_counts(client, "raw_projects", "stg_projects", run_id, proj_count)
-    validate_transform_counts(client, "raw_user_priorities", "stg_user_priorities", run_id, priority_count)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
     print(f"  Organizations: {org_count:,}")
     print(f"  Projects: {proj_count:,}")
+    print(f"{'='*60}\n")
+
+
+def run_user_priorities_transform(run_id: str = None, client=None):
+    """Run user priorities transformation only"""
+    print(f"\n{'='*60}")
+    print(f"User Priorities Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    if client is None:
+        client = get_supabase_client()
+
+    # Get latest user_priorities_extract run_id if not specified
+    if not run_id:
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").eq("pipeline_name", "user_priorities_extract").order("started_at", desc=True).limit(1).execute()
+        if not result.data:
+            # Fallback: try legacy pipeline name
+            result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select("run_id").eq("status", "success").eq("pipeline_name", "swift_api_full_refresh").order("started_at", desc=True).limit(1).execute()
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest run_id: {run_id}")
+        else:
+            print("No successful user priorities pipeline runs found")
+            return
+
+    priority_count = transform_user_priorities(client, run_id)
+
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_user_priorities", "stg_user_priorities", run_id, priority_count)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
     print(f"  User Priorities: {priority_count:,}")
     print(f"{'='*60}\n")
+
+
+def run_transform(run_id: str = None):
+    """Run orgs + projects + user priorities transformations (legacy entry point)"""
+    run_orgs_projects_transform(run_id)
+    run_user_priorities_transform(run_id)
 
 
 def run_asset_tasks_transform(run_id: str = None, client=None):

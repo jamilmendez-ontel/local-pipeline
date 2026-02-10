@@ -1,8 +1,11 @@
+import json
 import requests
 import time
 import jwt
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
+from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, PAGE_SIZE, MAX_RETRIES, get_logger
 
 logger = get_logger("extract")
@@ -53,43 +56,61 @@ class SwiftAPIExtractor:
         return self.token
 
     def extract_user_priorities(self) -> List[Dict]:
-        """Extract all user priorities with pagination"""
+        """Extract user priorities by status to avoid API 10K row cap.
+
+        Queries one status at a time (pending, in_progress) with a filter that
+        excludes all other statuses, then combines results.
+        """
         self._ensure_valid_token()
 
+        ALL_STATUSES = ["pending", "in_progress", "submitted", "approved", "rejected", "cancelled"]
+        TARGET_STATUSES = ["pending", "in_progress"]
+
         all_records = []
-        page = 0
 
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json"
         }
 
+        for target_status in TARGET_STATUSES:
+            records = self._extract_priorities_by_status(
+                target_status, ALL_STATUSES, headers
+            )
+            all_records.extend(records)
+
+        logger.info(f" User priorities extraction complete. Total: {len(all_records):,} records")
+        return all_records
+
+    def _extract_priorities_by_status(self, target_status, all_statuses, headers):
+        """Extract all user priorities for a single status value."""
+        # Build filter: exclude every status except the target
+        status_filter = {s: False for s in all_statuses if s != target_status}
+        filter_options = quote(json.dumps({"status": status_filter}))
+
+        records = []
+        page = 0
+        logger.info(f" Extracting user priorities with status: {target_status}")
+
         while True:
             url = (
                 f"{self.base_url}/api/next/user-priorities/_report"
                 f"?pageSize={PAGE_SIZE}&page={page}"
-                f"&filterOptions=%7B%22status%22%3A%7B%22approved%22%3Afalse%2C%22cancelled%22%3Afalse%7D%7D"
+                f"&filterOptions={filter_options}"
                 f"&tz=America/New_York&dateFormat=yyyy-MM-dd%27T%27HH%3Amm%3AssZ"
             )
 
+            data = None
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     response = requests.get(url, headers=headers, timeout=60)
 
                     if response.status_code == 200:
                         data = response.json().get("list", [])
-
-                        if not data:
-                            logger.info(f" User priorities extraction complete. Total: {len(all_records)} records")
-                            return all_records
-
-                        all_records.extend(data)
-                        logger.info(f" Page {page}: {len(data)} records (Total: {len(all_records)})")
                         break
                     elif response.status_code == 204:
-                        # 204 No Content means no more data
-                        logger.info(f" User priorities extraction complete. Total: {len(all_records)} records")
-                        return all_records
+                        data = []
+                        break
                     else:
                         logger.info(f" Status {response.status_code} on page {page}")
                         if attempt < MAX_RETRIES:
@@ -98,7 +119,6 @@ class SwiftAPIExtractor:
                             time.sleep(wait)
                         else:
                             logger.info(f" Max retries reached on page {page} with status {response.status_code}")
-                            return all_records
                         continue
 
                 except Exception as e:
@@ -116,9 +136,20 @@ class SwiftAPIExtractor:
                         time.sleep(wait)
                     else:
                         logger.info(f" Max retries reached on page {page}")
-                        return all_records
 
+            # If all retries failed, stop pagination for this status
+            if data is None:
+                break
+
+            if not data:
+                break
+
+            records.extend(data)
+            logger.info(f"   [{target_status}] Page {page}: {len(data)} records (subtotal: {len(records):,})")
             page += 1
+
+        logger.info(f"   [{target_status}] Complete: {len(records):,} records")
+        return records
 
     def extract_organizations(self) -> List[Dict]:
         """Extract all organizations for the authenticated user (paginated)"""
@@ -183,30 +214,29 @@ class SwiftAPIExtractor:
 
         return all_projects
 
-    def extract_all_projects(self) -> List[Dict]:
-        """Extract projects for all organizations"""
+    def extract_all_projects(self, max_workers: int = 10) -> List[Dict]:
+        """Extract projects for all organizations in parallel"""
         orgs = self.extract_organizations()
-        all_projects = []
 
-        for org in orgs:
+        def extract_org_projects(org):
             org_id = org["id"]
             org_name = org.get("name", "Unknown")
-
-            logger.info(f" Extracting projects for: {org_name}")
-
             try:
                 projects = self.extract_projects(org_id)
-
-                # Enrich projects with org context
                 for proj in projects:
                     proj["_org_id"] = org_id
                     proj["_org_name"] = org_name
-
-                all_projects.extend(projects)
-                logger.info(f"    Retrieved {len(projects)} projects")
-
+                logger.info(f"    Retrieved {len(projects)} projects for: {org_name}")
+                return projects
             except Exception as e:
                 logger.error(f"Failed to extract projects for {org_name}: {e}")
+                return []
+
+        all_projects = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(extract_org_projects, org): org for org in orgs}
+            for future in as_completed(futures):
+                all_projects.extend(future.result())
 
         logger.info(f" Total projects extracted: {len(all_projects)}")
         return all_projects

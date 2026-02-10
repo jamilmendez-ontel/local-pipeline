@@ -27,20 +27,34 @@ logger = get_logger("main")
 
 def run_orgs_projects_pipeline():
     """Run organizations and projects extraction + transformation"""
-    from pipeline import run_pipeline
-    from transform import run_transform
+    from pipeline import run_orgs_projects_extract
+    from transform import run_orgs_projects_transform
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# ORGANIZATIONS & PROJECTS PIPELINE")
     logger.info(f"{'#'*60}")
 
-    # Extract (returns 0 on success)
-    result = run_pipeline()
-    if result != 0:
-        raise RuntimeError("Organizations/Projects extraction failed")
+    run_id = run_orgs_projects_extract()
 
-    # Transform uses latest successful run
-    run_transform()
+    client = create_supabase_client()
+    run_orgs_projects_transform(run_id, client=client)
+
+    return True
+
+
+def run_user_priorities_pipeline():
+    """Run user priorities extraction + transformation"""
+    from pipeline import run_user_priorities_extract
+    from transform import run_user_priorities_transform
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# USER PRIORITIES PIPELINE")
+    logger.info(f"{'#'*60}")
+
+    run_id = run_user_priorities_extract()
+
+    client = create_supabase_client()
+    run_user_priorities_transform(run_id, client=client)
 
     return True
 
@@ -142,11 +156,12 @@ def run_all_pipelines():
 
     parallel_pipelines = [
         ("Asset Tasks", run_asset_tasks_pipeline),
+        ("User Priorities", run_user_priorities_pipeline),
         ("QA Forms", staggered_forms),
         ("Timer Activities", staggered_timer),
     ]
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(func): name
             for name, func in parallel_pipelines
@@ -176,7 +191,7 @@ def run_all_pipelines():
 
 def run_all_extractions():
     """Run all extractions only"""
-    from pipeline import run_pipeline
+    from pipeline import run_orgs_projects_extract, run_user_priorities_extract
     from extract_asset_tasks import run_asset_task_pipeline
     from extract_forms import run_forms_pipeline as extract_forms
     from extract_timer import run_timer_pipeline
@@ -191,10 +206,18 @@ def run_all_extractions():
     # Organizations & Projects
     try:
         logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting Organizations & Projects...")
-        run_pipeline()
+        run_orgs_projects_extract()
         results["Organizations & Projects"] = "SUCCESS"
     except Exception as e:
         results["Organizations & Projects"] = f"FAILED: {e}"
+
+    # User Priorities
+    try:
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting User Priorities...")
+        run_user_priorities_extract()
+        results["User Priorities"] = "SUCCESS"
+    except Exception as e:
+        results["User Priorities"] = f"FAILED: {e}"
 
     # Asset Tasks
     try:
@@ -235,7 +258,8 @@ def run_all_extractions():
 def run_all_transformations():
     """Run all transformations only (uses latest successful extractions)"""
     from transform import (
-        run_transform, run_assets_transform, run_asset_tasks_transform,
+        run_orgs_projects_transform, run_user_priorities_transform,
+        run_assets_transform, run_asset_tasks_transform,
         run_qa_forms_transform, run_timer_transform
     )
 
@@ -249,10 +273,18 @@ def run_all_transformations():
     # Organizations & Projects
     try:
         logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming Organizations & Projects...")
-        run_transform()
+        run_orgs_projects_transform()
         results["Organizations & Projects"] = "SUCCESS"
     except Exception as e:
         results["Organizations & Projects"] = f"FAILED: {e}"
+
+    # User Priorities
+    try:
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Transforming User Priorities...")
+        run_user_priorities_transform()
+        results["User Priorities"] = "SUCCESS"
+    except Exception as e:
+        results["User Priorities"] = f"FAILED: {e}"
 
     # Assets (from asset tasks raw data)
     try:
@@ -304,13 +336,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                         # Run all pipelines (extract + transform)
-  python main.py --extract               # Run all extractions only
-  python main.py --transform             # Run all transformations only
-  python main.py --pipeline asset_tasks  # Run asset_tasks pipeline only
-  python main.py --pipeline forms        # Run QA forms pipeline only
-  python main.py --pipeline timer        # Run timer pipeline only
-  python main.py --pipeline orgs         # Run orgs/projects pipeline only
+  python main.py                                # Run all pipelines (extract + transform)
+  python main.py --extract                      # Run all extractions only
+  python main.py --transform                    # Run all transformations only
+  python main.py --pipeline orgs                # Run orgs/projects pipeline only
+  python main.py --pipeline user_priorities     # Run user priorities pipeline only
+  python main.py --pipeline asset_tasks         # Run asset_tasks pipeline only
+  python main.py --pipeline forms               # Run QA forms pipeline only
+  python main.py --pipeline timer               # Run timer pipeline only
         """
     )
 
@@ -328,7 +361,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "asset_tasks", "forms", "timer"],
+        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -342,6 +375,8 @@ Examples:
         elif args.pipeline:
             if args.pipeline == "orgs":
                 success = run_orgs_projects_pipeline()
+            elif args.pipeline == "user_priorities":
+                success = run_user_priorities_pipeline()
             elif args.pipeline == "asset_tasks":
                 success = run_asset_tasks_pipeline()
             elif args.pipeline == "forms":
