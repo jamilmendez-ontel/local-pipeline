@@ -7,8 +7,9 @@ All timestamps are converted to America/New_York timezone for consistency
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor
 from config import (
-    get_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE,
+    get_supabase_client, create_supabase_client, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE,
     retry_supabase, QA_FORMS
 )
 
@@ -336,14 +337,15 @@ def run_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
-def run_asset_tasks_transform(run_id: str = None):
+def run_asset_tasks_transform(run_id: str = None, client=None):
     """Run asset tasks transformation only"""
     print(f"\n{'='*60}")
     print(f"Asset Tasks Transformation")
     print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'='*60}\n")
 
-    client = get_supabase_client()
+    if client is None:
+        client = get_supabase_client()
 
     # Get latest asset_tasks_extract run_id if not specified
     if not run_id:
@@ -368,89 +370,46 @@ def run_asset_tasks_transform(run_id: str = None):
 
 
 def transform_assets(client, run_id: str):
-    """Transform raw_asset_tasks to stg_assets by extracting unique assets"""
+    """Transform raw_asset_tasks to stg_assets using SQL aggregation (RPC)"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming assets...")
 
     # Clear ALL existing staging data (full refresh)
     batched_delete_all(client, SCHEMA_STAGING, "stg_assets")
 
-    # We'll aggregate asset data from raw_asset_tasks
-    # Use SQL to do the heavy lifting efficiently
-    # First, get the raw data and aggregate in Python (could also use RPC/SQL)
+    # Fresh client for RPC call — avoids schema() mutation from batched_delete_all
+    rpc_client = create_supabase_client()
 
-    batch_size = 1000
+    # Use SQL aggregation via RPC instead of scanning 2.2M rows in Python
+    # Paginate results to avoid PostgREST 1000-row cap
+    print(f"[{datetime.now():%H:%M:%S}] Running SQL aggregation via RPC...")
+    assets_list = []
     offset = 0
-    assets_map = {}  # (project_did, asset_did) -> asset_data
-
-    print(f"[{datetime.now():%H:%M:%S}] Scanning raw_asset_tasks for unique assets...")
-
+    page_size = 1000
     while True:
-        result = client.schema(SCHEMA_RAW).table("raw_asset_tasks").select("project_did, data").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
-
-        if not result.data:
+        result = retry_supabase(
+            lambda o=offset: rpc_client.schema(SCHEMA_RAW).rpc(
+                "aggregate_assets_from_raw", {"p_run_id": run_id}
+            ).range(o, o + page_size - 1).execute(),
+            description="rpc aggregate_assets_from_raw"
+        )
+        batch = result.data
+        assets_list.extend(batch)
+        if len(batch) < page_size:
             break
+        offset += page_size
 
-        for record in result.data:
-            data = record["data"]
-            project_did = record["project_did"]
-            asset_did = data.get("Asset_DID")
+    print(f"[{datetime.now():%H:%M:%S}] Found {len(assets_list):,} unique assets")
 
-            if not asset_did:
-                continue
+    # Fresh client for writes — avoids schema() thread-safety issues
+    write_client = create_supabase_client()
 
-            key = (project_did, asset_did)
-
-            if key not in assets_map:
-                assets_map[key] = {
-                    "project_did": project_did,
-                    "asset_did": asset_did,
-                    "asset_id": data.get("Asset_ID"),
-                    "asset_name": data.get("Asset_Name"),
-                    "requirement_count": data.get("Asset_Requirement_Count"),
-                    "task_count": 0,
-                    "tasks_pending": 0,
-                    "tasks_in_progress": 0,
-                    "tasks_submitted": 0,
-                    "tasks_approved": 0,
-                    "tasks_rejected": 0,
-                    "tasks_cancelled": 0,
-                }
-
-            # Count task statuses
-            assets_map[key]["task_count"] += 1
-            status = data.get("Task_Status", "").lower()
-            if status == "pending":
-                assets_map[key]["tasks_pending"] += 1
-            elif status == "in_progress":
-                assets_map[key]["tasks_in_progress"] += 1
-            elif status == "submitted":
-                assets_map[key]["tasks_submitted"] += 1
-            elif status == "approved":
-                assets_map[key]["tasks_approved"] += 1
-            elif status == "rejected":
-                assets_map[key]["tasks_rejected"] += 1
-            elif status == "cancelled":
-                assets_map[key]["tasks_cancelled"] += 1
-
-        offset += batch_size
-
-        if offset % 100000 == 0:
-            print(f"[{datetime.now():%H:%M:%S}] Scanned {offset:,} records, found {len(assets_map):,} unique assets...")
-
-        if len(result.data) < batch_size:
-            break
-
-    print(f"[{datetime.now():%H:%M:%S}] Found {len(assets_map):,} unique assets")
-
-    # Insert assets in batches
-    assets_list = list(assets_map.values())
-    insert_batch_size = 500
-
+    # Insert in batches of 2000
+    insert_batch_size = 2000
     for i in range(0, len(assets_list), insert_batch_size):
         batch = assets_list[i:i + insert_batch_size]
         rows = [{**asset, "run_id": run_id} for asset in batch]
         retry_supabase(
-            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_assets").upsert(
+            lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_assets").upsert(
                 r, on_conflict="project_did,asset_did"
             ).execute(),
             description="upsert stg_assets"
@@ -460,14 +419,15 @@ def transform_assets(client, run_id: str):
     return len(assets_list)
 
 
-def run_assets_transform(run_id: str = None):
+def run_assets_transform(run_id: str = None, client=None):
     """Run assets transformation only"""
     print(f"\n{'='*60}")
     print(f"Assets Transformation")
     print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'='*60}\n")
 
-    client = get_supabase_client()
+    if client is None:
+        client = get_supabase_client()
 
     # Get latest asset_tasks_extract run_id if not specified
     if not run_id:
@@ -499,10 +459,15 @@ def transform_asset_tasks(client, run_id: str):
     # Clear ALL existing staging data (full refresh)
     batched_delete_all(client, SCHEMA_STAGING, "stg_asset_tasks")
 
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
     # Fetch raw data in batches (large table)
     batch_size = 1000
     offset = 0
     total_transformed = 0
+    write_futures = []
+    write_pool = ThreadPoolExecutor(max_workers=3)
 
     while True:
         result = client.schema(SCHEMA_RAW).table("raw_asset_tasks").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
@@ -569,10 +534,12 @@ def transform_asset_tasks(client, run_id: str):
                 "run_id": run_id
             })
 
-        retry_supabase(
-            lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_asset_tasks").insert(r).execute(),
+        # Submit write to thread pool using separate write_client (non-blocking)
+        write_futures.append(write_pool.submit(
+            retry_supabase,
+            lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_asset_tasks").insert(r).execute(),
             description="insert stg_asset_tasks"
-        )
+        ))
         total_transformed += len(rows)
 
         if total_transformed % 10000 == 0:
@@ -582,6 +549,11 @@ def transform_asset_tasks(client, run_id: str):
 
         if len(result.data) < batch_size:
             break
+
+    # Wait for all writes to complete
+    for f in write_futures:
+        f.result()  # raises if any write failed
+    write_pool.shutdown(wait=False)
 
     print(f"[{datetime.now():%H:%M:%S}] Total asset tasks transformed: {total_transformed:,}")
     return total_transformed
@@ -605,8 +577,13 @@ def transform_qa_forms(client, run_id: str):
     # Clear ALL existing staging data (full refresh)
     batched_delete_all(client, SCHEMA_STAGING, "stg_qa_form")
 
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
     total_transformed = 0
     batch_size = 1000
+    write_futures = []
+    write_pool = ThreadPoolExecutor(max_workers=3)
 
     for form_name, form_config in QA_FORMS.items():
         table_name = form_config["table_name"]
@@ -753,10 +730,12 @@ def transform_qa_forms(client, run_id: str):
                 })
 
             if rows:
-                retry_supabase(
-                    lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_qa_form").insert(r).execute(),
+                # Submit write to thread pool using separate write_client (non-blocking)
+                write_futures.append(write_pool.submit(
+                    retry_supabase,
+                    lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_qa_form").insert(r).execute(),
                     description="insert stg_qa_form"
-                )
+                ))
                 form_count += len(rows)
                 total_transformed += len(rows)
 
@@ -767,18 +746,24 @@ def transform_qa_forms(client, run_id: str):
 
         print(f"[{datetime.now():%H:%M:%S}] {display_name}: {form_count:,} rows")
 
+    # Wait for all writes to complete
+    for f in write_futures:
+        f.result()
+    write_pool.shutdown(wait=False)
+
     print(f"[{datetime.now():%H:%M:%S}] Total QA forms transformed: {total_transformed:,}")
     return total_transformed
 
 
-def run_qa_forms_transform(run_id: str = None):
+def run_qa_forms_transform(run_id: str = None, client=None):
     """Run QA forms transformation only"""
     print(f"\n{'='*60}")
     print(f"QA Forms Transformation")
     print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'='*60}\n")
 
-    client = get_supabase_client()
+    if client is None:
+        client = get_supabase_client()
 
     # Get latest forms_extract run_id if not specified
     if not run_id:
@@ -823,9 +808,14 @@ def transform_timer_activities(client, run_id: str):
     # Data from other run_ids is preserved (append mode)
     client.schema(SCHEMA_STAGING).table("stg_timer_activities").delete().eq("run_id", run_id).execute()
 
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
     total_transformed = 0
     batch_size = 1000
     offset = 0
+    write_futures = []
+    write_pool = ThreadPoolExecutor(max_workers=3)
 
     while True:
         result = client.schema(SCHEMA_RAW).table("raw_timer_activities").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
@@ -877,10 +867,11 @@ def transform_timer_activities(client, run_id: str):
             })
 
         if rows:
-            retry_supabase(
-                lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(r).execute(),
+            write_futures.append(write_pool.submit(
+                retry_supabase,
+                lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(r).execute(),
                 description="insert stg_timer_activities"
-            )
+            ))
             total_transformed += len(rows)
 
         offset += batch_size
@@ -888,18 +879,24 @@ def transform_timer_activities(client, run_id: str):
         if len(result.data) < batch_size:
             break
 
+    # Wait for all writes to complete
+    for f in write_futures:
+        f.result()
+    write_pool.shutdown(wait=False)
+
     print(f"[{datetime.now():%H:%M:%S}] Total timer activities transformed: {total_transformed:,}")
     return total_transformed
 
 
-def run_timer_transform(run_id: str = None):
+def run_timer_transform(run_id: str = None, client=None):
     """Run timer activities transformation only"""
     print(f"\n{'='*60}")
     print(f"Timer Activities Transformation")
     print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"{'='*60}\n")
 
-    client = get_supabase_client()
+    if client is None:
+        client = get_supabase_client()
 
     # Get latest timer_extract run_id if not specified
     if not run_id:
@@ -930,9 +927,14 @@ def transform_requirements(client, run_id: str):
     # Clear ALL existing staging data (full refresh)
     batched_delete_all(client, SCHEMA_STAGING, "stg_asset_task_requirements")
 
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
     total_transformed = 0
     batch_size = 1000
     offset = 0
+    write_futures = []
+    write_pool = ThreadPoolExecutor(max_workers=3)
 
     while True:
         result = client.schema(SCHEMA_RAW).table("raw_asset_task_requirements").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
@@ -999,10 +1001,11 @@ def transform_requirements(client, run_id: str):
             })
 
         if rows:
-            retry_supabase(
-                lambda r=rows: client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").insert(r).execute(),
+            write_futures.append(write_pool.submit(
+                retry_supabase,
+                lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_asset_task_requirements").insert(r).execute(),
                 description="insert stg_asset_task_requirements"
-            )
+            ))
             total_transformed += len(rows)
 
         if total_transformed % 10000 == 0 and total_transformed > 0:
@@ -1012,6 +1015,11 @@ def transform_requirements(client, run_id: str):
 
         if len(result.data) < batch_size:
             break
+
+    # Wait for all writes to complete
+    for f in write_futures:
+        f.result()
+    write_pool.shutdown(wait=False)
 
     print(f"[{datetime.now():%H:%M:%S}] Total requirements transformed: {total_transformed:,}")
     return total_transformed

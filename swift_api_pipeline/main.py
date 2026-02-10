@@ -11,9 +11,11 @@ Usage:
 """
 
 import sys
+import time
 import argparse
 from datetime import datetime
-from config import setup_logging, get_logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from config import setup_logging, get_logger, create_supabase_client
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -55,11 +57,14 @@ def run_asset_tasks_pipeline():
     # Extract (returns run_id or raises)
     run_id = run_asset_task_pipeline()
 
+    # Each parallel pipeline gets its own Supabase client for thread safety
+    client = create_supabase_client()
+
     # Transform assets (aggregated from asset tasks)
-    run_assets_transform(run_id)
+    run_assets_transform(run_id, client=client)
 
     # Transform asset tasks (individual task records)
-    run_asset_tasks_transform(run_id)
+    run_asset_tasks_transform(run_id, client=client)
 
     return True
 
@@ -76,8 +81,11 @@ def run_forms_pipeline():
     # Extract (returns run_id or raises)
     run_id = extract_forms()
 
+    # Each parallel pipeline gets its own Supabase client for thread safety
+    client = create_supabase_client()
+
     # Transform
-    run_qa_forms_transform(run_id)
+    run_qa_forms_transform(run_id, client=client)
 
     return True
 
@@ -94,37 +102,64 @@ def run_timer_pipeline_full():
     # Extract (returns run_id or raises)
     run_id = run_timer_pipeline()
 
+    # Each parallel pipeline gets its own Supabase client for thread safety
+    client = create_supabase_client()
+
     # Transform
-    run_timer_transform(run_id)
+    run_timer_transform(run_id, client=client)
 
     return True
 
 
 def run_all_pipelines():
-    """Run all pipelines in sequence"""
+    """Run all pipelines — orgs/projects first, then remaining 3 in parallel"""
     logger.info(f"\n{'='*60}")
-    logger.info(f"SWIFT API PIPELINE - FULL RUN")
+    logger.info(f"SWIFT API PIPELINE - FULL RUN (PARALLEL)")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}")
 
-    pipelines = [
-        ("Organizations & Projects", run_orgs_projects_pipeline),
-        ("Asset Tasks", run_asset_tasks_pipeline),
-        ("QA Forms", run_forms_pipeline),
-        ("Timer Activities", run_timer_pipeline_full),
-    ]
-
     results = {}
 
-    for name, func in pipelines:
-        try:
-            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: {name}")
-            func()
-            results[name] = "SUCCESS"
-            logger.info(f"Completed: {name}")
-        except Exception as e:
-            results[name] = f"FAILED: {e}"
-            logger.error(f"FAILED: {name} - {e}")
+    # Phase 1: Orgs/Projects MUST run first (others may depend on reference data)
+    try:
+        logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Organizations & Projects")
+        run_orgs_projects_pipeline()
+        results["Organizations & Projects"] = "SUCCESS"
+        logger.info(f"Completed: Organizations & Projects")
+    except Exception as e:
+        results["Organizations & Projects"] = f"FAILED: {e}"
+        logger.error(f"FAILED: Organizations & Projects - {e}")
+
+    # Phase 2: Remaining pipelines in parallel (no dependencies between them)
+    # Stagger starts to avoid overwhelming the Swift API with simultaneous connections
+    def staggered_forms():
+        time.sleep(10)  # Let asset tasks establish first
+        return run_forms_pipeline()
+
+    def staggered_timer():
+        time.sleep(5)  # Small delay for timer (lightest pipeline)
+        return run_timer_pipeline_full()
+
+    parallel_pipelines = [
+        ("Asset Tasks", run_asset_tasks_pipeline),
+        ("QA Forms", staggered_forms),
+        ("Timer Activities", staggered_timer),
+    ]
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(func): name
+            for name, func in parallel_pipelines
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+                results[name] = "SUCCESS"
+                logger.info(f"Completed: {name}")
+            except Exception as e:
+                results[name] = f"FAILED: {e}"
+                logger.error(f"FAILED: {name} - {e}")
 
     # Summary
     logger.info(f"\n{'='*60}")

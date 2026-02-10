@@ -20,8 +20,8 @@ logger = get_logger("asset_tasks")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
-MAX_WORKERS = 3  # Concurrent API threads
-LOAD_BATCH_SIZE = 500
+MAX_WORKERS = 6  # Concurrent API threads (matches number of projects)
+LOAD_BATCH_SIZE = 1000
 
 
 class AssetTaskExtractor(BaseExtractor):

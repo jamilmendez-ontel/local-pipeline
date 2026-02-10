@@ -21,7 +21,27 @@
       "Bash(git reset:*)",
       "Bash(git rm:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd Swift API data pipeline for local Supabase\n\nImplements ETL pipeline to extract data from Swift Projects API and load into local Supabase:\n\n- Extract user priorities, organizations, and projects via API\n- Parallel asset-task extraction using ThreadPoolExecutor \\(3 workers\\)\n- Stream data to database during extraction for memory efficiency\n- Medallion architecture: raw JSONB tables -> flattened staging tables\n- DID-based relationships between staging tables\n- Reference table for TECH-OPS projects \\(TS13-TS18\\)\n\nExtracts ~2.2 million asset-task records across 6 projects.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate Claude local settings\n\nAdd git commit permission to allowed commands.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate Claude local settings\n\nAdd git commit permission to allowed commands.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git remote set-url:*)",
+      "Bash(git push:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\pip.exe\" install playwright)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\playwright.exe\" install chromium)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u \"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\discover_forms.py\" --visible --filter \"QA.*TS1[3-9]\":*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u -c \"\nfrom extract_forms import run_forms_pipeline, QA_FORMS\n\n# Extract only TS18\nts18_form = {''qa_ts18'': QA_FORMS[''qa_ts18'']}\nrun_forms_pipeline\\(forms=ts18_form, max_workers=1\\)\n\")",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -u transform.py qa_forms 9125b173-bdfb-4bcf-8131-7dc6bb8e4129)",
+      "Bash(git commit:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\pip.exe\" install python-dateutil)",
+      "Bash(dir:*)",
+      "Bash(docker restart:*)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\pip.exe\" install tzdata)",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(for i in 1 2 3 4 5 6 7 8 9 10)",
+      "Bash(do)",
+      "Bash(done)",
+      "Bash(powershell -Command:*)",
+      "Bash(wmic process where \"name=''python.exe''\" get ProcessId,CommandLine /format:list)",
+      "Bash(\"C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline\\\\venv\\\\Scripts\\\\python.exe\" -c \"\nimport sys\nsys.path.insert\\(0, r''C:\\\\Users\\\\admin\\\\Desktop\\\\Projects\\\\ai-projects\\\\local-pipeline\\\\swift_api_pipeline''\\)\nfrom config import get_supabase_client, SCHEMA_STAGING\nclient = get_supabase_client\\(\\)\ntry:\n    test = client.schema\\(SCHEMA_STAGING\\).table\\(''stg_timer_activities''\\).select\\(''start_date, end_date''\\).limit\\(1\\).execute\\(\\)\n    print\\(''start_date and end_date columns exist!''\\)\n    print\\(f''Data: {test.data}''\\)\nexcept Exception as e:\n    print\\(f''Columns missing - Error: {e}''\\)\n\")"
     ]
   }
 }

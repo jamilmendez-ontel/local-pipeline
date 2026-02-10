@@ -59,6 +59,13 @@ def get_supabase_client() -> Client:
     return _supabase_client
 
 
+def create_supabase_client() -> Client:
+    """Create a new Supabase client instance (thread-safe, for parallel pipelines)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
 def retry_supabase(fn, max_retries=3, description="operation"):
     """Execute a Supabase operation with retry and exponential backoff.
 

@@ -22,8 +22,8 @@ logger = get_logger("timer")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
-MAX_WORKERS = 3
-LOAD_BATCH_SIZE = 500
+MAX_WORKERS = 6
+LOAD_BATCH_SIZE = 1000
 TIMEZONE = "America/New_York"
 
 
