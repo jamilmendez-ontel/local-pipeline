@@ -17,8 +17,10 @@ from config import (
 TZ_ET = ZoneInfo("America/New_York")
 
 # Regex patterns for cleaning task names
-# Removes leading sequence numbers (e.g., "1. ", "10. ") and trailing revision numbers (e.g., " 2", " 3")
-TASK_NAME_PREFIX_PATTERN = re.compile(r'^\d+\.\s*')
+# Removes leading sequence numbers (e.g., "1. ", "10. ", "4B. ", "10B. ", "1.2. ")
+# and trailing revision numbers (e.g., " 2", " 3")
+TASK_NAME_PREFIX_PATTERN = re.compile(r'^(\d+[a-zA-Z]?\.\s*)+')
+
 TASK_NAME_SUFFIX_PATTERN = re.compile(r'\s+\d+$')
 
 
