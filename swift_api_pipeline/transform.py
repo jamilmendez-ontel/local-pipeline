@@ -1386,6 +1386,41 @@ def run_requirements_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
+def backfill_asset_did(client=None):
+    """Backfill asset_did on stg_timer_activities and stg_qa_form from stg_assets.
+
+    Calls the data_staging.backfill_asset_did() RPC which runs server-side
+    UPDATEs joining on site_id = asset_id. Self-healing: each run refreshes
+    asset_did for ALL rows, catching any asset_id changes.
+    """
+    print(f"\n{'='*60}")
+    print(f"Asset DID Backfill")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    if client is None:
+        client = create_supabase_client()
+
+    # Verify stg_assets has data before calling RPC
+    check = client.schema(SCHEMA_STAGING).table("stg_assets").select("asset_did", count="exact").limit(1).execute()
+    if not check.count:
+        print("stg_assets is empty -- skipping asset_did backfill")
+        return
+
+    result = client.schema(SCHEMA_STAGING).rpc("backfill_asset_did", params={}).execute()
+
+    if result.data:
+        row = result.data[0]
+        timer_updated = row.get("timer_updated", 0)
+        qa_form_updated = row.get("qa_form_updated", 0)
+        print(f"  Timer rows updated:   {timer_updated:,}")
+        print(f"  QA Form rows updated: {qa_form_updated:,}")
+    else:
+        print("  RPC returned no data")
+
+    print(f"\n{'='*60}\n")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:

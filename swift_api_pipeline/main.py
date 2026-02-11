@@ -306,6 +306,31 @@ def run_all_pipelines(send_email=True):
                     ))
                     logger.error(f"FAILED: {name} - {e}")
 
+        # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
+        p_start = datetime.now(timezone.utc)
+        try:
+            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Asset DID Backfill")
+            from transform import backfill_asset_did
+            backfill_asset_did()
+            p_end = datetime.now(timezone.utc)
+            results["Asset DID Backfill"] = "SUCCESS"
+            pipeline_results.append(PipelineResult(
+                pipeline_name="Asset DID Backfill", status="SUCCESS",
+                started_at=p_start, ended_at=p_end,
+                duration_seconds=(p_end - p_start).total_seconds(),
+            ))
+            logger.info(f"Completed: Asset DID Backfill")
+        except Exception as e:
+            p_end = datetime.now(timezone.utc)
+            results["Asset DID Backfill"] = f"FAILED: {e}"
+            pipeline_results.append(PipelineResult(
+                pipeline_name="Asset DID Backfill", status="FAILED",
+                started_at=p_start, ended_at=p_end,
+                duration_seconds=(p_end - p_start).total_seconds(),
+                error_message=str(e),
+            ))
+            logger.error(f"FAILED: Asset DID Backfill - {e}")
+
         # Summary
         logger.info(f"\n{'='*60}")
         logger.info(f"PIPELINE SUMMARY")
@@ -412,7 +437,8 @@ def run_all_transformations(send_email=True):
     from transform import (
         run_orgs_projects_transform, run_user_priorities_transform,
         run_assets_transform, run_asset_tasks_transform,
-        run_qa_forms_transform, run_timer_transform
+        run_qa_forms_transform, run_timer_transform,
+        backfill_asset_did
     )
 
     overall_start = datetime.now(timezone.utc)
@@ -433,6 +459,7 @@ def run_all_transformations(send_email=True):
             ("Asset Tasks", run_asset_tasks_transform),
             ("QA Forms", run_qa_forms_transform),
             ("Timer Activities", run_timer_transform),
+            ("Asset DID Backfill", backfill_asset_did),
         ]
 
         for name, func in transform_steps:
