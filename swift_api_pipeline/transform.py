@@ -959,6 +959,295 @@ def run_timer_transform(run_id: str = None, client=None):
     print(f"{'='*60}\n")
 
 
+def transform_historical_timer_activities(run_id: str, project_did_map: dict):
+    """Transform raw_timer_activities_historical → stg_timer_activities.
+
+    Used by load_historical_timer.py to transform Excel-sourced historical
+    timer data into the same staging table used by the regular pipeline.
+
+    Args:
+        run_id: UUID identifying this historical load
+        project_did_map: dict mapping project_name → project_did
+    """
+    read_client = create_supabase_client()
+    write_client = create_supabase_client()
+
+    # Delete any existing staging data for this run_id (idempotent re-runs)
+    write_client.schema(SCHEMA_STAGING).table("stg_timer_activities").delete().eq("run_id", run_id).execute()
+
+    total_transformed = 0
+    batch_size = 1000
+    offset = 0
+    write_futures = []
+    write_pool = ThreadPoolExecutor(max_workers=3)
+    missing_projects = set()
+
+    print(f"[{datetime.now():%H:%M:%S}] Transforming historical timer data to staging...")
+
+    while True:
+        result = read_client.schema(SCHEMA_RAW).table("raw_timer_activities_historical").select("*").eq("run_id", run_id).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        rows = []
+        for record in result.data:
+            data = record["data"]
+            project = data.get("Project", "")
+            project_number = extract_project_number(project)
+            project_did = project_did_map.get(project)
+
+            if project_did is None and project not in missing_projects:
+                missing_projects.add(project)
+                print(f"  WARNING: No project_did for '{project}'")
+
+            task = data.get("Task")
+
+            rows.append({
+                "project": project,
+                "project_number": project_number,
+                "project_did": project_did,
+                "site_name": data.get("Site Name"),
+                "site_id": data.get("Site ID"),
+                "task": task,
+                "task_clean": clean_task_name(task),
+                # GPS columns — not in Excel data
+                "site_lat": None,
+                "site_long": None,
+                "user_lat": None,
+                "user_long": None,
+                "user_accuracy_m": None,
+                "site_vs_user_km": None,
+                # Time data
+                "start_time": data.get("Start Time"),
+                "end_time": data.get("End Time"),
+                "duration_min": data.get("Duration (min)"),
+                # User info
+                "user_name": data.get("User Name"),
+                "user_email": data.get("User Email"),
+                "user_role": data.get("User Role"),
+                # Metadata
+                "run_id": run_id,
+                "run_date": str(record["run_date"]),
+                "start_date": str(record["start_date"]),
+                "end_date": str(record["end_date"]),
+            })
+
+        if rows:
+            write_futures.append(write_pool.submit(
+                retry_supabase,
+                lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_timer_activities").insert(r).execute(),
+                description="insert stg_timer historical batch"
+            ))
+            total_transformed += len(rows)
+
+        offset += batch_size
+
+        if total_transformed % 10000 == 0 and total_transformed > 0:
+            print(f"[{datetime.now():%H:%M:%S}]   Staging transformed: {total_transformed:,}")
+
+        if len(result.data) < batch_size:
+            break
+
+    # Wait for all writes
+    for f in write_futures:
+        f.result()
+    write_pool.shutdown(wait=False)
+
+    print(f"[{datetime.now():%H:%M:%S}] Historical timer staging complete: {total_transformed:,} records")
+    return total_transformed
+
+
+def transform_ar_aging(client, run_id: str):
+    """Transform raw_ar_aging to stg_ar_aging for a specific run_id (append mode)."""
+    print(f"[{datetime.now():%H:%M:%S}] Transforming AR aging...")
+
+    # Delete existing staging data for this run_id (idempotent re-runs)
+    client.schema(SCHEMA_STAGING).table("stg_ar_aging").delete().eq("run_id", run_id).execute()
+
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
+    total_transformed = 0
+    batch_size = 1000
+    offset = 0
+
+    while True:
+        result = client.schema(SCHEMA_RAW).table("raw_ar_aging").select("*").eq(
+            "run_id", run_id
+        ).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        rows = []
+        for record in result.data:
+            data = record["data"]
+            rows.append({
+                "as_of_date": record["as_of_date"],
+                "email_received_date": record.get("email_received_date"),
+                "aging_bucket": data.get("aging_bucket"),
+                "date": data.get("date"),
+                "transaction_type": data.get("transaction_type"),
+                "num": data.get("num"),
+                "customer": data.get("customer"),
+                "location": data.get("location"),
+                "due_date": data.get("due_date"),
+                "amount": data.get("amount"),
+                "open_balance": data.get("open_balance"),
+                "past_due": data.get("past_due"),
+                "po_number": data.get("po_number"),
+                "run_id": run_id,
+            })
+
+        if rows:
+            retry_supabase(
+                lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_ar_aging").insert(r).execute(),
+                description="insert stg_ar_aging"
+            )
+            total_transformed += len(rows)
+
+        offset += batch_size
+
+        if len(result.data) < batch_size:
+            break
+
+    print(f"[{datetime.now():%H:%M:%S}] Total AR aging records transformed: {total_transformed:,}")
+    return total_transformed
+
+
+def run_ar_aging_transform(run_id: str = None, client=None):
+    """Run AR aging transformation only."""
+    print(f"\n{'='*60}")
+    print(f"AR Aging Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    if client is None:
+        client = get_supabase_client()
+
+    # Get latest ar_aging_extract run_id if not specified
+    if not run_id:
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select(
+            "run_id"
+        ).eq("pipeline_name", "ar_aging_extract").eq("status", "success").order(
+            "started_at", desc=True
+        ).limit(1).execute()
+
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest ar_aging run_id: {run_id}")
+        else:
+            print("No successful AR aging pipeline runs found")
+            return
+
+    aging_count = transform_ar_aging(client, run_id)
+
+    # Row count validation
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_ar_aging", "stg_ar_aging", run_id, aging_count)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  AR Aging Records: {aging_count:,}")
+    print(f"{'='*60}\n")
+
+
+def transform_sales_detail(client, run_id: str):
+    """Transform raw_sales_detail to stg_sales_detail for a specific run_id (append mode)."""
+    print(f"[{datetime.now():%H:%M:%S}] Transforming sales detail...")
+
+    # Delete existing staging data for this run_id (idempotent re-runs)
+    client.schema(SCHEMA_STAGING).table("stg_sales_detail").delete().eq("run_id", run_id).execute()
+
+    # Separate write client to avoid schema() thread-safety issues
+    write_client = create_supabase_client()
+
+    total_transformed = 0
+    batch_size = 1000
+    offset = 0
+
+    while True:
+        result = client.schema(SCHEMA_RAW).table("raw_sales_detail").select("*").eq(
+            "run_id", run_id
+        ).range(offset, offset + batch_size - 1).execute()
+
+        if not result.data:
+            break
+
+        rows = []
+        for record in result.data:
+            data = record["data"]
+            rows.append({
+                "as_of_date": record["as_of_date"],
+                "email_received_date": record.get("email_received_date"),
+                "date": data.get("date"),
+                "transaction_type": data.get("transaction_type"),
+                "num": data.get("num"),
+                "customer": data.get("customer"),
+                "memo_description": data.get("memo_description"),
+                "qty": data.get("qty"),
+                "sales_price": data.get("sales_price"),
+                "amount": data.get("amount"),
+                "balance": data.get("balance"),
+                "po_number": data.get("po_number"),
+                "service_date": data.get("service_date"),
+                "run_id": run_id,
+            })
+
+        if rows:
+            retry_supabase(
+                lambda r=rows: write_client.schema(SCHEMA_STAGING).table("stg_sales_detail").insert(r).execute(),
+                description="insert stg_sales_detail"
+            )
+            total_transformed += len(rows)
+
+        offset += batch_size
+
+        if len(result.data) < batch_size:
+            break
+
+    print(f"[{datetime.now():%H:%M:%S}] Total sales detail records transformed: {total_transformed:,}")
+    return total_transformed
+
+
+def run_sales_detail_transform(run_id: str = None, client=None):
+    """Run sales detail transformation only."""
+    print(f"\n{'='*60}")
+    print(f"Sales Detail Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    if client is None:
+        client = get_supabase_client()
+
+    # Get latest sales_detail_extract run_id if not specified
+    if not run_id:
+        result = client.schema(SCHEMA_PIPELINE).table("pipeline_runs").select(
+            "run_id"
+        ).eq("pipeline_name", "sales_detail_extract").eq("status", "success").order(
+            "started_at", desc=True
+        ).limit(1).execute()
+
+        if result.data:
+            run_id = result.data[0]["run_id"]
+            print(f"Using latest sales_detail run_id: {run_id}")
+        else:
+            print("No successful sales detail pipeline runs found")
+            return
+
+    sales_count = transform_sales_detail(client, run_id)
+
+    # Row count validation
+    print(f"\nRow Count Validation:")
+    validate_transform_counts(client, "raw_sales_detail", "stg_sales_detail", run_id, sales_count)
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  Sales Detail Records: {sales_count:,}")
+    print(f"{'='*60}\n")
+
+
 def transform_requirements(client, run_id: str):
     """Transform raw_asset_task_requirements to stg_asset_task_requirements"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming requirements...")
@@ -1113,8 +1402,14 @@ if __name__ == "__main__":
         elif sys.argv[1] == "requirements":
             run_id = sys.argv[2] if len(sys.argv) > 2 else None
             run_requirements_transform(run_id)
+        elif sys.argv[1] == "ar_aging":
+            run_id = sys.argv[2] if len(sys.argv) > 2 else None
+            run_ar_aging_transform(run_id)
+        elif sys.argv[1] == "sales":
+            run_id = sys.argv[2] if len(sys.argv) > 2 else None
+            run_sales_detail_transform(run_id)
         else:
             print(f"Unknown transform type: {sys.argv[1]}")
-            print("Usage: python transform.py [assets|asset_tasks|qa_forms|timer|requirements] [run_id]")
+            print("Usage: python transform.py [assets|asset_tasks|qa_forms|timer|requirements|ar_aging|sales] [run_id]")
     else:
         run_transform()

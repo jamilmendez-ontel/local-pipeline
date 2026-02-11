@@ -23,3 +23,7 @@ nul
 
 # Logs
 *.log
+
+# Gmail API credentials
+gmail_credentials/
+token.pickle
