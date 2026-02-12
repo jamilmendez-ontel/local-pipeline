@@ -1,0 +1,264 @@
+// Swift API Pipeline — Staging Schema
+// Paste into https://dbdiagram.io to visualize
+// Generated: 2026-02-11
+
+Table stg_organizations {
+  id bigserial [pk]
+  org_did text [not null, unique, note: 'Immutable org identifier']
+  org_name text
+  avc text
+  poc_id text
+  poc_name text
+  poc_email text
+  created_by_id text
+  date_created timestamptz
+  last_updated timestamptz
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '300 rows — Top of hierarchy'
+}
+
+Table stg_projects {
+  id bigserial [pk]
+  project_did text [not null, unique, note: 'Immutable project identifier']
+  project_name text
+  org_did text [not null, ref: > stg_organizations.org_did]
+  org_name text
+  status text
+  is_private boolean
+  location_orientation text
+  asset_task_count integer
+  asset_task_pending integer
+  asset_task_approved integer
+  asset_task_rejected integer
+  asset_task_cancelled integer
+  asset_task_submitted integer
+  asset_task_in_progress integer
+  asset_project_count integer
+  asset_milestone_count integer
+  project_task_count integer
+  project_task_pending integer
+  project_task_approved integer
+  created_by_id text
+  date_created timestamptz
+  last_updated timestamptz
+  metrics_last_updated timestamptz
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '1,111 rows'
+}
+
+Table stg_assets {
+  id bigserial [pk]
+  project_did text [not null, ref: > stg_projects.project_did]
+  asset_did text [not null, note: 'Immutable asset identifier']
+  asset_id text [note: 'Human-readable site ID (can change)']
+  asset_name text [note: 'Site name (can change)']
+  task_count integer
+  requirement_count integer
+  tasks_pending integer
+  tasks_in_progress integer
+  tasks_submitted integer
+  tasks_approved integer
+  tasks_rejected integer
+  tasks_cancelled integer
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  indexes {
+    (project_did, asset_did) [unique]
+  }
+
+  note: '29,007 rows — Central hub linking projects to tasks, forms, timer, priorities'
+}
+
+Table stg_asset_tasks {
+  id bigserial [pk]
+  project_did text [not null, ref: > stg_projects.project_did]
+  project_status text
+  asset_did text [not null, ref: > stg_assets.asset_did]
+  task_did text [not null, note: 'Immutable task identifier']
+  asset_id text
+  asset_name text
+  asset_requirement_count integer
+  task_name text
+  task_name_clean text
+  task_status text
+  task_scheduled date
+  task_assigned_to_did text
+  task_assigned_to_collection text
+  task_assigned_to_name text
+  task_assigned_to_email text
+  task_submitted_on date
+  task_submitted_by_did text
+  task_submitted_by_name text
+  task_submitted_by_email text
+  task_approved_on date
+  task_approved_by_did text
+  task_approved_by_name text
+  task_approved_by_email text
+  task_cancelled_on date
+  task_cancelled_by_did text
+  task_cancelled_by_name text
+  task_cancelled_by_email text
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '2,228,945 rows — Task-level detail per asset'
+}
+
+Table stg_user_priorities {
+  id bigserial [pk]
+  task_did text
+  asset_did text [ref: > stg_assets.asset_did]
+  org_did text [ref: > stg_organizations.org_did]
+  project_did text [ref: > stg_projects.project_did]
+  task_name text
+  task_name_clean text
+  milestone text
+  status text
+  calendar_status text
+  assigned_to text
+  scheduled date
+  scheduled_by text
+  display_date date
+  duration integer
+  pin_type text
+  submitted_by text
+  submitted_on date
+  approved_by text
+  approved_on date
+  rejected_by text
+  rejected_on date
+  cancelled_by text
+  cancelled_on date
+  organization text
+  project text
+  asset_id text
+  asset_name text
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '101,847 rows — Task scheduling and approval workflow'
+}
+
+Table stg_timer_activities {
+  id bigserial [pk]
+  project text
+  project_number integer
+  project_did text [ref: > stg_projects.project_did]
+  site_name text
+  site_id text
+  asset_did text [ref: > stg_assets.asset_did, note: 'Backfilled from stg_assets']
+  task text
+  task_clean text
+  site_lat numeric
+  site_long numeric
+  user_lat numeric
+  user_long numeric
+  user_accuracy_m numeric
+  site_vs_user_km numeric
+  start_time timestamptz
+  end_time timestamptz
+  duration_min numeric
+  user_name text
+  user_email text
+  user_role text
+  run_id uuid [not null]
+  run_date date
+  start_date date
+  end_date date
+  loaded_at timestamptz
+
+  note: '273,139 rows — Append mode, asset_did is write-once'
+}
+
+Table stg_qa_form {
+  id bigserial [pk]
+  form_name text [not null]
+  form_id text [not null]
+  project text
+  project_number integer
+  site_name text
+  site_id text
+  asset_did text [ref: > stg_assets.asset_did, note: 'Backfilled from stg_assets']
+  task text
+  task_clean text
+  requirement text
+  requirement_status text
+  live_review_performed text
+  swift_used_for_photos text
+  crew_lead text
+  construction_manager text
+  subcontractor text
+  aat text
+  ret text
+  sweeps text
+  pim text
+  fiber text
+  pictures text
+  as_builts text
+  rf_mitigation text
+  pmi text
+  power_testing text
+  connectivity_testing text
+  optical_power_testing text
+  restoration text
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '346,637 rows — Truncate+reload, asset_did preserved via lookup table'
+}
+
+Table stg_ar_aging {
+  id bigserial [pk]
+  as_of_date date
+  email_received_date date
+  aging_bucket text
+  date text
+  transaction_type text
+  num text
+  customer text
+  location text
+  due_date text
+  amount numeric
+  open_balance numeric
+  past_due numeric
+  po_number text
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '153,414 rows — Standalone financial table (no joins)'
+}
+
+Table stg_sales_detail {
+  id bigserial [pk]
+  as_of_date date
+  email_received_date date
+  date text
+  transaction_type text
+  num text
+  customer text
+  memo_description text
+  qty numeric
+  sales_price numeric
+  amount numeric
+  balance numeric
+  po_number text
+  service_date text
+  run_id uuid [not null]
+  loaded_at timestamptz
+
+  note: '4,692 rows — Standalone financial table (no joins)'
+}
+
+Table qa_form_asset_did_lookup {
+  site_id text [pk]
+  site_name text
+  asset_did text [not null]
+  updated_at timestamptz
+
+  note: '25,912 mappings — Persistent lookup for QA form truncate+reload cycles'
+}
