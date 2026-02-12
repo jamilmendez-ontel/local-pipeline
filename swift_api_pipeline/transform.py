@@ -1421,6 +1421,32 @@ def backfill_asset_did(client=None):
     print(f"\n{'='*60}\n")
 
 
+def refresh_analytics(client=None):
+    """Refresh analytics materialized views (mv_project_summary, mv_technician_stats, mv_daily_completion).
+
+    Calls analytics.refresh_one_mv() RPC once per MV to stay within PostgREST timeout.
+    Each MV is refreshed CONCURRENTLY (requires unique index).
+    """
+    print(f"\n{'='*60}")
+    print(f"Analytics MV Refresh")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    if client is None:
+        client = create_supabase_client()
+
+    mvs = ["mv_project_summary", "mv_technician_stats", "mv_daily_completion"]
+    for mv in mvs:
+        result = client.schema("analytics").rpc("refresh_one_mv", params={"p_view_name": mv}).execute()
+        if result.data:
+            row = result.data[0]
+            print(f"  {row['view_name']}: {row['refresh_time_ms']:,}ms")
+        else:
+            print(f"  {mv}: no data returned")
+
+    print(f"\n{'='*60}\n")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:

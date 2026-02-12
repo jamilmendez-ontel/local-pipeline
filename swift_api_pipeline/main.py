@@ -331,6 +331,31 @@ def run_all_pipelines(send_email=True):
             ))
             logger.error(f"FAILED: Asset DID Backfill - {e}")
 
+        # Post-Phase 2: Refresh analytics materialized views
+        p_start = datetime.now(timezone.utc)
+        try:
+            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Analytics MV Refresh")
+            from transform import refresh_analytics
+            refresh_analytics()
+            p_end = datetime.now(timezone.utc)
+            results["Analytics MV Refresh"] = "SUCCESS"
+            pipeline_results.append(PipelineResult(
+                pipeline_name="Analytics MV Refresh", status="SUCCESS",
+                started_at=p_start, ended_at=p_end,
+                duration_seconds=(p_end - p_start).total_seconds(),
+            ))
+            logger.info(f"Completed: Analytics MV Refresh")
+        except Exception as e:
+            p_end = datetime.now(timezone.utc)
+            results["Analytics MV Refresh"] = f"FAILED: {e}"
+            pipeline_results.append(PipelineResult(
+                pipeline_name="Analytics MV Refresh", status="FAILED",
+                started_at=p_start, ended_at=p_end,
+                duration_seconds=(p_end - p_start).total_seconds(),
+                error_message=str(e),
+            ))
+            logger.error(f"FAILED: Analytics MV Refresh - {e}")
+
         # Summary
         logger.info(f"\n{'='*60}")
         logger.info(f"PIPELINE SUMMARY")
@@ -438,7 +463,7 @@ def run_all_transformations(send_email=True):
         run_orgs_projects_transform, run_user_priorities_transform,
         run_assets_transform, run_asset_tasks_transform,
         run_qa_forms_transform, run_timer_transform,
-        backfill_asset_did
+        backfill_asset_did, refresh_analytics
     )
 
     overall_start = datetime.now(timezone.utc)
@@ -460,6 +485,7 @@ def run_all_transformations(send_email=True):
             ("QA Forms", run_qa_forms_transform),
             ("Timer Activities", run_timer_transform),
             ("Asset DID Backfill", backfill_asset_did),
+            ("Analytics MV Refresh", refresh_analytics),
         ]
 
         for name, func in transform_steps:
