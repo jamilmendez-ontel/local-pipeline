@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, get_supabase_client,
+    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, create_supabase_client,
     SCHEMA_PIPELINE, get_logger, retry_supabase
 )
 
@@ -26,7 +26,7 @@ class BaseExtractor:
         self.base_url = SWIFT_BASE_URL
         self.token: Optional[str] = None
         self.token_lock = Lock()
-        self.client = get_supabase_client()
+        self.client = create_supabase_client()
         self.run_id = uuid.uuid4()
         self.total_loaded = 0
         self.load_lock = Lock()

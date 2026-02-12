@@ -2,13 +2,13 @@ import uuid
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 from supabase import Client
-from config import get_supabase_client, SCHEMA_RAW, SCHEMA_PIPELINE, get_logger
+from config import create_supabase_client, SCHEMA_RAW, SCHEMA_PIPELINE, get_logger
 
 logger = get_logger("load")
 
 class SupabaseLoader:
     def __init__(self):
-        self.client: Client = get_supabase_client()
+        self.client: Client = create_supabase_client()
         self.run_id: uuid.UUID = uuid.uuid4()
 
     def start_pipeline_run(self, pipeline_name: str) -> uuid.UUID:

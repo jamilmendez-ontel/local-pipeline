@@ -66,7 +66,7 @@ def create_supabase_client() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def retry_supabase(fn, max_retries=3, description="operation"):
+def retry_supabase(fn, max_retries=5, description="operation"):
     """Execute a Supabase operation with retry and exponential backoff.
 
     Args:

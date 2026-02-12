@@ -5,8 +5,9 @@ REM Logs output to pipeline_logs directory
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
 set VENV_PYTHON=%SCRIPT_DIR%venv\Scripts\python.exe
-set TIMESTAMP=%date:~-4%%date:~4,2%%date:~7,2%_%time:~0,2%%time:~3,2%
-set TIMESTAMP=%TIMESTAMP: =0%
+REM Use WMIC for consistent date format regardless of locale
+for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value') do set DT=%%I
+set TIMESTAMP=%DT:~0,8%_%DT:~8,4%
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
