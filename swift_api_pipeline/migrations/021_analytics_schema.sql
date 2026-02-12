@@ -281,16 +281,23 @@ CREATE UNIQUE INDEX ON analytics.mv_technician_stats (technician_name, technicia
 CREATE MATERIALIZED VIEW analytics.mv_daily_completion AS
 SELECT
     at.task_approved_on AS completion_date,
+    at.asset_did,
+    a.asset_id,
+    a.asset_name,
     at.project_did,
     p.project_name,
     at.task_name_clean AS task_type,
     COUNT(*) AS tasks_completed
 FROM data_staging.stg_asset_tasks at
-JOIN data_staging.stg_projects p ON at.project_did = p.project_did
+JOIN data_staging.stg_assets a
+    ON at.asset_did = a.asset_did AND at.project_did = a.project_did
+JOIN data_staging.stg_projects p
+    ON at.project_did = p.project_did
 WHERE at.task_status = 'approved' AND at.task_approved_on IS NOT NULL
-GROUP BY at.task_approved_on, at.project_did, p.project_name, at.task_name_clean;
+GROUP BY at.task_approved_on, at.asset_did, a.asset_id, a.asset_name,
+         at.project_did, p.project_name, at.task_name_clean;
 
-CREATE UNIQUE INDEX ON analytics.mv_daily_completion (completion_date, project_did, task_type);
+CREATE UNIQUE INDEX ON analytics.mv_daily_completion (completion_date, asset_did, project_did, task_type);
 
 
 -- =============================================================================
