@@ -4,6 +4,7 @@ Extract Forms data from Swift API
 Supports QA Forms for TS13+ projects
 """
 
+import json
 import requests
 import time
 import csv
@@ -14,7 +15,7 @@ from threading import Thread, Event
 from datetime import datetime, timezone
 from typing import List, Dict
 from config import (
-    SCHEMA_RAW, get_logger, retry_supabase, QA_FORMS
+    SCHEMA_RAW, get_logger, retry_db, get_db, QA_FORMS
 )
 from base_extractor import BaseExtractor
 
@@ -23,7 +24,7 @@ logger = get_logger("forms")
 PAGE_SIZE = 2000
 MAX_RETRIES = 10
 MAX_WORKERS = 6
-LOAD_BATCH_SIZE = 1000
+LOAD_BATCH_SIZE = 10000
 
 
 class FormsExtractor(BaseExtractor):
@@ -126,17 +127,20 @@ class FormsExtractor(BaseExtractor):
 
     def load_batch(self, table_name: str, batch: List[Dict]):
         """Load a batch of form responses to raw table"""
-        rows = [
-            {
-                "run_id": str(self.run_id),
-                "data": record
-            }
+        run_id_str = str(self.run_id)
+        tuples = [
+            (run_id_str, record)
             for record in batch
         ]
 
-        retry_supabase(
-            lambda: self.client.schema(SCHEMA_RAW).table(table_name).insert(rows).execute(),
-            description=f"insert {table_name}"
+        retry_db(
+            lambda: self.db.copy_records(
+                table_name,
+                schema_name=SCHEMA_RAW,
+                records=tuples,
+                columns=["run_id", "data"],
+            ),
+            description=f"copy {table_name}"
         )
         self.increment_loaded(len(batch))
 
@@ -179,27 +183,17 @@ class FormsExtractor(BaseExtractor):
         logger.info("Loader complete")
 
     def clear_old_raw_data(self):
-        """Clear old raw data in batches to avoid statement timeout (keep current run_id)."""
+        """Clear old raw data (keep current run_id). Single query per table."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
-        batch_size = 50000
         for form_config in QA_FORMS.values():
             table = form_config["table_name"]
-            min_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id').limit(1).execute()
-            max_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id', desc=True).limit(1).execute()
-            if not min_result.data or not max_result.data:
-                continue
-            current_id = min_result.data[0]['id']
-            max_id = max_result.data[0]['id']
-            while current_id <= max_id:
-                end_id = current_id + batch_size
-                cid, eid = current_id, end_id
-                retry_supabase(
-                    lambda cid=cid, eid=eid, t=table: self.client.schema(SCHEMA_RAW).table(t).delete().neq(
-                        "run_id", str(self.run_id)
-                    ).gte('id', cid).lt('id', eid).execute(),
-                    description=f"delete {table}"
-                )
-                current_id = end_id
+            retry_db(
+                lambda t=table: self.db.execute(
+                    f'DELETE FROM {SCHEMA_RAW}.{t} WHERE run_id != $1',
+                    str(self.run_id)
+                ),
+                description=f"delete old {table}"
+            )
         logger.info("Old raw data cleaned up")
 
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-AR Aging Pipeline — Gmail to Supabase
+AR Aging Pipeline -- Gmail to Supabase
 
 Extracts AR Aging Detail attachments from "Daily Revenue Report" emails,
-parses the QuickBooks Excel format, and loads into Supabase.
+parses the QuickBooks Excel format, and loads into database.
 
 Each day's file is a snapshot identified by `as_of_date`.
-Dedup check: skips emails whose `as_of_date` already exists in raw_ar_aging.
+Dedup check: skips emails whose received date already exists in raw_ar_aging
+(received date, not as_of_date, because the same as_of_date can appear on consecutive days).
 
 Usage:
     python extract_aging.py                    # Process all unloaded emails
@@ -15,16 +16,15 @@ Usage:
 """
 
 import os
-import uuid
 import json
+import uuid
 import tempfile
 import argparse
 from datetime import datetime, timezone
-from typing import Optional
 
 from config import (
     SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE,
-    get_logger, create_supabase_client, retry_supabase
+    get_logger, get_db, retry_db
 )
 from gmail_client import authenticate, search_messages, get_message_details, download_attachment
 from parse_aging import parse_aging_excel
@@ -36,102 +36,78 @@ GMAIL_QUERY = 'subject:"Daily Revenue Report" has:attachment'
 ATTACHMENT_PATTERN = "Aging+Detail"
 
 
-def get_existing_as_of_dates(client) -> set:
-    """Get all as_of_date values already loaded into raw_ar_aging."""
-    results = []
-    offset = 0
-    batch_size = 1000
-
-    while True:
-        result = client.schema(SCHEMA_RAW).table("raw_ar_aging").select(
-            "as_of_date"
-        ).range(offset, offset + batch_size - 1).execute()
-
-        if not result.data:
-            break
-
-        results.extend(result.data)
-        if len(result.data) < batch_size:
-            break
-        offset += batch_size
-
-    return {row["as_of_date"] for row in results}
+def get_existing_received_timestamps(db) -> set:
+    """Get all email received timestamps already loaded into raw_ar_aging.
+    Uses full timestamp (not just date) so multiple emails on the same day are each loaded.
+    """
+    rows = db.fetch(
+        f'SELECT DISTINCT email_received_date FROM {SCHEMA_RAW}.raw_ar_aging '
+        f'WHERE email_received_date IS NOT NULL'
+    )
+    return {row["email_received_date"].strftime("%Y-%m-%d %H:%M:%S") for row in rows}
 
 
-def start_pipeline_run(client, run_id: str, metadata: dict = None):
+def start_pipeline_run(db, run_id: str, metadata: dict = None):
     """Record pipeline run start."""
-    row = {
-        "run_id": run_id,
-        "pipeline_name": "ar_aging_extract",
-        "status": "running",
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if metadata:
-        row["metadata"] = metadata
-
-    retry_supabase(
-        lambda: client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert(row).execute(),
+    retry_db(
+        lambda: db.execute(
+            f'INSERT INTO {SCHEMA_PIPELINE}.pipeline_runs (run_id, pipeline_name, status, started_at, metadata) '
+            f'VALUES ($1, $2, $3, $4, $5)',
+            run_id, "ar_aging_extract", "running", datetime.now(timezone.utc), metadata
+        ),
         description="insert pipeline_runs"
     )
 
 
-def complete_pipeline_run(client, run_id: str, status: str, records: int = None, error: str = None):
+def complete_pipeline_run(db, run_id: str, status: str, records: int = None, error: str = None):
     """Update pipeline run status."""
-    update_data = {
-        "status": status,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if records is not None:
-        update_data["records_extracted"] = records
-    if error:
-        update_data["error_message"] = error
-
-    retry_supabase(
-        lambda: client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(
-            update_data
-        ).eq("run_id", run_id).execute(),
+    retry_db(
+        lambda: db.execute(
+            f'UPDATE {SCHEMA_PIPELINE}.pipeline_runs '
+            f'SET status = $1, completed_at = $2, records_extracted = $3, error_message = $4 '
+            f'WHERE run_id = $5',
+            status, datetime.now(timezone.utc), records, error, run_id
+        ),
         description="update pipeline_runs"
     )
 
 
-def load_raw_batch(client, rows: list):
+def load_raw_batch(db, rows: list):
     """Insert a batch of raw AR aging records."""
-    retry_supabase(
-        lambda: client.schema(SCHEMA_RAW).table("raw_ar_aging").insert(rows).execute(),
+    tuples = [
+        (row["run_id"], row["as_of_date"], row.get("email_received_date"),
+         row.get("source_file"), row["data"])
+        for row in rows
+    ]
+    retry_db(
+        lambda: db.executemany(
+            f'INSERT INTO {SCHEMA_RAW}.raw_ar_aging (run_id, as_of_date, email_received_date, source_file, data) '
+            f'VALUES ($1, $2, $3, $4, $5)',
+            tuples
+        ),
         description="insert raw_ar_aging"
     )
 
 
-def transform_ar_aging_for_run(client, run_id: str):
-    """Transform raw → staging for a single run_id (inline transform)."""
+def transform_ar_aging_for_run(db, run_id: str):
+    """Transform raw -> staging for a single run_id (inline transform)."""
     from transform import transform_ar_aging
-    transform_ar_aging(client, run_id)
+    transform_ar_aging(db, run_id)
 
 
 def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
-    """
-    Main AR Aging pipeline.
-
-    1. Authenticate with Gmail
-    2. Search for Daily Revenue Report emails
-    3. For each email, download Aging+Detail attachment
-    4. Parse Excel → extract as_of_date + rows
-    5. Dedup check (skip if as_of_date already loaded)
-    6. Load raw records in batches
-    7. Transform raw → staging
-    """
+    """Main AR Aging pipeline."""
     logger.info(f"\n{'='*60}")
     logger.info(f"AR Aging Extraction Pipeline")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}\n")
 
-    # Supabase client for this pipeline
-    client = create_supabase_client()
+    db = get_db()
 
-    # Get existing as_of_dates for dedup
-    existing_dates = set() if reprocess else get_existing_as_of_dates(client)
-    if existing_dates:
-        logger.info(f"Found {len(existing_dates)} existing as_of_dates in raw_ar_aging")
+    # Get existing received timestamps for dedup
+    existing_timestamps = set() if reprocess else get_existing_received_timestamps(db)
+    if existing_timestamps:
+        logger.info(f"Found {len(existing_timestamps)} existing received timestamps in raw_ar_aging")
 
     # Gmail authentication
     logger.info("Authenticating with Gmail...")
@@ -147,8 +123,7 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
         logger.info("No emails found. Nothing to process.")
         return None
 
-    # Process emails (oldest first for chronological loading)
-    # Get details for all messages to sort by date
+    # Process emails (oldest first)
     message_details = []
     for msg in messages:
         details = get_message_details(service, msg["id"])
@@ -161,7 +136,6 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
     total_errors = 0
     processed_dates = []
 
-    # Temp directory for downloads
     with tempfile.TemporaryDirectory() as tmp_dir:
         for details in message_details:
             msg_id = details["id"]
@@ -171,20 +145,16 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             logger.info(f"\nProcessing: {subject}")
             logger.info(f"  Received: {received_date:%Y-%m-%d %H:%M:%S UTC}")
 
-            # Download Aging+Detail attachment
-            filepath = download_attachment(
-                service, msg_id, ATTACHMENT_PATTERN, tmp_dir
-            )
+            filepath = download_attachment(service, msg_id, ATTACHMENT_PATTERN, tmp_dir)
 
             if not filepath:
-                logger.warning(f"  No '{ATTACHMENT_PATTERN}' attachment found — skipping")
+                logger.warning(f"  No '{ATTACHMENT_PATTERN}' attachment found -- skipping")
                 total_skipped += 1
                 continue
 
             filename = os.path.basename(filepath)
             logger.info(f"  Downloaded: {filename}")
 
-            # Parse Excel
             try:
                 as_of_date, rows = parse_aging_excel(filepath)
             except Exception as e:
@@ -195,20 +165,17 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             logger.info(f"  As of date: {as_of_date}")
             logger.info(f"  Parsed rows: {len(rows)}")
 
-            # Dedup check
             as_of_str = str(as_of_date)
-            if as_of_str in existing_dates:
-                logger.info(f"  SKIPPED — as_of_date {as_of_str} already loaded")
+            received_ts_str = received_date.strftime("%Y-%m-%d %H:%M:%S")
+            if received_ts_str in existing_timestamps:
+                logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded (as_of_date={as_of_str})")
                 total_skipped += 1
                 continue
 
-            # Generate run_id for this file
             run_id = str(uuid.uuid4())
             logger.info(f"  Run ID: {run_id}")
 
-            # Start pipeline run tracking
-            write_client = create_supabase_client()
-            start_pipeline_run(write_client, run_id, metadata={
+            start_pipeline_run(db, run_id, metadata={
                 "as_of_date": as_of_str,
                 "source_file": filename,
                 "email_received_date": received_date.isoformat(),
@@ -216,7 +183,6 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             })
 
             try:
-                # Load raw records in batches
                 email_received_iso = received_date.isoformat()
                 for i in range(0, len(rows), LOAD_BATCH_SIZE):
                     batch = rows[i:i + LOAD_BATCH_SIZE]
@@ -230,31 +196,27 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
                         }
                         for record in batch
                     ]
-                    load_raw_batch(write_client, raw_rows)
+                    load_raw_batch(db, raw_rows)
 
                 logger.info(f"  Loaded {len(rows)} raw records")
                 total_loaded += len(rows)
 
-                # Transform raw → staging
-                transform_client = create_supabase_client()
-                transform_ar_aging_for_run(transform_client, run_id)
+                transform_ar_aging_for_run(db, run_id)
 
-                complete_pipeline_run(write_client, run_id, "success", records=len(rows))
-                existing_dates.add(as_of_str)
-                processed_dates.append(as_of_str)
+                complete_pipeline_run(db, run_id, "success", records=len(rows))
+                existing_timestamps.add(received_ts_str)
+                processed_dates.append(f"{received_ts_str} (as_of={as_of_str})")
 
             except Exception as e:
                 logger.error(f"  Load/transform error: {e}")
-                complete_pipeline_run(write_client, run_id, "failed", error=str(e))
+                complete_pipeline_run(db, run_id, "failed", error=str(e))
                 total_errors += 1
 
-            # Clean up downloaded file
             try:
                 os.remove(filepath)
             except OSError:
                 pass
 
-    # Summary
     logger.info(f"\n{'='*60}")
     logger.info(f"AR Aging Pipeline Complete")
     logger.info(f"  Emails processed: {len(message_details)}")
@@ -271,17 +233,8 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract AR Aging from Gmail")
-    parser.add_argument(
-        "--max-emails", type=int, default=100,
-        help="Maximum emails to process (default: 100)"
-    )
-    parser.add_argument(
-        "--reprocess", action="store_true",
-        help="Re-process even if as_of_date already exists"
-    )
+    parser.add_argument("--max-emails", type=int, default=100, help="Maximum emails to process (default: 100)")
+    parser.add_argument("--reprocess", action="store_true", help="Re-process even if as_of_date already exists")
     args = parser.parse_args()
 
-    run_aging_pipeline(
-        max_emails=args.max_emails,
-        reprocess=args.reprocess
-    )
+    run_aging_pipeline(max_emails=args.max_emails, reprocess=args.reprocess)

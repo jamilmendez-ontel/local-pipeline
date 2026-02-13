@@ -16,8 +16,9 @@ import time
 import argparse
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import setup_logging, get_logger, create_supabase_client
-from pipeline_notifier import PipelineResult, capture_logs, send_pipeline_email
+from config import setup_logging, get_logger
+from db import close_db
+from pipeline_notifier import PipelineResult, capture_logs, send_pipeline_email, snapshot_row_counts
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -49,9 +50,7 @@ def run_orgs_projects_pipeline():
     logger.info(f"{'#'*60}")
 
     run_id = run_orgs_projects_extract()
-
-    client = create_supabase_client()
-    run_orgs_projects_transform(run_id, client=client)
+    run_orgs_projects_transform(run_id)
 
     return True
 
@@ -66,9 +65,7 @@ def run_user_priorities_pipeline():
     logger.info(f"{'#'*60}")
 
     run_id = run_user_priorities_extract()
-
-    client = create_supabase_client()
-    run_user_priorities_transform(run_id, client=client)
+    run_user_priorities_transform(run_id)
 
     return True
 
@@ -82,17 +79,13 @@ def run_asset_tasks_pipeline():
     logger.info(f"# ASSET TASKS PIPELINE")
     logger.info(f"{'#'*60}")
 
-    # Extract (returns run_id or raises)
     run_id = run_asset_task_pipeline()
 
-    # Each parallel pipeline gets its own Supabase client for thread safety
-    client = create_supabase_client()
-
     # Transform assets (aggregated from asset tasks)
-    run_assets_transform(run_id, client=client)
+    run_assets_transform(run_id)
 
     # Transform asset tasks (individual task records)
-    run_asset_tasks_transform(run_id, client=client)
+    run_asset_tasks_transform(run_id)
 
     return True
 
@@ -106,14 +99,8 @@ def run_forms_pipeline():
     logger.info(f"# QA FORMS PIPELINE")
     logger.info(f"{'#'*60}")
 
-    # Extract (returns run_id or raises)
     run_id = extract_forms()
-
-    # Each parallel pipeline gets its own Supabase client for thread safety
-    client = create_supabase_client()
-
-    # Transform
-    run_qa_forms_transform(run_id, client=client)
+    run_qa_forms_transform(run_id)
 
     return True
 
@@ -127,36 +114,28 @@ def run_timer_pipeline_full():
     logger.info(f"# TIMER ACTIVITIES PIPELINE")
     logger.info(f"{'#'*60}")
 
-    # Extract (returns run_id or raises)
     run_id = run_timer_pipeline()
-
-    # Each parallel pipeline gets its own Supabase client for thread safety
-    client = create_supabase_client()
-
-    # Transform
-    run_timer_transform(run_id, client=client)
+    run_timer_transform(run_id)
 
     return True
 
 
 def run_aging_pipeline_full():
-    """Run AR aging extraction + transformation (Gmail → Supabase)"""
+    """Run AR aging extraction + transformation (Gmail)"""
     from extract_aging import run_aging_pipeline
-    from transform import run_ar_aging_transform
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# AR AGING PIPELINE")
     logger.info(f"{'#'*60}")
 
     # Extract processes all unloaded emails and transforms inline per-file
-    # Returns list of processed as_of_dates or None
     result = run_aging_pipeline()
 
     return True
 
 
 def run_sales_pipeline_full():
-    """Run sales detail extraction + transformation (Gmail → Supabase)"""
+    """Run sales detail extraction + transformation (Gmail)"""
     from extract_sales import run_sales_pipeline
 
     logger.info(f"\n{'#'*60}")
@@ -164,7 +143,6 @@ def run_sales_pipeline_full():
     logger.info(f"{'#'*60}")
 
     # Extract processes all unloaded emails and transforms inline per-file
-    # Returns list of processed as_of_dates or None
     result = run_sales_pipeline()
 
     return True
@@ -173,11 +151,13 @@ def run_sales_pipeline_full():
 def run_pipeline_with_notification(func, name, send_email=True):
     """Run a single pipeline with log capture and email notification."""
     started_at = datetime.now(timezone.utc)
+    row_counts_before = snapshot_row_counts()
     with capture_logs() as log_handler:
         try:
             func()
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
+            row_counts_after = snapshot_row_counts()
             result = PipelineResult(
                 pipeline_name=name,
                 status="SUCCESS",
@@ -194,11 +174,14 @@ def run_pipeline_with_notification(func, name, send_email=True):
                     started_at=started_at,
                     ended_at=ended_at,
                     total_duration=duration,
+                    row_counts_before=row_counts_before,
+                    row_counts_after=row_counts_after,
                 )
             return True
         except Exception as e:
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
+            row_counts_after = snapshot_row_counts()
             result = PipelineResult(
                 pipeline_name=name,
                 status="FAILED",
@@ -216,14 +199,19 @@ def run_pipeline_with_notification(func, name, send_email=True):
                     started_at=started_at,
                     ended_at=ended_at,
                     total_duration=duration,
+                    row_counts_before=row_counts_before,
+                    row_counts_after=row_counts_after,
                 )
             raise
 
 
 def run_all_pipelines(send_email=True):
-    """Run all pipelines — orgs/projects first, then remaining 4 in parallel"""
+    """Run all pipelines -- orgs/projects first, then remaining 4 in parallel"""
     overall_start = datetime.now(timezone.utc)
     pipeline_results = []
+
+    # Snapshot row counts before pipeline starts
+    row_counts_before = snapshot_row_counts()
 
     with capture_logs() as log_handler:
         logger.info(f"\n{'='*60}")
@@ -368,6 +356,9 @@ def run_all_pipelines(send_email=True):
         overall_end = datetime.now(timezone.utc)
         overall_success = all(status == "SUCCESS" for status in results.values())
 
+        # Snapshot row counts after pipeline completes
+        row_counts_after = snapshot_row_counts()
+
         if send_email:
             send_pipeline_email(
                 results=pipeline_results,
@@ -377,6 +368,8 @@ def run_all_pipelines(send_email=True):
                 started_at=overall_start,
                 ended_at=overall_end,
                 total_duration=(overall_end - overall_start).total_seconds(),
+                row_counts_before=row_counts_before,
+                row_counts_after=row_counts_after,
             )
 
     # Return success if all passed
@@ -392,6 +385,7 @@ def run_all_extractions(send_email=True):
 
     overall_start = datetime.now(timezone.utc)
     pipeline_results = []
+    row_counts_before = snapshot_row_counts()
 
     with capture_logs() as log_handler:
         logger.info(f"\n{'='*60}")
@@ -443,6 +437,8 @@ def run_all_extractions(send_email=True):
         overall_end = datetime.now(timezone.utc)
         overall_success = all(status == "SUCCESS" for status in results.values())
 
+        row_counts_after = snapshot_row_counts()
+
         if send_email:
             send_pipeline_email(
                 results=pipeline_results,
@@ -452,6 +448,8 @@ def run_all_extractions(send_email=True):
                 started_at=overall_start,
                 ended_at=overall_end,
                 total_duration=(overall_end - overall_start).total_seconds(),
+                row_counts_before=row_counts_before,
+                row_counts_after=row_counts_after,
             )
 
     return overall_success
@@ -468,6 +466,7 @@ def run_all_transformations(send_email=True):
 
     overall_start = datetime.now(timezone.utc)
     pipeline_results = []
+    row_counts_before = snapshot_row_counts()
 
     with capture_logs() as log_handler:
         logger.info(f"\n{'='*60}")
@@ -522,6 +521,8 @@ def run_all_transformations(send_email=True):
         overall_end = datetime.now(timezone.utc)
         overall_success = all(status == "SUCCESS" for status in results.values())
 
+        row_counts_after = snapshot_row_counts()
+
         if send_email:
             send_pipeline_email(
                 results=pipeline_results,
@@ -531,6 +532,8 @@ def run_all_transformations(send_email=True):
                 started_at=overall_start,
                 ended_at=overall_end,
                 total_duration=(overall_end - overall_start).total_seconds(),
+                row_counts_before=row_counts_before,
+                row_counts_after=row_counts_after,
             )
 
     return overall_success
@@ -538,7 +541,7 @@ def run_all_transformations(send_email=True):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Swift API Pipeline - Extract and transform data from Swift API to Supabase",
+        description="Swift API Pipeline - Extract and transform data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -615,6 +618,8 @@ Examples:
     except Exception as e:
         logger.info(f"\n\nPipeline failed with error: {e}")
         return 1
+    finally:
+        close_db()
 
 
 if __name__ == "__main__":

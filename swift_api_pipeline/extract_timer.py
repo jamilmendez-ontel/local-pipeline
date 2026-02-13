@@ -4,9 +4,9 @@ Extract Timer Activities data from Swift API
 Supports incremental loads with automatic date range calculation
 """
 
+import json
 import requests
 import time
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 from threading import Thread, Event
@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from typing import List, Dict, Tuple
 from config import (
-    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger, retry_supabase
+    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger, retry_db, get_db
 )
 from base_extractor import BaseExtractor
 
@@ -63,11 +63,14 @@ class TimerExtractor(BaseExtractor):
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
-        result = self.client.schema(SCHEMA_REFERENCE).table("ref_ontel_techops_projects").select(
-            "project_did, project_name, project_number"
-        ).gte("project_number", min_project_number).order("project_number").execute()
-
-        return result.data
+        rows = self.db.fetch(
+            f'SELECT project_did, project_name, project_number '
+            f'FROM {SCHEMA_REFERENCE}.ref_ontel_techops_projects '
+            f'WHERE project_number >= $1 '
+            f'ORDER BY project_number',
+            min_project_number
+        )
+        return [dict(r) for r in rows]
 
     def extract_project_timer(
         self,
@@ -168,21 +171,26 @@ class TimerExtractor(BaseExtractor):
 
     def load_batch(self, project_did: str, start_date: str, end_date: str, batch: List[Dict]):
         """Load a batch of timer activities to raw table"""
-        rows = [
-            {
-                "run_id": str(self.run_id),
-                "run_date": str(self.run_date),
-                "start_date": start_date,
-                "end_date": end_date,
-                "project_did": project_did,
-                "data": record
-            }
+        from datetime import date as _date
+        run_id_str = str(self.run_id)
+        # COPY binary protocol requires datetime.date objects for date columns
+        run_date_val = self.run_date if isinstance(self.run_date, _date) else _date.fromisoformat(str(self.run_date))
+        start_date_val = _date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+        end_date_val = _date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+
+        tuples = [
+            (run_id_str, run_date_val, start_date_val, end_date_val, project_did, record)
             for record in batch
         ]
 
-        retry_supabase(
-            lambda: self.client.schema(SCHEMA_RAW).table("raw_timer_activities").insert(rows).execute(),
-            description="insert raw_timer_activities"
+        retry_db(
+            lambda: self.db.copy_records(
+                "raw_timer_activities",
+                schema_name=SCHEMA_RAW,
+                records=tuples,
+                columns=["run_id", "run_date", "start_date", "end_date", "project_did", "data"],
+            ),
+            description="copy raw_timer_activities"
         )
         self.increment_loaded(len(batch))
 

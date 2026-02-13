@@ -12,15 +12,30 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from config import get_logger
 
 logger = get_logger("notifier")
 
 NOTIFICATION_RECIPIENT = "jamil.mendez@ontel.co"
+TZ_EASTERN = ZoneInfo("America/New_York")
+
+# Staging tables to track in notification emails
+ROW_COUNT_TABLES = [
+    ("data_staging", "stg_organizations"),
+    ("data_staging", "stg_projects"),
+    ("data_staging", "stg_asset_tasks"),
+    ("data_staging", "stg_assets"),
+    ("data_staging", "stg_qa_form"),
+    ("data_staging", "stg_timer_activities"),
+    ("data_staging", "stg_user_priorities"),
+    ("data_staging", "stg_ar_aging"),
+    ("data_staging", "stg_sales_detail"),
+]
 
 
 @dataclass
@@ -65,6 +80,21 @@ def capture_logs():
         root_logger.removeHandler(handler)
 
 
+def snapshot_row_counts() -> Dict[str, int]:
+    """Take a snapshot of staging table row counts for email comparison."""
+    try:
+        from config import get_db
+        db = get_db()
+        counts = {}
+        for schema, table in ROW_COUNT_TABLES:
+            count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
+            counts[f"{schema}.{table}"] = count if count is not None else 0
+        return counts
+    except Exception as e:
+        logger.warning(f"Failed to snapshot row counts: {e}")
+        return {}
+
+
 def _format_duration(seconds: float) -> str:
     """Format seconds into a human-readable duration string."""
     total = int(seconds)
@@ -78,6 +108,54 @@ def _format_duration(seconds: float) -> str:
         return f"{secs}s"
 
 
+def _build_row_counts_html(
+    before: Dict[str, int],
+    after: Dict[str, int],
+) -> str:
+    """Build HTML table showing before/after row counts."""
+    if not before and not after:
+        return ""
+
+    rows_html = ""
+    for key in ROW_COUNT_TABLES:
+        full_name = f"{key[0]}.{key[1]}"
+        table_label = key[1]
+        prev = before.get(full_name, 0)
+        curr = after.get(full_name, 0)
+        diff = curr - prev
+
+        if diff > 0:
+            diff_str = f'<span style="color:#2e7d32;">+{diff:,}</span>'
+        elif diff < 0:
+            diff_str = f'<span style="color:#c62828;">{diff:,}</span>'
+        else:
+            diff_str = '<span style="color:#888;">0</span>'
+
+        rows_html += f"""
+        <tr>
+            <td style="padding:6px 12px;border:1px solid #ddd;">{table_label}</td>
+            <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{prev:,}</td>
+            <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{curr:,}</td>
+            <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{diff_str}</td>
+        </tr>"""
+
+    return f"""
+        <h3 style="margin-top:24px;margin-bottom:8px;">Row Counts</h3>
+        <table style="border-collapse:collapse;">
+            <thead>
+                <tr style="background-color:#f5f5f5;">
+                    <th style="padding:6px 12px;border:1px solid #ddd;text-align:left;">Table</th>
+                    <th style="padding:6px 12px;border:1px solid #ddd;text-align:right;">Before</th>
+                    <th style="padding:6px 12px;border:1px solid #ddd;text-align:right;">After</th>
+                    <th style="padding:6px 12px;border:1px solid #ddd;text-align:right;">Change</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>"""
+
+
 def _build_html_email(
     results: List[PipelineResult],
     overall_status: str,
@@ -85,9 +163,15 @@ def _build_html_email(
     started_at: datetime,
     ended_at: datetime,
     total_duration: float,
+    row_counts_before: Optional[Dict[str, int]] = None,
+    row_counts_after: Optional[Dict[str, int]] = None,
 ) -> str:
     """Build HTML email body with inline CSS."""
     color = "#2e7d32" if overall_status == "SUCCESS" else "#c62828"
+
+    # Convert timestamps to Eastern time for display
+    started_et = started_at.astimezone(TZ_EASTERN)
+    ended_et = ended_at.astimezone(TZ_EASTERN)
 
     # Build per-pipeline rows
     rows_html = ""
@@ -108,6 +192,11 @@ def _build_html_email(
             <td style="padding:8px;border:1px solid #ddd;color:#c62828;">{error_str}</td>
         </tr>"""
 
+    # Build row counts section
+    row_counts_html = _build_row_counts_html(
+        row_counts_before or {}, row_counts_after or {}
+    )
+
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
@@ -116,8 +205,8 @@ def _build_html_email(
         </div>
         <div style="padding:24px;">
             <table style="margin-bottom:24px;">
-                <tr><td style="padding:4px 16px 4px 0;font-weight:bold;">Started:</td><td>{started_at:%Y-%m-%d %H:%M:%S}</td></tr>
-                <tr><td style="padding:4px 16px 4px 0;font-weight:bold;">Ended:</td><td>{ended_at:%Y-%m-%d %H:%M:%S}</td></tr>
+                <tr><td style="padding:4px 16px 4px 0;font-weight:bold;">Started:</td><td>{started_et:%Y-%m-%d %H:%M:%S %Z}</td></tr>
+                <tr><td style="padding:4px 16px 4px 0;font-weight:bold;">Ended:</td><td>{ended_et:%Y-%m-%d %H:%M:%S %Z}</td></tr>
                 <tr><td style="padding:4px 16px 4px 0;font-weight:bold;">Duration:</td><td>{_format_duration(total_duration)}</td></tr>
             </table>
 
@@ -136,6 +225,8 @@ def _build_html_email(
                     {rows_html}
                 </tbody>
             </table>
+
+            {row_counts_html}
         </div>
     </body>
     </html>
@@ -152,6 +243,8 @@ def send_pipeline_email(
     ended_at: datetime,
     total_duration: float,
     recipient: str = NOTIFICATION_RECIPIENT,
+    row_counts_before: Optional[Dict[str, int]] = None,
+    row_counts_after: Optional[Dict[str, int]] = None,
 ):
     """
     Send pipeline summary email with log attachment via Gmail API.
@@ -176,12 +269,14 @@ def send_pipeline_email(
         html_body = _build_html_email(
             results, overall_status, run_label,
             started_at, ended_at, total_duration,
+            row_counts_before, row_counts_after,
         )
         msg.attach(MIMEText(html_body, "html"))
 
-        # Log attachment
+        # Log attachment — filename in Eastern Time
         if log_output:
-            log_filename = f"pipeline_log_{started_at:%Y%m%d_%H%M%S}.txt"
+            started_et = started_at.astimezone(TZ_EASTERN)
+            log_filename = f"pipeline_log_{started_et:%Y%m%d_%H%M%S}.txt"
             log_attachment = MIMEText(log_output, "plain")
             log_attachment.add_header(
                 "Content-Disposition", "attachment", filename=log_filename

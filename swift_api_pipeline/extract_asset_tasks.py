@@ -4,6 +4,7 @@ Extract asset-tasks from Swift API for specified projects
 Uses ThreadPoolExecutor for parallel extraction
 """
 
+import json
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +13,7 @@ from threading import Thread, Event
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from config import (
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger, retry_supabase
+    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger, retry_db, get_db
 )
 from base_extractor import BaseExtractor
 
@@ -21,7 +22,7 @@ logger = get_logger("asset_tasks")
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
 MAX_WORKERS = 6  # Concurrent API threads (matches number of projects)
-LOAD_BATCH_SIZE = 1000
+LOAD_BATCH_SIZE = 50000
 
 
 class AssetTaskExtractor(BaseExtractor):
@@ -30,11 +31,14 @@ class AssetTaskExtractor(BaseExtractor):
 
     def get_project_dids(self, min_project_number: int = 13) -> List[Dict]:
         """Get project DIDs from reference table"""
-        result = self.client.schema(SCHEMA_REFERENCE).table("ref_ontel_techops_projects").select(
-            "project_did, project_name, project_number"
-        ).gte("project_number", min_project_number).order("project_number").execute()
-
-        return result.data
+        rows = self.db.fetch(
+            f'SELECT project_did, project_name, project_number '
+            f'FROM {SCHEMA_REFERENCE}.ref_ontel_techops_projects '
+            f'WHERE project_number >= $1 '
+            f'ORDER BY project_number',
+            min_project_number
+        )
+        return [dict(r) for r in rows]
 
     def extract_project_asset_tasks(
         self,
@@ -114,18 +118,20 @@ class AssetTaskExtractor(BaseExtractor):
 
     def load_batch(self, project_did: str, batch: List[Dict]):
         """Load a batch of asset-tasks to raw table"""
-        rows = [
-            {
-                "run_id": str(self.run_id),
-                "project_did": project_did,
-                "data": asset
-            }
+        run_id_str = str(self.run_id)
+        tuples = [
+            (run_id_str, project_did, asset)
             for asset in batch
         ]
 
-        retry_supabase(
-            lambda: self.client.schema(SCHEMA_RAW).table("raw_asset_tasks").insert(rows).execute(),
-            description="insert raw_asset_tasks"
+        retry_db(
+            lambda: self.db.copy_records(
+                "raw_asset_tasks",
+                schema_name=SCHEMA_RAW,
+                records=tuples,
+                columns=["run_id", "project_did", "data"],
+            ),
+            description="copy raw_asset_tasks"
         )
         self.increment_loaded(len(batch))
 
@@ -169,61 +175,17 @@ class AssetTaskExtractor(BaseExtractor):
                     self.load_batch(project_did, batch)
         logger.info("Loader complete")
 
-    def batch_delete_table(self, schema: str, table: str):
-        """Delete all rows from a table in batches to avoid memory issues"""
-        # Get ID range
-        min_result = self.client.schema(schema).table(table).select('id').order('id').limit(1).execute()
-        max_result = self.client.schema(schema).table(table).select('id').order('id', desc=True).limit(1).execute()
-
-        if not min_result.data or not max_result.data:
-            return  # Table is empty
-
-        min_id = min_result.data[0]['id']
-        max_id = max_result.data[0]['id']
-
-        batch_size = 50000
-        current_id = min_id
-
-        while current_id <= max_id:
-            end_id = current_id + batch_size
-            self.client.schema(schema).table(table).delete().gte('id', current_id).lt('id', end_id).execute()
-            current_id = end_id
-
     def clear_old_raw_data(self):
-        """Clear old raw data in batches to avoid statement timeout (keep current run_id)."""
+        """Clear old raw data (keep current run_id). Single query — no batching needed with asyncpg."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
-
-        table = "raw_asset_tasks"
-        batch_size = 50000
-
-        # Get the full ID range of the table
-        min_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id').limit(1).execute()
-        max_result = self.client.schema(SCHEMA_RAW).table(table).select('id').order('id', desc=True).limit(1).execute()
-
-        if not min_result.data or not max_result.data:
-            logger.info("No data to clean")
-            return
-
-        min_id = min_result.data[0]['id']
-        max_id = max_result.data[0]['id']
-        current_id = min_id
-        batches = 0
-
-        while current_id <= max_id:
-            end_id = current_id + batch_size
-            cid, eid = current_id, end_id
-            retry_supabase(
-                lambda cid=cid, eid=eid: self.client.schema(SCHEMA_RAW).table(table).delete().neq(
-                    "run_id", str(self.run_id)
-                ).gte('id', cid).lt('id', eid).execute(),
-                description="delete raw_asset_tasks"
-            )
-            current_id = end_id
-            batches += 1
-            if batches % 10 == 0:
-                logger.info(f"  Cleanup progress: processed {batches * batch_size:,} ID range...")
-
-        logger.info(f"Old raw data cleaned up ({batches} batches)")
+        retry_db(
+            lambda: self.db.execute(
+                f'DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id != $1',
+                str(self.run_id)
+            ),
+            description="delete old raw_asset_tasks"
+        )
+        logger.info("Old raw data cleaned up")
 
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
@@ -251,7 +213,6 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
         result_queue = Queue()
 
         # Create stop event for loader
-        from threading import Event
         stop_event = Event()
 
         # Start background loader thread

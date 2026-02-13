@@ -1,10 +1,11 @@
 """
 Shared base class for all Swift API extractors.
 
-Consolidates duplicated code: authentication, pipeline tracking, and Supabase client setup.
+Consolidates duplicated code: authentication, pipeline tracking, and database setup.
 Each extractor inherits from BaseExtractor and only implements extraction-specific logic.
 """
 
+import json
 import uuid
 import requests
 from threading import Lock
@@ -12,8 +13,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config import (
-    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD, create_supabase_client,
-    SCHEMA_PIPELINE, get_logger, retry_supabase
+    SWIFT_BASE_URL, SWIFT_USERNAME, SWIFT_PASSWORD,
+    SCHEMA_PIPELINE, get_logger, get_db, retry_db
 )
 
 logger = get_logger("base")
@@ -26,7 +27,7 @@ class BaseExtractor:
         self.base_url = SWIFT_BASE_URL
         self.token: Optional[str] = None
         self.token_lock = Lock()
-        self.client = create_supabase_client()
+        self.db = get_db()
         self.run_id = uuid.uuid4()
         self.total_loaded = 0
         self.load_lock = Lock()
@@ -71,36 +72,26 @@ class BaseExtractor:
 
     def start_pipeline_run(self, metadata: dict = None) -> None:
         """Record pipeline run start in the pipeline schema."""
-        row = {
-            "run_id": str(self.run_id),
-            "pipeline_name": self._pipeline_name,
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat()
-        }
-        if metadata:
-            row["metadata"] = metadata
-
-        retry_supabase(
-            lambda: self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").insert(row).execute(),
+        retry_db(
+            lambda: self.db.execute(
+                f'INSERT INTO {SCHEMA_PIPELINE}.pipeline_runs (run_id, pipeline_name, status, started_at, metadata) '
+                f'VALUES ($1, $2, $3, $4, $5)',
+                str(self.run_id), self._pipeline_name, "running",
+                datetime.now(timezone.utc), metadata
+            ),
             description="insert pipeline_runs"
         )
         logger.info(f"Pipeline run started: {self.run_id}")
 
     def complete_pipeline_run(self, status: str, records: int = None, error: str = None) -> None:
         """Update pipeline run status on completion."""
-        update_data = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }
-        if records is not None:
-            update_data["records_extracted"] = records
-        if error:
-            update_data["error_message"] = error
-
-        retry_supabase(
-            lambda: self.client.schema(SCHEMA_PIPELINE).table("pipeline_runs").update(
-                update_data
-            ).eq("run_id", str(self.run_id)).execute(),
+        retry_db(
+            lambda: self.db.execute(
+                f'UPDATE {SCHEMA_PIPELINE}.pipeline_runs '
+                f'SET status = $1, completed_at = $2, records_extracted = $3, error_message = $4 '
+                f'WHERE run_id = $5',
+                status, datetime.now(timezone.utc), records, error, str(self.run_id)
+            ),
             description="update pipeline_runs"
         )
         logger.info(f"Pipeline run completed: {status}")

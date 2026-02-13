@@ -11,10 +11,9 @@ Usage:
 """
 
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 
-from config import setup_logging, get_logger, create_supabase_client, SCHEMA_RAW
+from config import setup_logging, get_logger, get_db, SCHEMA_RAW
 
 setup_logging()
 logger = get_logger("gmail_scheduler")
@@ -28,22 +27,23 @@ def get_today_date_str() -> str:
     return datetime.now(ET_OFFSET).strftime("%Y-%m-%d")
 
 
-def has_todays_data(client, table: str, today: str) -> bool:
-    """Check if today's as_of_date already exists in a raw table."""
-    result = client.schema(SCHEMA_RAW).table(table).select(
-        "as_of_date", count="exact"
-    ).eq("as_of_date", today).limit(1).execute()
-    return result.count is not None and result.count > 0
+def has_todays_data(db, table: str, today: str) -> bool:
+    """Check if today's email received date already exists in a raw table."""
+    count = db.fetchval(
+        f'SELECT COUNT(*) FROM {SCHEMA_RAW}.{table} WHERE email_received_date::date = $1::date',
+        today
+    )
+    return count is not None and count > 0
 
 
 def main():
     today = get_today_date_str()
     logger.info(f"Gmail Pipeline Check - {today}")
 
-    client = create_supabase_client()
+    db = get_db()
 
-    aging_done = has_todays_data(client, "raw_ar_aging", today)
-    sales_done = has_todays_data(client, "raw_sales_detail", today)
+    aging_done = has_todays_data(db, "raw_ar_aging", today)
+    sales_done = has_todays_data(db, "raw_sales_detail", today)
 
     if aging_done:
         logger.info(f"  AR Aging: already loaded for {today}")
