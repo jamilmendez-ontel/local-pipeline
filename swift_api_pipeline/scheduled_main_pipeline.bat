@@ -16,3 +16,9 @@ cd /d "%SCRIPT_DIR%"
 echo [%date% %time%] Starting nightly pipeline run >> "%LOG_DIR%\main_%TIMESTAMP%.log"
 "%VENV_PYTHON%" -u main.py >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
 echo [%date% %time%] Pipeline finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+
+REM Export asset tasks Excel (runs after pipeline + email are done)
+set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
+echo [%date% %time%] Starting asset tasks Excel export >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+"%VENV_PYTHON%" -u "%EXPORT_SCRIPT%" >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
+echo [%date% %time%] Excel export finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"

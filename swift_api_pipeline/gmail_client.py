@@ -25,10 +25,11 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# Gmail API scopes — read access + send
+# Gmail API scopes — read access + send + Drive file upload
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
 # Paths relative to this file
@@ -78,6 +79,43 @@ def authenticate():
             pickle.dump(creds, f)
 
     return build("gmail", "v1", credentials=creds)
+
+
+def authenticate_drive():
+    """
+    Authenticate with Google Drive API using the same OAuth2 credentials.
+
+    Returns an authorized Drive API service object.
+    """
+    creds = None
+
+    if TOKEN_FILE.exists():
+        with open(TOKEN_FILE, "rb") as f:
+            creds = pickle.load(f)
+
+        if creds and hasattr(creds, "scopes") and creds.scopes:
+            if not set(SCOPES).issubset(creds.scopes):
+                creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not CREDENTIALS_FILE.exists():
+                raise FileNotFoundError(
+                    f"Gmail credentials not found at {CREDENTIALS_FILE}. "
+                    "Download from Google Cloud Console."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(CREDENTIALS_FILE), SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(TOKEN_FILE, "wb") as f:
+            pickle.dump(creds, f)
+
+    return build("drive", "v3", credentials=creds)
 
 
 def search_messages(service, query: str, max_results: int = 100) -> List[Dict]:
