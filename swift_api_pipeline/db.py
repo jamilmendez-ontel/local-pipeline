@@ -167,8 +167,10 @@ class PipelineDB:
         """Execute a query and return the status string.
 
         Args:
+            timeout: Client-side timeout in seconds (overrides pool command_timeout=300).
             statement_timeout: Override server-side statement_timeout in seconds
-                              (default: 300s from _TIMEOUT_SQL).
+                              (default: 300s from _TIMEOUT_SQL). Also sets client-side
+                              timeout to match if timeout is not explicitly provided.
         """
         async def _do():
             async with self._pool.acquire() as conn:
@@ -176,7 +178,9 @@ class PipelineDB:
                     await conn.execute(f"SET statement_timeout = '{statement_timeout}s'")
                 else:
                     await conn.execute(self._TIMEOUT_SQL)
-                return await conn.execute(query, *args, timeout=timeout)
+                # Use statement_timeout as client timeout too, unless explicitly overridden
+                effective_timeout = timeout if timeout is not None else (statement_timeout or None)
+                return await conn.execute(query, *args, timeout=effective_timeout)
         return self._run(_do())
 
     def fetch(self, query: str, *args, timeout: float = None) -> List[asyncpg.Record]:

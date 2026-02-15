@@ -162,27 +162,30 @@ class AssetTaskExtractor(BaseExtractor):
         self.increment_loaded(len(records))
 
     def prepare_table_for_bulk_load(self):
-        """Set table to UNLOGGED and drop non-PK indexes for fast bulk loading."""
-        logger.info("Preparing raw_asset_tasks for bulk load (UNLOGGED + drop indexes)...")
-        self.db.execute(f'ALTER TABLE {SCHEMA_RAW}.raw_asset_tasks SET UNLOGGED')
+        """Drop non-PK indexes for fast bulk loading.
+
+        Note: UNLOGGED removed — Supabase's connection proxy kills long-running
+        ALTER TABLE SET LOGGED operations (>5 min for 2.2M rows). Index drop/recreate
+        provides the main speed benefit anyway.
+        """
+        logger.info("Preparing raw_asset_tasks for bulk load (drop indexes)...")
         for idx_name, _ in _INDEXES:
             self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
         for idx_name in _INDEXES_TO_DROP_ONLY:
             self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
-        logger.info("Table set to UNLOGGED, indexes dropped")
+        logger.info("Indexes dropped")
 
     def restore_table_after_load(self):
-        """Recreate indexes and set table back to LOGGED.
+        """Recreate indexes after bulk load.
 
         Uses 600s timeout for index creation — project_did index on 2.2M rows
         can take >300s (observed 338s on 2026-02-15).
         """
-        logger.info("Restoring raw_asset_tasks (recreate indexes + LOGGED)...")
+        logger.info("Restoring raw_asset_tasks indexes...")
         for idx_name, idx_def in _INDEXES:
             logger.info(f"  Creating {idx_name}...")
             self.db.execute(idx_def, statement_timeout=600)
-        self.db.execute(f'ALTER TABLE {SCHEMA_RAW}.raw_asset_tasks SET LOGGED', statement_timeout=600)
-        logger.info("Table restored: indexes created, set to LOGGED")
+        logger.info("Indexes restored")
 
     def clear_old_raw_data(self):
         """Clear old raw data (keep current run_id). Single query."""
