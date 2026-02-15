@@ -163,11 +163,19 @@ class PipelineDB:
     # statement_timeout on every acquire, not just in _init_connection.
     _TIMEOUT_SQL = "SET statement_timeout = '300s'"
 
-    def execute(self, query: str, *args, timeout: float = None) -> str:
-        """Execute a query and return the status string."""
+    def execute(self, query: str, *args, timeout: float = None, statement_timeout: int = None) -> str:
+        """Execute a query and return the status string.
+
+        Args:
+            statement_timeout: Override server-side statement_timeout in seconds
+                              (default: 300s from _TIMEOUT_SQL).
+        """
         async def _do():
             async with self._pool.acquire() as conn:
-                await conn.execute(self._TIMEOUT_SQL)
+                if statement_timeout is not None:
+                    await conn.execute(f"SET statement_timeout = '{statement_timeout}s'")
+                else:
+                    await conn.execute(self._TIMEOUT_SQL)
                 return await conn.execute(query, *args, timeout=timeout)
         return self._run(_do())
 

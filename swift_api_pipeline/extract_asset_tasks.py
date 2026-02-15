@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Extract asset-tasks from Swift API for specified projects
-Uses ThreadPoolExecutor for parallel extraction
+Extract asset-tasks from Swift API for specified projects.
+
+Architecture: 6 extraction workers each write directly to DB after every API page.
+No Queue or separate loader threads — extraction and loading happen simultaneously.
+Before bulk load: table set to UNLOGGED and non-PK indexes dropped.
+After load: indexes recreated and table set back to LOGGED.
 """
 
-import json
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
-from threading import Thread, Event
-from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from datetime import datetime
+from typing import List, Dict
 from config import (
-    SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, get_logger, retry_db, get_db
+    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger, retry_db
 )
 from base_extractor import BaseExtractor
 
@@ -21,8 +22,21 @@ logger = get_logger("asset_tasks")
 
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
-MAX_WORKERS = 6  # Concurrent API threads (matches number of projects)
-LOAD_BATCH_SIZE = 50000
+MAX_WORKERS = 6  # Concurrent API + DB writer threads
+LOAD_BATCH_SIZE = 100000
+
+# Non-PK indexes to drop before bulk load and recreate after.
+# GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
+# (pipeline uses run_id/project_did for lookups; agent queries staging, not raw).
+_INDEXES = [
+    ("idx_raw_asset_tasks_loaded_at", "CREATE INDEX idx_raw_asset_tasks_loaded_at ON data_raw.raw_asset_tasks USING btree (loaded_at DESC)"),
+    ("idx_raw_asset_tasks_run_id", "CREATE INDEX idx_raw_asset_tasks_run_id ON data_raw.raw_asset_tasks USING btree (run_id)"),
+    ("idx_raw_asset_tasks_project_did", "CREATE INDEX idx_raw_asset_tasks_project_did ON data_raw.raw_asset_tasks USING btree (project_did)"),
+]
+# Also drop the GIN index if it still exists (one-time cleanup)
+_INDEXES_TO_DROP_ONLY = [
+    "idx_raw_asset_tasks_data",
+]
 
 
 class AssetTaskExtractor(BaseExtractor):
@@ -40,13 +54,13 @@ class AssetTaskExtractor(BaseExtractor):
         )
         return [dict(r) for r in rows]
 
-    def extract_project_asset_tasks(
+    def extract_and_load_project(
         self,
         project_did: str,
         project_name: str,
-        result_queue: Queue
     ) -> int:
-        """Extract all asset-tasks for a single project, streaming batches to queue"""
+        """Extract all asset-tasks for a single project and write directly to DB.
+        Each API page (1000 rows) is accumulated locally, then flushed in LOAD_BATCH_SIZE chunks."""
         if not self.token:
             self.authenticate()
 
@@ -63,6 +77,8 @@ class AssetTaskExtractor(BaseExtractor):
         after_id = None
         page_count = 0
         project_rows = 0
+        run_id_str = str(self.run_id)
+        pending = []  # accumulate before flushing
 
         logger.info(f"[{project_name}] Starting extraction...")
 
@@ -77,6 +93,10 @@ class AssetTaskExtractor(BaseExtractor):
 
                     if resp.status_code == 204:
                         logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
+                        # Flush remaining
+                        if pending:
+                            self._write_batch(run_id_str, project_did, pending)
+                            pending = []
                         return project_rows
 
                     resp.raise_for_status()
@@ -84,12 +104,20 @@ class AssetTaskExtractor(BaseExtractor):
 
                     if not data:
                         logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
+                        if pending:
+                            self._write_batch(run_id_str, project_did, pending)
+                            pending = []
                         return project_rows
 
-                    # Stream batch to queue immediately
-                    result_queue.put((project_did, data))
+                    pending.extend(data)
                     project_rows += len(data)
                     page_count += 1
+
+                    # Write to DB when batch is large enough
+                    while len(pending) >= LOAD_BATCH_SIZE:
+                        batch = pending[:LOAD_BATCH_SIZE]
+                        pending = pending[LOAD_BATCH_SIZE:]
+                        self._write_batch(run_id_str, project_did, batch)
 
                     if page_count % 50 == 0:
                         logger.info(f"[{project_name}] Page {page_count} - {project_rows:,} rows")
@@ -98,6 +126,9 @@ class AssetTaskExtractor(BaseExtractor):
                     next_info = resp.json().get("next")
                     if not next_info:
                         logger.info(f"[{project_name}] Complete - {project_rows:,} rows")
+                        if pending:
+                            self._write_batch(run_id_str, project_did, pending)
+                            pending = []
                         return project_rows
 
                     after_ap = next_info.get("ap")
@@ -116,14 +147,9 @@ class AssetTaskExtractor(BaseExtractor):
             else:
                 raise RuntimeError(f"[{project_name}] Failed after {MAX_RETRIES} attempts")
 
-    def load_batch(self, project_did: str, batch: List[Dict]):
-        """Load a batch of asset-tasks to raw table"""
-        run_id_str = str(self.run_id)
-        tuples = [
-            (run_id_str, project_did, asset)
-            for asset in batch
-        ]
-
+    def _write_batch(self, run_id_str: str, project_did: str, records: list):
+        """Write a batch of records directly to raw_asset_tasks via COPY."""
+        tuples = [(run_id_str, project_did, rec) for rec in records]
         retry_db(
             lambda: self.db.copy_records(
                 "raw_asset_tasks",
@@ -133,50 +159,33 @@ class AssetTaskExtractor(BaseExtractor):
             ),
             description="copy raw_asset_tasks"
         )
-        self.increment_loaded(len(batch))
+        self.increment_loaded(len(records))
 
-    def loader_worker(self, result_queue: Queue, stop_event):
-        """Background worker that loads batches from queue to database"""
-        from queue import Empty
-        pending_batches = {}  # project_did -> list of records
+    def prepare_table_for_bulk_load(self):
+        """Set table to UNLOGGED and drop non-PK indexes for fast bulk loading."""
+        logger.info("Preparing raw_asset_tasks for bulk load (UNLOGGED + drop indexes)...")
+        self.db.execute(f'ALTER TABLE {SCHEMA_RAW}.raw_asset_tasks SET UNLOGGED')
+        for idx_name, _ in _INDEXES:
+            self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
+        for idx_name in _INDEXES_TO_DROP_ONLY:
+            self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
+        logger.info("Table set to UNLOGGED, indexes dropped")
 
-        while True:
-            try:
-                # Get batch from queue with timeout
-                project_did, data = result_queue.get(timeout=0.5)
+    def restore_table_after_load(self):
+        """Recreate indexes and set table back to LOGGED.
 
-                # Accumulate batches
-                if project_did not in pending_batches:
-                    pending_batches[project_did] = []
-                pending_batches[project_did].extend(data)
-
-                # Load when batch is large enough
-                while len(pending_batches[project_did]) >= LOAD_BATCH_SIZE:
-                    batch = pending_batches[project_did][:LOAD_BATCH_SIZE]
-                    pending_batches[project_did] = pending_batches[project_did][LOAD_BATCH_SIZE:]
-                    self.load_batch(project_did, batch)
-
-                result_queue.task_done()
-
-            except Empty:
-                # Check if we should exit
-                if stop_event.is_set() and result_queue.empty():
-                    break
-            except Exception as e:
-                logger.error(f"Loader error: {e}")
-                result_queue.task_done()
-
-        # Load all remaining data
-        logger.info("Flushing remaining data...")
-        for project_did, data in pending_batches.items():
-            if data:
-                for i in range(0, len(data), LOAD_BATCH_SIZE):
-                    batch = data[i:i + LOAD_BATCH_SIZE]
-                    self.load_batch(project_did, batch)
-        logger.info("Loader complete")
+        Uses 600s timeout for index creation — project_did index on 2.2M rows
+        can take >300s (observed 338s on 2026-02-15).
+        """
+        logger.info("Restoring raw_asset_tasks (recreate indexes + LOGGED)...")
+        for idx_name, idx_def in _INDEXES:
+            logger.info(f"  Creating {idx_name}...")
+            self.db.execute(idx_def, statement_timeout=600)
+        self.db.execute(f'ALTER TABLE {SCHEMA_RAW}.raw_asset_tasks SET LOGGED', statement_timeout=600)
+        logger.info("Table restored: indexes created, set to LOGGED")
 
     def clear_old_raw_data(self):
-        """Clear old raw data (keep current run_id). Single query — no batching needed with asyncpg."""
+        """Clear old raw data (keep current run_id). Single query."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
         retry_db(
             lambda: self.db.execute(
@@ -191,9 +200,13 @@ class AssetTaskExtractor(BaseExtractor):
 
 
 def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX_WORKERS):
-    """Main pipeline for extracting asset-tasks with parallel processing"""
+    """Main pipeline for extracting asset-tasks with parallel processing.
+
+    Each worker extracts from API and writes directly to DB — no Queue overhead.
+    Table is set to UNLOGGED with indexes dropped during bulk load for maximum throughput.
+    """
     logger.info(f"\n{'='*60}")
-    logger.info(f"Asset-Task Extraction Pipeline (Parallel)")
+    logger.info(f"Asset-Task Extraction Pipeline (Direct Write)")
     logger.info(f"Projects: TECH-OPS TS{min_project_number}+")
     logger.info(f"Workers: {max_workers}")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
@@ -209,29 +222,17 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
         projects = extractor.get_project_dids(min_project_number)
         logger.info(f"Found {len(projects)} projects to process\n")
 
-        # Create queue for results
-        result_queue = Queue()
+        # Prepare table for fast bulk loading
+        extractor.prepare_table_for_bulk_load()
 
-        # Create stop event for loader
-        stop_event = Event()
-
-        # Start background loader thread
-        loader_thread = Thread(
-            target=extractor.loader_worker,
-            args=(result_queue, stop_event),
-            daemon=True
-        )
-        loader_thread.start()
-
-        # Extract projects in parallel
+        # Extract and load projects in parallel — each worker writes directly to DB
         project_rows = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
-                    extractor.extract_project_asset_tasks,
+                    extractor.extract_and_load_project,
                     proj["project_did"],
                     proj["project_name"],
-                    result_queue
                 ): proj
                 for proj in projects
             }
@@ -245,15 +246,10 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
                     logger.error(f"[{proj['project_name']}] FAILED: {e}")
                     project_rows[proj["project_name"]] = 0
 
-        # Wait for queue to be fully processed first
-        logger.info("Waiting for loader to finish...")
-        result_queue.join()
-
-        # Signal loader to stop and wait for it
-        stop_event.set()
-        loader_thread.join(timeout=120)
-
         total_records = extractor.total_loaded
+
+        # Restore table: recreate indexes + set LOGGED
+        extractor.restore_table_after_load()
 
         # Clean up old raw data now that new extraction succeeded
         extractor.clear_old_raw_data()
@@ -275,6 +271,11 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
         logger.error(f"\n{'='*60}")
         logger.error(f"Pipeline failed: {e}")
         logger.error(f"{'='*60}\n")
+        # Try to restore table state even on failure
+        try:
+            extractor.restore_table_after_load()
+        except Exception as restore_err:
+            logger.error(f"Failed to restore table: {restore_err}")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 
