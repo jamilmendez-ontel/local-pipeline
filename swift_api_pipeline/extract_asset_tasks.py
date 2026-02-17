@@ -29,9 +29,9 @@ LOAD_BATCH_SIZE = 100000
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
 # (pipeline uses run_id/project_did for lookups; agent queries staging, not raw).
 _INDEXES = [
-    ("idx_raw_asset_tasks_loaded_at", "CREATE INDEX idx_raw_asset_tasks_loaded_at ON data_raw.raw_asset_tasks USING btree (loaded_at DESC)"),
-    ("idx_raw_asset_tasks_run_id", "CREATE INDEX idx_raw_asset_tasks_run_id ON data_raw.raw_asset_tasks USING btree (run_id)"),
-    ("idx_raw_asset_tasks_project_did", "CREATE INDEX idx_raw_asset_tasks_project_did ON data_raw.raw_asset_tasks USING btree (project_did)"),
+    ("idx_raw_asset_tasks_loaded_at", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_loaded_at ON data_raw.raw_asset_tasks USING btree (loaded_at DESC)"),
+    ("idx_raw_asset_tasks_run_id", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_run_id ON data_raw.raw_asset_tasks USING btree (run_id)"),
+    ("idx_raw_asset_tasks_project_did", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_project_did ON data_raw.raw_asset_tasks USING btree (project_did)"),
 ]
 # Also drop the GIN index if it still exists (one-time cleanup)
 _INDEXES_TO_DROP_ONLY = [
@@ -230,6 +230,7 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
 
         # Extract and load projects in parallel — each worker writes directly to DB
         project_rows = {}
+        failed_projects = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
@@ -246,8 +247,9 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
                     rows = future.result()
                     project_rows[proj["project_name"]] = rows
                 except Exception as e:
-                    logger.error(f"[{proj['project_name']}] FAILED: {e}")
+                    logger.error(f"[{proj['project_name']}] FAILED: {type(e).__name__}: {e}")
                     project_rows[proj["project_name"]] = 0
+                    failed_projects.append(proj["project_name"])
 
         total_records = extractor.total_loaded
 
@@ -256,6 +258,25 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
 
         # Clean up old raw data now that new extraction succeeded
         extractor.clear_old_raw_data()
+
+        # Detect partial failures — some projects extracted 0 rows
+        if failed_projects:
+            extractor.complete_pipeline_run("failed", total_records,
+                                            error=f"Projects failed: {', '.join(failed_projects)}")
+            logger.error(f"\n{'='*60}")
+            logger.error(f"Pipeline PARTIAL FAILURE")
+            logger.error(f"\nRecords by project:")
+            for name, count in sorted(project_rows.items()):
+                status = " [FAILED]" if name in failed_projects else ""
+                logger.error(f"  {name}: {count:,}{status}")
+            logger.error(f"\nTotal loaded: {total_records:,}")
+            logger.error(f"Failed projects: {', '.join(failed_projects)}")
+            logger.error(f"Run ID: {extractor.run_id}")
+            logger.error(f"{'='*60}\n")
+            raise RuntimeError(
+                f"Asset tasks partial failure: {', '.join(failed_projects)} "
+                f"failed ({total_records:,} of expected rows loaded)"
+            )
 
         extractor.complete_pipeline_run("success", total_records)
 

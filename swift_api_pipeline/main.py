@@ -205,175 +205,84 @@ def run_pipeline_with_notification(func, name, send_email=True):
             raise
 
 
+def _run_and_notify(func, name, send_email=True):
+    """Run a single pipeline step with its own log capture, row counts, and email.
+
+    Returns (status_str, error_message_or_None). Never raises."""
+    try:
+        run_pipeline_with_notification(func, name, send_email)
+        return "SUCCESS", None
+    except Exception as e:
+        # Email already sent by run_pipeline_with_notification
+        return "FAILED", str(e)
+
+
 def run_all_pipelines(send_email=True):
-    """Run all pipelines -- orgs/projects first, then remaining 4 in parallel"""
-    overall_start = datetime.now(timezone.utc)
-    pipeline_results = []
+    """Run all pipelines with individual email notifications per pipeline.
 
-    # Snapshot row counts before pipeline starts
-    row_counts_before = snapshot_row_counts()
+    Phase 1: Orgs/Projects (sequential, must run first).
+    Phase 2: Asset Tasks, User Priorities, QA Forms, Timer (parallel).
+    Post-Phase 2: Asset DID Backfill, Analytics MV Refresh (sequential).
+    """
+    logger.info(f"\n{'='*60}")
+    logger.info(f"SWIFT API PIPELINE - FULL RUN (PARALLEL)")
+    logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}")
 
-    with capture_logs() as log_handler:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"SWIFT API PIPELINE - FULL RUN (PARALLEL)")
-        logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
-        logger.info(f"{'='*60}")
+    results = {}
 
-        results = {}
+    # Phase 1: Orgs/Projects MUST run first (others may depend on reference data)
+    status, err = _run_and_notify(run_orgs_projects_pipeline, "Organizations & Projects", send_email)
+    results["Organizations & Projects"] = status if not err else f"FAILED: {err}"
 
-        # Phase 1: Orgs/Projects MUST run first (others may depend on reference data)
-        p_start = datetime.now(timezone.utc)
-        try:
-            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Organizations & Projects")
-            run_orgs_projects_pipeline()
-            p_end = datetime.now(timezone.utc)
-            results["Organizations & Projects"] = "SUCCESS"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Organizations & Projects", status="SUCCESS",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-            ))
-            logger.info(f"Completed: Organizations & Projects")
-        except Exception as e:
-            p_end = datetime.now(timezone.utc)
-            results["Organizations & Projects"] = f"FAILED: {e}"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Organizations & Projects", status="FAILED",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-                error_message=str(e),
-            ))
-            logger.error(f"FAILED: Organizations & Projects - {e}")
+    # Phase 2: Remaining pipelines in parallel (no dependencies between them)
+    # Stagger starts to avoid overwhelming the Swift API with simultaneous connections
+    def staggered_forms():
+        time.sleep(10)  # Let asset tasks establish first
+        return run_forms_pipeline()
 
-        # Phase 2: Remaining pipelines in parallel (no dependencies between them)
-        # Stagger starts to avoid overwhelming the Swift API with simultaneous connections
-        def staggered_forms():
-            time.sleep(10)  # Let asset tasks establish first
-            return run_forms_pipeline()
+    def staggered_timer():
+        time.sleep(5)  # Small delay for timer (lightest pipeline)
+        return run_timer_pipeline_full()
 
-        def staggered_timer():
-            time.sleep(5)  # Small delay for timer (lightest pipeline)
-            return run_timer_pipeline_full()
+    parallel_pipelines = [
+        ("Asset Tasks", run_asset_tasks_pipeline),
+        ("User Priorities", run_user_priorities_pipeline),
+        ("QA Forms", staggered_forms),
+        ("Timer Activities", staggered_timer),
+    ]
 
-        parallel_pipelines = [
-            ("Asset Tasks", run_asset_tasks_pipeline),
-            ("User Priorities", run_user_priorities_pipeline),
-            ("QA Forms", staggered_forms),
-            ("Timer Activities", staggered_timer),
-        ]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(_run_and_notify, func, name, send_email): name
+            for name, func in parallel_pipelines
+        }
 
-        # Track start times per pipeline
-        start_times = {}
+        for future in as_completed(futures):
+            name = futures[future]
+            status, err = future.result()
+            results[name] = status if not err else f"FAILED: {err}"
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {}
-            for name, func in parallel_pipelines:
-                start_times[name] = datetime.now(timezone.utc)
-                futures[executor.submit(func)] = name
+    # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
+    from transform import backfill_asset_did, refresh_analytics
 
-            for future in as_completed(futures):
-                name = futures[future]
-                p_end = datetime.now(timezone.utc)
-                p_start = start_times[name]
-                try:
-                    future.result()
-                    results[name] = "SUCCESS"
-                    pipeline_results.append(PipelineResult(
-                        pipeline_name=name, status="SUCCESS",
-                        started_at=p_start, ended_at=p_end,
-                        duration_seconds=(p_end - p_start).total_seconds(),
-                    ))
-                    logger.info(f"Completed: {name}")
-                except Exception as e:
-                    results[name] = f"FAILED: {e}"
-                    pipeline_results.append(PipelineResult(
-                        pipeline_name=name, status="FAILED",
-                        started_at=p_start, ended_at=p_end,
-                        duration_seconds=(p_end - p_start).total_seconds(),
-                        error_message=str(e),
-                    ))
-                    logger.error(f"FAILED: {name} - {e}")
+    status, err = _run_and_notify(backfill_asset_did, "Asset DID Backfill", send_email)
+    results["Asset DID Backfill"] = status if not err else f"FAILED: {err}"
 
-        # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
-        p_start = datetime.now(timezone.utc)
-        try:
-            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Asset DID Backfill")
-            from transform import backfill_asset_did
-            backfill_asset_did()
-            p_end = datetime.now(timezone.utc)
-            results["Asset DID Backfill"] = "SUCCESS"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Asset DID Backfill", status="SUCCESS",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-            ))
-            logger.info(f"Completed: Asset DID Backfill")
-        except Exception as e:
-            p_end = datetime.now(timezone.utc)
-            results["Asset DID Backfill"] = f"FAILED: {e}"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Asset DID Backfill", status="FAILED",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-                error_message=str(e),
-            ))
-            logger.error(f"FAILED: Asset DID Backfill - {e}")
+    # Post-Phase 2: Refresh analytics materialized views
+    status, err = _run_and_notify(refresh_analytics, "Analytics MV Refresh", send_email)
+    results["Analytics MV Refresh"] = status if not err else f"FAILED: {err}"
 
-        # Post-Phase 2: Refresh analytics materialized views
-        p_start = datetime.now(timezone.utc)
-        try:
-            logger.info(f"\n[{datetime.now():%H:%M:%S}] Starting: Analytics MV Refresh")
-            from transform import refresh_analytics
-            refresh_analytics()
-            p_end = datetime.now(timezone.utc)
-            results["Analytics MV Refresh"] = "SUCCESS"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Analytics MV Refresh", status="SUCCESS",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-            ))
-            logger.info(f"Completed: Analytics MV Refresh")
-        except Exception as e:
-            p_end = datetime.now(timezone.utc)
-            results["Analytics MV Refresh"] = f"FAILED: {e}"
-            pipeline_results.append(PipelineResult(
-                pipeline_name="Analytics MV Refresh", status="FAILED",
-                started_at=p_start, ended_at=p_end,
-                duration_seconds=(p_end - p_start).total_seconds(),
-                error_message=str(e),
-            ))
-            logger.error(f"FAILED: Analytics MV Refresh - {e}")
+    # Summary (log only, no consolidated email)
+    logger.info(f"\n{'='*60}")
+    logger.info(f"PIPELINE SUMMARY")
+    logger.info(f"{'='*60}")
+    for name, status in results.items():
+        logger.info(f"  {name}: {status}")
+    logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    logger.info(f"{'='*60}\n")
 
-        # Summary
-        logger.info(f"\n{'='*60}")
-        logger.info(f"PIPELINE SUMMARY")
-        logger.info(f"{'='*60}")
-        for name, status in results.items():
-            logger.info(f"  {name}: {status}")
-        logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
-        logger.info(f"{'='*60}\n")
-
-        overall_end = datetime.now(timezone.utc)
-        overall_success = all(status == "SUCCESS" for status in results.values())
-
-        # Snapshot row counts after pipeline completes
-        row_counts_after = snapshot_row_counts()
-
-        if send_email:
-            send_pipeline_email(
-                results=pipeline_results,
-                log_output=log_handler.get_log_output(),
-                overall_status="SUCCESS" if overall_success else "FAILED",
-                run_label="Full Pipeline Run",
-                started_at=overall_start,
-                ended_at=overall_end,
-                total_duration=(overall_end - overall_start).total_seconds(),
-                row_counts_before=row_counts_before,
-                row_counts_after=row_counts_after,
-            )
-
-    # Return success if all passed
-    return overall_success
+    return all(status == "SUCCESS" for status in results.values())
 
 
 def run_all_extractions(send_email=True):

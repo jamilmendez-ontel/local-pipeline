@@ -311,7 +311,7 @@ def transform_user_priorities(db, run_id: str):
     return total
 
 
-def run_orgs_projects_transform(run_id: str = None, client=None):
+def run_orgs_projects_transform(run_id: str = None):
     """Run organizations and projects transformations only"""
     print(f"\n{'='*60}")
     print(f"Organizations & Projects Transformation")
@@ -355,7 +355,7 @@ def run_orgs_projects_transform(run_id: str = None, client=None):
     print(f"{'='*60}\n")
 
 
-def run_user_priorities_transform(run_id: str = None, client=None):
+def run_user_priorities_transform(run_id: str = None):
     """Run user priorities transformation only"""
     print(f"\n{'='*60}")
     print(f"User Priorities Transformation")
@@ -402,7 +402,7 @@ def run_transform(run_id: str = None):
     run_user_priorities_transform(run_id)
 
 
-def run_asset_tasks_transform(run_id: str = None, client=None):
+def run_asset_tasks_transform(run_id: str = None):
     """Run asset tasks transformation only"""
     print(f"\n{'='*60}")
     print(f"Asset Tasks Transformation")
@@ -495,7 +495,7 @@ def transform_assets(db, run_id: str):
     return len(assets_list)
 
 
-def run_assets_transform(run_id: str = None, client=None):
+def run_assets_transform(run_id: str = None):
     """Run assets transformation only"""
     print(f"\n{'='*60}")
     print(f"Assets Transformation")
@@ -629,148 +629,162 @@ def extract_project_number(project_name: str) -> int:
 
 
 def transform_qa_forms(db, run_id: str):
-    """Transform raw QA form tables to stg_qa_form"""
+    """Transform raw QA form tables to stg_qa_form using server-side SQL.
+
+    Runs entirely in PostgreSQL — no data transfer to Python.
+    Uses UNION ALL across all 6 raw form tables, with JSONB field extraction.
+    """
     print(f"[{datetime.now():%H:%M:%S}] Transforming QA forms...")
 
     # Clear ALL existing staging data (full refresh)
     db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_qa_form')
     print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_qa_form")
 
-    total_transformed = 0
+    # SQL: clean_task_name — strip prefix "1. 2a. " and suffix " 123"
+    clean_task = (
+        "TRIM(REGEXP_REPLACE("
+        "  REGEXP_REPLACE(r.data->>'Task', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
+        "  '\\s+[0-9]+$', ''))"
+    )
 
+    # SQL helper: COALESCE for fields with alternate key names (replaces Python get_val)
+    def coalesce_field(key1, key2):
+        return f"COALESCE(NULLIF(r.data->>'{key1}', ''), r.data->>'{key2}')"
+
+    # Build UNION ALL across all form tables
+    union_parts = []
     for form_name, form_config in QA_FORMS.items():
         table_name = form_config["table_name"]
         form_id = form_config["form_id"]
-        display_name = form_config["display_name"]
 
-        print(f"[{datetime.now():%H:%M:%S}] Processing {display_name}...")
-
-        result = db.fetch(
-            f'SELECT * FROM {SCHEMA_RAW}.{table_name} WHERE run_id = $1',
-            run_id
+        part = (
+            f"SELECT "
+            f"  '{form_name}' AS form_name, "
+            f"  '{form_id}' AS form_id, "
+            f"  r.data->>'Project' AS project, "
+            f"  (REGEXP_MATCH(r.data->>'Project', 'TS(\\d+)'))[1]::int AS project_number, "
+            f"  r.data->>'Site Name' AS site_name, "
+            f"  r.data->>'Site ID' AS site_id, "
+            f"  r.data->>'Task' AS task, "
+            f"  {clean_task} AS task_clean, "
+            f"  r.data->>'Requirement' AS requirement, "
+            f"  r.data->>'Requirement Status' AS requirement_status, "
+            f"  r.data->>'Live Review Performed' AS live_review_performed, "
+            f"  r.data->>'Swift Used for Photos' AS swift_used_for_photos, "
+            f"  r.data->>'Crew Lead' AS crew_lead, "
+            f"  r.data->>'Construction Manager (CM)' AS construction_manager, "
+            f"  r.data->>'Subcontractor (if applicable)' AS subcontractor, "
+            f"  r.data->>'AAT' AS aat, "
+            f"  r.data->>'AAT Issues' AS aat_issues, "
+            f"  r.data->>'AAT (Other issues)' AS aat_other_issues, "
+            f"  r.data->>'RET' AS ret, "
+            f"  r.data->>'RET Issues' AS ret_issues, "
+            f"  r.data->>'RET (Others issues)' AS ret_other_issues, "
+            f"  r.data->>'RET Values' AS ret_values, "
+            f"  r.data->>'RET Visibility' AS ret_visibility, "
+            f"  r.data->>'Sweeps' AS sweeps, "
+            f"  r.data->>'Sweeps Issues' AS sweeps_issues, "
+            f"  r.data->>'Sweeps (Other issues)' AS sweeps_other_issues, "
+            f"  r.data->>'PIM' AS pim, "
+            f"  r.data->>'PIM Issues' AS pim_issues, "
+            f"  r.data->>'PIM (Other issues)' AS pim_other_issues, "
+            f"  r.data->>'Fiber' AS fiber, "
+            f"  r.data->>'Fiber Issues' AS fiber_issues, "
+            f"  r.data->>'Fiber (Other issues)' AS fiber_other_issues, "
+            f"  r.data->>'Pictures' AS pictures, "
+            f"  r.data->>'Pictures Issues' AS pictures_issues, "
+            f"  r.data->>'Pictures (Other issues)' AS pictures_other_issues, "
+            f"  r.data->>'Sector Photos' AS sector_photos, "
+            f"  r.data->>'Powershift Photos' AS powershift_photos, "
+            f"  r.data->>'As-Builts' AS as_builts, "
+            f"  r.data->>'As-Builts Issues' AS as_builts_issues, "
+            f"  {coalesce_field('As-Builts (Other issues)', 'AS-Builts (Other issues)')} AS as_builts_other_issues, "
+            f"  r.data->>'RF Mitigation' AS rf_mitigation, "
+            f"  r.data->>'RF Mitigation Issues' AS rf_mitigation_issues, "
+            f"  r.data->>'RF Mitigation (Other issues)' AS rf_mitigation_other_issues, "
+            f"  r.data->>'Landlord / Tower Owner' AS landlord_tower_owner, "
+            f"  r.data->>'Landlord / Tower Owner Issues' AS landlord_tower_owner_issues, "
+            f"  r.data->>'Other Landlord-related photos' AS other_landlord_photos, "
+            f"  r.data->>'Permits' AS permits, "
+            f"  r.data->>'Additional Documents (if applicable)' AS additional_documents, "
+            f"  r.data->>'PMI (if applicable)' AS pmi, "
+            f"  r.data->>'(PMI) Vendor Antenna Mount Structural Company' AS pmi_vendor, "
+            f"  {coalesce_field('Others (PMI Vendor):', 'Others (PMI Vendor)')} AS pmi_others_vendor, "
+            f"  r.data->>'(PMI) Mount Modification Required?' AS pmi_mount_modification_required, "
+            f"  r.data->>'PMI Issues' AS pmi_issues, "
+            f"  r.data->>'PMI (Other issues)' AS pmi_other_issues, "
+            f"  r.data->>'(PMI) Post Modification Inspection Report received?' AS pmi_report_received, "
+            f"  r.data->>'Signed PMI Report' AS signed_pmi_report, "
+            f"  r.data->>'Material Packing List, Signed PMI Report' AS material_packing_signed_pmi, "
+            f"  r.data->>'Power Testing (if applicable)' AS power_testing, "
+            f"  r.data->>'Power Testing Issues' AS power_testing_issues, "
+            f"  {coalesce_field('Power Testing (Other Issues)', 'Power Testing (Other issues)')} AS power_testing_other_issues, "
+            f"  r.data->>'Connectivity Testing (if applicable)' AS connectivity_testing, "
+            f"  r.data->>'Connectivity Testing Issues' AS connectivity_testing_issues, "
+            f"  r.data->>'Connectivity Testing (Other Issues)' AS connectivity_testing_other_issues, "
+            f"  r.data->>'Optical Power Testing (if applicable)' AS optical_power_testing, "
+            f"  {coalesce_field('Optical Power Testing (Other Issues)', 'Optical Power Testing (Other issues)')} AS optical_power_testing_other_issues, "
+            f"  r.data->>'Restoration (if applicable)' AS restoration, "
+            f"  r.data->>'NA Checklist (if applicable)' AS na_checklist, "
+            f"  r.data->>'N/A Checklist Issues' AS na_checklist_issues, "
+            f"  r.data->>'N/A Checklist (Other Issues)' AS na_checklist_other_issues, "
+            f"  r.data->>'RCM approval' AS rcm_approval, "
+            f"  {coalesce_field('Completeness of files', 'Completeness of Files')} AS completeness_of_files, "
+            f"  r.data->>'Serials' AS serials, "
+            f"  r.data->>'Font Size of Labels' AS font_size_of_labels, "
+            f"  r.data->>'Labels (P-touch, Marks, Tags), Sector Photos, Tape Drop' AS labels_sector_tape, "
+            f"  r.data->>'Smart Level (Plumb and MDT)' AS smart_level, "
+            f"  r.data->>'Calibration Details' AS calibration_details, "
+            f"  r.data->>'General Ground' AS general_ground, "
+            f"  r.data->>'Conditional Pass' AS conditional_pass, "
+            f"  r.data->>'Supports (i.e. Snap-In, etc.)' AS supports, "
+            f"  $1::uuid AS run_id "
+            f"FROM {SCHEMA_RAW}.{table_name} r "
+            f"WHERE r.run_id = $1"
         )
+        union_parts.append(part)
 
-        if not result:
-            print(f"[{datetime.now():%H:%M:%S}] {display_name}: 0 rows")
-            continue
+    union_sql = " UNION ALL ".join(union_parts)
 
-        rows = []
-        for record in result:
-            data = record["data"]
-            project = data.get("Project", "")
-            project_number = extract_project_number(project)
+    sql = (
+        f"INSERT INTO {SCHEMA_STAGING}.stg_qa_form "
+        f"(form_name, form_id, project, project_number, site_name, site_id, "
+        f"task, task_clean, requirement, requirement_status, "
+        f"live_review_performed, swift_used_for_photos, crew_lead, "
+        f"construction_manager, subcontractor, "
+        f"aat, aat_issues, aat_other_issues, "
+        f"ret, ret_issues, ret_other_issues, ret_values, ret_visibility, "
+        f"sweeps, sweeps_issues, sweeps_other_issues, "
+        f"pim, pim_issues, pim_other_issues, "
+        f"fiber, fiber_issues, fiber_other_issues, "
+        f"pictures, pictures_issues, pictures_other_issues, "
+        f"sector_photos, powershift_photos, "
+        f"as_builts, as_builts_issues, as_builts_other_issues, "
+        f"rf_mitigation, rf_mitigation_issues, rf_mitigation_other_issues, "
+        f"landlord_tower_owner, landlord_tower_owner_issues, other_landlord_photos, "
+        f"permits, additional_documents, "
+        f"pmi, pmi_vendor, pmi_others_vendor, pmi_mount_modification_required, "
+        f"pmi_issues, pmi_other_issues, pmi_report_received, "
+        f"signed_pmi_report, material_packing_signed_pmi, "
+        f"power_testing, power_testing_issues, power_testing_other_issues, "
+        f"connectivity_testing, connectivity_testing_issues, connectivity_testing_other_issues, "
+        f"optical_power_testing, optical_power_testing_other_issues, "
+        f"restoration, na_checklist, na_checklist_issues, na_checklist_other_issues, "
+        f"rcm_approval, completeness_of_files, serials, font_size_of_labels, "
+        f"labels_sector_tape, smart_level, calibration_details, "
+        f"general_ground, conditional_pass, supports, run_id) "
+        f"{union_sql}"
+    )
 
-            def get_val(*keys):
-                for k in keys:
-                    v = data.get(k)
-                    if v:
-                        return v
-                return data.get(keys[0])
+    print(f"[{datetime.now():%H:%M:%S}] Running server-side SQL transform...")
+    result = db.execute(sql, run_id)
+    total = int(result.split()[-1]) if result else 0
 
-            task = data.get("Task")
-            rows.append((
-                form_name, form_id,
-                project, project_number,
-                data.get("Site Name"), data.get("Site ID"),
-                task, clean_task_name(task),
-                data.get("Requirement"), data.get("Requirement Status"),
-                data.get("Live Review Performed"), data.get("Swift Used for Photos"),
-                data.get("Crew Lead"),
-                data.get("Construction Manager (CM)"),
-                data.get("Subcontractor (if applicable)"),
-                data.get("AAT"), data.get("AAT Issues"), data.get("AAT (Other issues)"),
-                data.get("RET"), data.get("RET Issues"), data.get("RET (Others issues)"),
-                data.get("RET Values"), data.get("RET Visibility"),
-                data.get("Sweeps"), data.get("Sweeps Issues"), data.get("Sweeps (Other issues)"),
-                data.get("PIM"), data.get("PIM Issues"), data.get("PIM (Other issues)"),
-                data.get("Fiber"), data.get("Fiber Issues"), data.get("Fiber (Other issues)"),
-                data.get("Pictures"), data.get("Pictures Issues"), data.get("Pictures (Other issues)"),
-                data.get("Sector Photos"), data.get("Powershift Photos"),
-                data.get("As-Builts"), data.get("As-Builts Issues"),
-                get_val("As-Builts (Other issues)", "AS-Builts (Other issues)"),
-                data.get("RF Mitigation"), data.get("RF Mitigation Issues"),
-                data.get("RF Mitigation (Other issues)"),
-                data.get("Landlord / Tower Owner"), data.get("Landlord / Tower Owner Issues"),
-                data.get("Other Landlord-related photos"),
-                data.get("Permits"),
-                data.get("Additional Documents (if applicable)"),
-                data.get("PMI (if applicable)"),
-                data.get("(PMI) Vendor Antenna Mount Structural Company"),
-                get_val("Others (PMI Vendor):", "Others (PMI Vendor)"),
-                data.get("(PMI) Mount Modification Required?"),
-                data.get("PMI Issues"), data.get("PMI (Other issues)"),
-                data.get("(PMI) Post Modification Inspection Report received?"),
-                data.get("Signed PMI Report"),
-                data.get("Material Packing List, Signed PMI Report"),
-                data.get("Power Testing (if applicable)"),
-                data.get("Power Testing Issues"),
-                get_val("Power Testing (Other Issues)", "Power Testing (Other issues)"),
-                data.get("Connectivity Testing (if applicable)"),
-                data.get("Connectivity Testing Issues"),
-                data.get("Connectivity Testing (Other Issues)"),
-                data.get("Optical Power Testing (if applicable)"),
-                get_val("Optical Power Testing (Other Issues)", "Optical Power Testing (Other issues)"),
-                data.get("Restoration (if applicable)"),
-                data.get("NA Checklist (if applicable)"),
-                data.get("N/A Checklist Issues"),
-                data.get("N/A Checklist (Other Issues)"),
-                data.get("RCM approval"),
-                get_val("Completeness of files", "Completeness of Files"),
-                data.get("Serials"),
-                data.get("Font Size of Labels"),
-                data.get("Labels (P-touch, Marks, Tags), Sector Photos, Tape Drop"),
-                data.get("Smart Level (Plumb and MDT)"),
-                data.get("Calibration Details"),
-                data.get("General Ground"),
-                data.get("Conditional Pass"),
-                data.get("Supports (i.e. Snap-In, etc.)"),
-                run_id
-            ))
-
-        # Insert in batches
-        form_count = len(rows)
-        batch_size = 5000
-        for i in range(0, form_count, batch_size):
-            batch = rows[i:i + batch_size]
-            db.executemany(
-                f'INSERT INTO {SCHEMA_STAGING}.stg_qa_form '
-                f'(form_name, form_id, project, project_number, site_name, site_id, '
-                f'task, task_clean, requirement, requirement_status, '
-                f'live_review_performed, swift_used_for_photos, crew_lead, '
-                f'construction_manager, subcontractor, '
-                f'aat, aat_issues, aat_other_issues, '
-                f'ret, ret_issues, ret_other_issues, ret_values, ret_visibility, '
-                f'sweeps, sweeps_issues, sweeps_other_issues, '
-                f'pim, pim_issues, pim_other_issues, '
-                f'fiber, fiber_issues, fiber_other_issues, '
-                f'pictures, pictures_issues, pictures_other_issues, '
-                f'sector_photos, powershift_photos, '
-                f'as_builts, as_builts_issues, as_builts_other_issues, '
-                f'rf_mitigation, rf_mitigation_issues, rf_mitigation_other_issues, '
-                f'landlord_tower_owner, landlord_tower_owner_issues, other_landlord_photos, '
-                f'permits, additional_documents, '
-                f'pmi, pmi_vendor, pmi_others_vendor, pmi_mount_modification_required, '
-                f'pmi_issues, pmi_other_issues, pmi_report_received, '
-                f'signed_pmi_report, material_packing_signed_pmi, '
-                f'power_testing, power_testing_issues, power_testing_other_issues, '
-                f'connectivity_testing, connectivity_testing_issues, connectivity_testing_other_issues, '
-                f'optical_power_testing, optical_power_testing_other_issues, '
-                f'restoration, na_checklist, na_checklist_issues, na_checklist_other_issues, '
-                f'rcm_approval, completeness_of_files, serials, font_size_of_labels, '
-                f'labels_sector_tape, smart_level, calibration_details, '
-                f'general_ground, conditional_pass, supports, run_id) '
-                f'VALUES ({",".join(f"${i}" for i in range(1, 81))})',
-                batch
-            )
-
-        total_transformed += form_count
-        print(f"[{datetime.now():%H:%M:%S}] {display_name}: {form_count:,} rows")
-
-    print(f"[{datetime.now():%H:%M:%S}] Total QA forms transformed: {total_transformed:,}")
-    return total_transformed
+    print(f"[{datetime.now():%H:%M:%S}] Total QA forms transformed: {total:,}")
+    return total
 
 
-def run_qa_forms_transform(run_id: str = None, client=None):
+def run_qa_forms_transform(run_id: str = None):
     """Run QA forms transformation only"""
     print(f"\n{'='*60}")
     print(f"QA Forms Transformation")
@@ -879,7 +893,7 @@ def transform_timer_activities(db, run_id: str):
     return total
 
 
-def run_timer_transform(run_id: str = None, client=None):
+def run_timer_transform(run_id: str = None):
     """Run timer activities transformation only"""
     print(f"\n{'='*60}")
     print(f"Timer Activities Transformation")
@@ -968,7 +982,7 @@ def transform_ar_aging(db, run_id: str):
     return total
 
 
-def run_ar_aging_transform(run_id: str = None, client=None):
+def run_ar_aging_transform(run_id: str = None):
     """Run AR aging transformation only."""
     print(f"\n{'='*60}")
     print(f"AR Aging Transformation")
@@ -1057,7 +1071,7 @@ def transform_sales_detail(db, run_id: str):
     return total
 
 
-def run_sales_detail_transform(run_id: str = None, client=None):
+def run_sales_detail_transform(run_id: str = None):
     """Run sales detail transformation only."""
     print(f"\n{'='*60}")
     print(f"Sales Detail Transformation")
@@ -1091,7 +1105,7 @@ def run_sales_detail_transform(run_id: str = None, client=None):
     print(f"{'='*60}\n")
 
 
-def backfill_asset_did(client=None):
+def backfill_asset_did():
     """Backfill asset_did on stg_timer_activities and stg_qa_form from stg_assets."""
     print(f"\n{'='*60}")
     print(f"Asset DID Backfill")
@@ -1121,7 +1135,7 @@ def backfill_asset_did(client=None):
     print(f"\n{'='*60}\n")
 
 
-def refresh_analytics(client=None):
+def refresh_analytics():
     """Refresh analytics materialized views."""
     print(f"\n{'='*60}")
     print(f"Analytics MV Refresh")

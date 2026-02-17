@@ -1,6 +1,6 @@
 @echo off
-REM Gmail Pipeline - Hourly Poll (1 AM - 10 AM)
-REM Checks if today's data exists, runs aging/sales if not
+REM Gmail Pipeline - Polls every 30 min (1 AM - 10 AM)
+REM Checks Gmail for new Daily Revenue Report emails, runs aging/sales if found
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs

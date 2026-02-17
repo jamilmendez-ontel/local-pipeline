@@ -222,12 +222,16 @@ class PipelineDB:
         schema_name: str,
         records: List[Tuple],
         columns: List[str],
-        timeout: float = None,
+        timeout: float = 600,
     ) -> str:
-        """COPY records into a table using asyncpg's binary COPY protocol."""
+        """COPY records into a table using asyncpg's binary COPY protocol.
+
+        Uses a 600s timeout (both client and server-side) since large JSONB
+        batches under concurrent load can exceed the default 300s command_timeout.
+        """
         async def _do():
             async with self._pool.acquire() as conn:
-                await conn.execute(self._TIMEOUT_SQL)
+                await conn.execute(f"SET statement_timeout = '{int(timeout)}s'")
                 return await conn.copy_records_to_table(
                     table,
                     schema_name=schema_name,
@@ -275,5 +279,5 @@ def retry_db(fn, max_retries=5, description="operation"):
             if attempt == max_retries - 1:
                 raise
             wait = min(2 ** attempt, 15)
-            _logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
+            _logger.warning(f"{description} failed (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}. Retrying in {wait}s...")
             time.sleep(wait)

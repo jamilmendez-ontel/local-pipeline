@@ -165,10 +165,9 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             logger.info(f"  As of date: {as_of_date}")
             logger.info(f"  Parsed rows: {len(rows)}")
 
-            as_of_str = str(as_of_date)
             received_ts_str = received_date.strftime("%Y-%m-%d %H:%M:%S")
             if received_ts_str in existing_timestamps:
-                logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded (as_of_date={as_of_str})")
+                logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded (as_of_date={as_of_date})")
                 total_skipped += 1
                 continue
 
@@ -176,21 +175,20 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             logger.info(f"  Run ID: {run_id}")
 
             start_pipeline_run(db, run_id, metadata={
-                "as_of_date": as_of_str,
+                "as_of_date": str(as_of_date),
                 "source_file": filename,
                 "email_received_date": received_date.isoformat(),
                 "row_count": len(rows),
             })
 
             try:
-                email_received_iso = received_date.isoformat()
                 for i in range(0, len(rows), LOAD_BATCH_SIZE):
                     batch = rows[i:i + LOAD_BATCH_SIZE]
                     raw_rows = [
                         {
                             "run_id": run_id,
-                            "as_of_date": as_of_str,
-                            "email_received_date": email_received_iso,
+                            "as_of_date": as_of_date,
+                            "email_received_date": received_date,
                             "source_file": filename,
                             "data": record,
                         }
@@ -205,7 +203,7 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
 
                 complete_pipeline_run(db, run_id, "success", records=len(rows))
                 existing_timestamps.add(received_ts_str)
-                processed_dates.append(f"{received_ts_str} (as_of={as_of_str})")
+                processed_dates.append(f"{received_ts_str} (as_of={as_of_date})")
 
             except Exception as e:
                 logger.error(f"  Load/transform error: {e}")

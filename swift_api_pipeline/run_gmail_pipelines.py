@@ -1,63 +1,89 @@
 """
-run_gmail_pipelines.py -- Poll Gmail for today's Daily Revenue Report.
+run_gmail_pipelines.py -- Poll Gmail for new Daily Revenue Report emails.
 
-Designed to be called hourly by Task Scheduler (1 AM - 10 AM).
-Checks if today's as_of_date already exists in both raw_ar_aging and
-raw_sales_detail. Skips whichever pipeline already has today's data.
-Exits cleanly if both are already loaded.
+Designed to be called every 30 minutes by Task Scheduler (1 AM - 10 AM).
+Checks if Gmail has any unprocessed emails by comparing the most recent
+email's received date against the latest loaded email_received_date in
+each raw table. Only runs pipelines when new data is detected.
 
 Usage:
     python run_gmail_pipelines.py
 """
 
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from config import setup_logging, get_logger, get_db, SCHEMA_RAW
 
 setup_logging()
 logger = get_logger("gmail_scheduler")
 
-# Today's date in Eastern Time (reports use business day)
-ET_OFFSET = timezone(timedelta(hours=-5))
+ET_TZ = ZoneInfo("America/New_York")
+
+# Both pipelines search for the same email subject
+GMAIL_QUERY = 'subject:"Daily Revenue Report" has:attachment'
 
 
-def get_today_date_str() -> str:
-    """Get today's date string in YYYY-MM-DD format (Eastern Time)."""
-    return datetime.now(ET_OFFSET).strftime("%Y-%m-%d")
+def has_new_emails(db, service, table: str) -> bool:
+    """Check if Gmail has emails newer than the latest loaded in a raw table.
 
-
-def has_todays_data(db, table: str, today: str) -> bool:
-    """Check if today's email received date already exists in a raw table."""
-    count = db.fetchval(
-        f'SELECT COUNT(*) FROM {SCHEMA_RAW}.{table} WHERE email_received_date::date = $1::date',
-        today
+    Compares the 3 most recent matching Gmail messages against our max
+    email_received_date. Only makes 1 search call + up to 3 detail calls.
+    """
+    max_date = db.fetchval(
+        f'SELECT MAX(email_received_date) FROM {SCHEMA_RAW}.{table}'
     )
-    return count is not None and count > 0
+
+    if max_date is None:
+        logger.info(f"  {table}: no data loaded yet -- needs full run")
+        return True
+
+    from gmail_client import search_messages, get_message_details
+
+    messages = search_messages(service, GMAIL_QUERY, max_results=3)
+    if not messages:
+        return False
+
+    for msg in messages:
+        details = get_message_details(service, msg['id'])
+        received = details.get('received_date')
+        if received and received > max_date:
+            logger.info(
+                f"  {table}: new email found (received {received:%Y-%m-%d %H:%M:%S} "
+                f"> latest loaded {max_date:%Y-%m-%d %H:%M:%S})"
+            )
+            return True
+
+    return False
 
 
 def main():
-    today = get_today_date_str()
-    logger.info(f"Gmail Pipeline Check - {today}")
+    now_et = datetime.now(ET_TZ)
+    logger.info(f"Gmail Pipeline Check - {now_et:%Y-%m-%d %H:%M:%S %Z}")
 
     db = get_db()
 
-    aging_done = has_todays_data(db, "raw_ar_aging", today)
-    sales_done = has_todays_data(db, "raw_sales_detail", today)
+    # Authenticate to Gmail once for both checks
+    from gmail_client import authenticate
+    service = authenticate()
 
-    if aging_done:
-        logger.info(f"  AR Aging: already loaded for {today}")
-    if sales_done:
-        logger.info(f"  Sales Detail: already loaded for {today}")
+    aging_new = has_new_emails(db, service, "raw_ar_aging")
+    sales_new = has_new_emails(db, service, "raw_sales_detail")
 
-    if aging_done and sales_done:
-        logger.info("Both pipelines already have today's data. Nothing to do.")
+    if not aging_new:
+        logger.info("  AR Aging: no new emails")
+    if not sales_new:
+        logger.info("  Sales Detail: no new emails")
+
+    if not aging_new and not sales_new:
+        logger.info("No new emails detected. Nothing to do.")
         return 0
 
-    # Run whichever pipeline still needs today's data
+    # Run whichever pipeline has new data
     from main import run_pipeline_with_notification
 
-    if not aging_done:
+    if aging_new:
         logger.info("Running AR Aging pipeline...")
         try:
             from main import run_aging_pipeline_full
@@ -68,7 +94,7 @@ def main():
         except Exception as e:
             logger.error(f"AR Aging pipeline failed: {e}")
 
-    if not sales_done:
+    if sales_new:
         logger.info("Running Sales Detail pipeline...")
         try:
             from main import run_sales_pipeline_full
