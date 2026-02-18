@@ -444,11 +444,13 @@ def transform_assets(db, run_id: str):
     db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_assets')
     print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_assets")
 
-    # Use SQL aggregation via RPC — single call, no 1000-row cap
+    # Use SQL aggregation via RPC — single call, no 1000-row cap.
+    # 600s timeout: aggregates 2.2M raw rows, can take >5 min under load.
     print(f"[{datetime.now():%H:%M:%S}] Running SQL aggregation via RPC...")
     assets_list = db.fetch(
         f'SELECT * FROM {SCHEMA_RAW}.aggregate_assets_from_raw($1)',
-        run_id
+        run_id,
+        statement_timeout=600,
     )
 
     print(f"[{datetime.now():%H:%M:%S}] Found {len(assets_list):,} unique assets")

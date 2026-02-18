@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import setup_logging, get_logger
 from db import close_db
-from pipeline_notifier import PipelineResult, capture_logs, send_pipeline_email, snapshot_row_counts
+from pipeline_notifier import PipelineResult, PIPELINE_TABLES, ALL_TABLES, capture_logs, send_pipeline_email, snapshot_row_counts
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -148,16 +148,17 @@ def run_sales_pipeline_full():
     return True
 
 
-def run_pipeline_with_notification(func, name, send_email=True):
+def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=None):
     """Run a single pipeline with log capture and email notification."""
+    tables = PIPELINE_TABLES.get(name)
     started_at = datetime.now(timezone.utc)
-    row_counts_before = snapshot_row_counts()
-    with capture_logs() as log_handler:
+    row_counts_before = snapshot_row_counts(tables)
+    with capture_logs(logger_prefixes=logger_prefixes) as log_handler:
         try:
             func()
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
-            row_counts_after = snapshot_row_counts()
+            row_counts_after = snapshot_row_counts(tables)
             result = PipelineResult(
                 pipeline_name=name,
                 status="SUCCESS",
@@ -176,12 +177,13 @@ def run_pipeline_with_notification(func, name, send_email=True):
                     total_duration=duration,
                     row_counts_before=row_counts_before,
                     row_counts_after=row_counts_after,
+                    row_count_tables=tables,
                 )
             return True
         except Exception as e:
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
-            row_counts_after = snapshot_row_counts()
+            row_counts_after = snapshot_row_counts(tables)
             result = PipelineResult(
                 pipeline_name=name,
                 status="FAILED",
@@ -201,20 +203,37 @@ def run_pipeline_with_notification(func, name, send_email=True):
                     total_duration=duration,
                     row_counts_before=row_counts_before,
                     row_counts_after=row_counts_after,
+                    row_count_tables=tables,
                 )
             raise
 
 
-def _run_and_notify(func, name, send_email=True):
+def _run_and_notify(func, name, send_email=True, logger_prefixes=None):
     """Run a single pipeline step with its own log capture, row counts, and email.
 
-    Returns (status_str, error_message_or_None). Never raises."""
+    Returns a PipelineResult. Never raises."""
+    started_at = datetime.now(timezone.utc)
     try:
-        run_pipeline_with_notification(func, name, send_email)
-        return "SUCCESS", None
+        run_pipeline_with_notification(func, name, send_email, logger_prefixes=logger_prefixes)
+        ended_at = datetime.now(timezone.utc)
+        return PipelineResult(
+            pipeline_name=name,
+            status="SUCCESS",
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=(ended_at - started_at).total_seconds(),
+        )
     except Exception as e:
-        # Email already sent by run_pipeline_with_notification
-        return "FAILED", str(e)
+        # Individual email already sent by run_pipeline_with_notification
+        ended_at = datetime.now(timezone.utc)
+        return PipelineResult(
+            pipeline_name=name,
+            status="FAILED",
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=(ended_at - started_at).total_seconds(),
+            error_message=str(e),
+        )
 
 
 def run_all_pipelines(send_email=True):
@@ -229,11 +248,11 @@ def run_all_pipelines(send_email=True):
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}")
 
-    results = {}
+    pipeline_results = []
 
     # Phase 1: Orgs/Projects MUST run first (others may depend on reference data)
-    status, err = _run_and_notify(run_orgs_projects_pipeline, "Organizations & Projects", send_email)
-    results["Organizations & Projects"] = status if not err else f"FAILED: {err}"
+    result = _run_and_notify(run_orgs_projects_pipeline, "Organizations & Projects", send_email)
+    pipeline_results.append(result)
 
     # Phase 2: Remaining pipelines in parallel (no dependencies between them)
     # Stagger starts to avoid overwhelming the Swift API with simultaneous connections
@@ -245,44 +264,52 @@ def run_all_pipelines(send_email=True):
         time.sleep(5)  # Small delay for timer (lightest pipeline)
         return run_timer_pipeline_full()
 
+    # Logger name prefixes for each parallel pipeline — used to filter
+    # cross-contamination in email log attachments.  Thread-ID filtering
+    # catches shared loggers (base, retry, db, transform) from the main
+    # thread; these prefixes catch child worker threads (e.g. asset_tasks'
+    # 6 extraction workers logging to pipeline.asset_tasks).
     parallel_pipelines = [
-        ("Asset Tasks", run_asset_tasks_pipeline),
-        ("User Priorities", run_user_priorities_pipeline),
-        ("QA Forms", staggered_forms),
-        ("Timer Activities", staggered_timer),
+        ("Asset Tasks", run_asset_tasks_pipeline, ["pipeline.asset_tasks"]),
+        ("User Priorities", run_user_priorities_pipeline, ["pipeline.user_priorities"]),
+        ("QA Forms", staggered_forms, ["pipeline.forms"]),
+        ("Timer Activities", staggered_timer, ["pipeline.timer"]),
     ]
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
-            executor.submit(_run_and_notify, func, name, send_email): name
-            for name, func in parallel_pipelines
+            executor.submit(
+                _run_and_notify, func, name, send_email,
+                logger_prefixes=prefixes,
+            ): name
+            for name, func, prefixes in parallel_pipelines
         }
 
         for future in as_completed(futures):
-            name = futures[future]
-            status, err = future.result()
-            results[name] = status if not err else f"FAILED: {err}"
+            result = future.result()
+            pipeline_results.append(result)
 
     # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
     from transform import backfill_asset_did, refresh_analytics
 
-    status, err = _run_and_notify(backfill_asset_did, "Asset DID Backfill", send_email)
-    results["Asset DID Backfill"] = status if not err else f"FAILED: {err}"
+    result = _run_and_notify(backfill_asset_did, "Asset DID Backfill", send_email)
+    pipeline_results.append(result)
 
     # Post-Phase 2: Refresh analytics materialized views
-    status, err = _run_and_notify(refresh_analytics, "Analytics MV Refresh", send_email)
-    results["Analytics MV Refresh"] = status if not err else f"FAILED: {err}"
+    result = _run_and_notify(refresh_analytics, "Analytics MV Refresh", send_email)
+    pipeline_results.append(result)
 
-    # Summary (log only, no consolidated email)
+    # Summary log
     logger.info(f"\n{'='*60}")
     logger.info(f"PIPELINE SUMMARY")
     logger.info(f"{'='*60}")
-    for name, status in results.items():
-        logger.info(f"  {name}: {status}")
+    for r in pipeline_results:
+        err = f" ({r.error_message})" if r.error_message else ""
+        logger.info(f"  {r.pipeline_name}: {r.status}{err}")
     logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}\n")
 
-    return all(status == "SUCCESS" for status in results.values())
+    return all(r.status == "SUCCESS" for r in pipeline_results)
 
 
 def run_all_extractions(send_email=True):
@@ -294,7 +321,7 @@ def run_all_extractions(send_email=True):
 
     overall_start = datetime.now(timezone.utc)
     pipeline_results = []
-    row_counts_before = snapshot_row_counts()
+    row_counts_before = snapshot_row_counts(ALL_TABLES)
 
     with capture_logs() as log_handler:
         logger.info(f"\n{'='*60}")
@@ -346,7 +373,7 @@ def run_all_extractions(send_email=True):
         overall_end = datetime.now(timezone.utc)
         overall_success = all(status == "SUCCESS" for status in results.values())
 
-        row_counts_after = snapshot_row_counts()
+        row_counts_after = snapshot_row_counts(ALL_TABLES)
 
         if send_email:
             send_pipeline_email(
@@ -359,6 +386,7 @@ def run_all_extractions(send_email=True):
                 total_duration=(overall_end - overall_start).total_seconds(),
                 row_counts_before=row_counts_before,
                 row_counts_after=row_counts_after,
+                row_count_tables=ALL_TABLES,
             )
 
     return overall_success
@@ -375,7 +403,7 @@ def run_all_transformations(send_email=True):
 
     overall_start = datetime.now(timezone.utc)
     pipeline_results = []
-    row_counts_before = snapshot_row_counts()
+    row_counts_before = snapshot_row_counts(ALL_TABLES)
 
     with capture_logs() as log_handler:
         logger.info(f"\n{'='*60}")
@@ -430,7 +458,7 @@ def run_all_transformations(send_email=True):
         overall_end = datetime.now(timezone.utc)
         overall_success = all(status == "SUCCESS" for status in results.values())
 
-        row_counts_after = snapshot_row_counts()
+        row_counts_after = snapshot_row_counts(ALL_TABLES)
 
         if send_email:
             send_pipeline_email(
@@ -443,6 +471,7 @@ def run_all_transformations(send_email=True):
                 total_duration=(overall_end - overall_start).total_seconds(),
                 row_counts_before=row_counts_before,
                 row_counts_after=row_counts_after,
+                row_count_tables=ALL_TABLES,
             )
 
     return overall_success

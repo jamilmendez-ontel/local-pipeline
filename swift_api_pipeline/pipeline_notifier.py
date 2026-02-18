@@ -6,6 +6,7 @@ after each pipeline run. Email failures never crash the pipeline.
 """
 
 import logging
+import threading
 import traceback
 import base64
 from collections import deque
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from config import get_logger
 
@@ -24,18 +25,50 @@ logger = get_logger("notifier")
 NOTIFICATION_RECIPIENT = "jamil.mendez@ontel.co"
 TZ_EASTERN = ZoneInfo("America/New_York")
 
-# Staging tables to track in notification emails
-ROW_COUNT_TABLES = [
-    ("data_staging", "stg_organizations"),
-    ("data_staging", "stg_projects"),
-    ("data_staging", "stg_asset_tasks"),
-    ("data_staging", "stg_assets"),
-    ("data_staging", "stg_qa_form"),
-    ("data_staging", "stg_timer_activities"),
-    ("data_staging", "stg_user_priorities"),
-    ("data_staging", "stg_ar_aging"),
-    ("data_staging", "stg_sales_detail"),
-]
+# Per-pipeline table lists for row count display in emails.
+# Each pipeline's email only shows its own relevant tables.
+PIPELINE_TABLES = {
+    "Organizations & Projects": [
+        ("data_raw", "raw_organizations"),
+        ("data_raw", "raw_projects"),
+        ("data_staging", "stg_organizations"),
+        ("data_staging", "stg_projects"),
+    ],
+    "Asset Tasks": [
+        ("data_raw", "raw_asset_tasks"),
+        ("data_staging", "stg_assets"),
+        ("data_staging", "stg_asset_tasks"),
+    ],
+    "User Priorities": [
+        ("data_raw", "raw_user_priorities"),
+        ("data_staging", "stg_user_priorities"),
+    ],
+    "QA Forms": [
+        ("data_staging", "stg_qa_form"),
+    ],
+    "Timer Activities": [
+        ("data_raw", "raw_timer_activities"),
+        ("data_staging", "stg_timer_activities"),
+    ],
+    "AR Aging": [
+        ("data_raw", "raw_ar_aging"),
+        ("data_staging", "stg_ar_aging"),
+    ],
+    "Sales Detail": [
+        ("data_raw", "raw_sales_detail"),
+        ("data_staging", "stg_sales_detail"),
+    ],
+    "Asset DID Backfill": [
+        ("data_staging", "stg_timer_activities"),
+        ("data_staging", "stg_qa_form"),
+    ],
+    "Analytics MV Refresh": [],
+}
+
+# All unique tables across all pipelines (for --extract / --transform modes)
+ALL_TABLES = list(dict.fromkeys(
+    t for tables in PIPELINE_TABLES.values() for t in tables
+))
 
 
 @dataclass
@@ -51,17 +84,37 @@ class PipelineResult:
 
 
 class LogCaptureHandler(logging.Handler):
-    """Logging handler that captures log lines in memory."""
+    """Logging handler that captures log lines in memory.
 
-    def __init__(self, maxlen: int = 10000):
+    When *logger_prefixes* is provided, only captures logs that either:
+    - Come from the owner thread (covers shared loggers like base, retry, db)
+    - Have a logger name starting with one of the prefixes (covers child threads,
+      e.g. asset_tasks' 6 extraction workers logging to pipeline.asset_tasks)
+
+    This prevents cross-contamination when multiple pipelines run in parallel.
+    """
+
+    def __init__(
+        self,
+        maxlen: int = 10000,
+        owner_thread: Optional[int] = None,
+        logger_prefixes: Optional[Sequence[str]] = None,
+    ):
         super().__init__()
         self.records: deque = deque(maxlen=maxlen)
+        self._owner_thread = owner_thread
+        self._logger_prefixes = tuple(logger_prefixes) if logger_prefixes else None
         self.setFormatter(logging.Formatter(
             "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
             datefmt="%H:%M:%S"
         ))
 
     def emit(self, record):
+        if self._logger_prefixes is not None:
+            from_owner = record.thread == self._owner_thread
+            name_match = record.name.startswith(self._logger_prefixes)
+            if not from_owner and not name_match:
+                return
         self.records.append(self.format(record))
 
     def get_log_output(self) -> str:
@@ -69,9 +122,20 @@ class LogCaptureHandler(logging.Handler):
 
 
 @contextmanager
-def capture_logs():
-    """Context manager that captures pipeline logs alongside normal output."""
-    handler = LogCaptureHandler()
+def capture_logs(logger_prefixes: Optional[Sequence[str]] = None):
+    """Context manager that captures pipeline logs alongside normal output.
+
+    Args:
+        logger_prefixes: When provided, enables thread-aware filtering so only
+            logs from the calling thread (shared loggers) or matching the given
+            name prefixes (child worker threads) are captured.  Pass None to
+            capture everything (for sequential/single-pipeline runs).
+    """
+    owner_thread = threading.get_ident() if logger_prefixes else None
+    handler = LogCaptureHandler(
+        owner_thread=owner_thread,
+        logger_prefixes=logger_prefixes,
+    )
     root_logger = logging.getLogger("pipeline")
     root_logger.addHandler(handler)
     try:
@@ -80,13 +144,19 @@ def capture_logs():
         root_logger.removeHandler(handler)
 
 
-def snapshot_row_counts() -> Dict[str, int]:
-    """Take a snapshot of staging table row counts for email comparison."""
+def snapshot_row_counts(tables: Optional[List] = None) -> Dict[str, int]:
+    """Take a snapshot of table row counts for email comparison.
+
+    Args:
+        tables: List of (schema, table) tuples to count. If None, returns empty.
+    """
+    if not tables:
+        return {}
     try:
         from config import get_db
         db = get_db()
         counts = {}
-        for schema, table in ROW_COUNT_TABLES:
+        for schema, table in tables:
             count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
             counts[f"{schema}.{table}"] = count if count is not None else 0
         return counts
@@ -111,15 +181,45 @@ def _format_duration(seconds: float) -> str:
 def _build_row_counts_html(
     before: Dict[str, int],
     after: Dict[str, int],
+    tables: Optional[List] = None,
 ) -> str:
-    """Build HTML table showing before/after row counts."""
+    """Build HTML table showing before/after row counts.
+
+    Args:
+        tables: List of (schema, table) tuples to display. If None, derives
+                from the before/after keys.
+    """
     if not before and not after:
         return ""
 
+    # Determine which tables to show
+    if tables:
+        display_tables = tables
+    else:
+        # Fall back to keys present in before/after
+        all_keys = set(before.keys()) | set(after.keys())
+        display_tables = []
+        for key in sorted(all_keys):
+            parts = key.split(".", 1)
+            if len(parts) == 2:
+                display_tables.append((parts[0], parts[1]))
+
+    if not display_tables:
+        return ""
+
     rows_html = ""
-    for key in ROW_COUNT_TABLES:
-        full_name = f"{key[0]}.{key[1]}"
-        table_label = key[1]
+    prev_schema = None
+    for schema, table in display_tables:
+        # Add section header when schema changes
+        if schema != prev_schema:
+            label = "Raw" if schema == "data_raw" else "Staging"
+            rows_html += f"""
+        <tr>
+            <td colspan="4" style="padding:8px 12px;border:1px solid #ddd;background-color:#e8eaf6;font-weight:bold;">{label}</td>
+        </tr>"""
+            prev_schema = schema
+
+        full_name = f"{schema}.{table}"
         prev = before.get(full_name, 0)
         curr = after.get(full_name, 0)
         diff = curr - prev
@@ -133,7 +233,7 @@ def _build_row_counts_html(
 
         rows_html += f"""
         <tr>
-            <td style="padding:6px 12px;border:1px solid #ddd;">{table_label}</td>
+            <td style="padding:6px 12px;border:1px solid #ddd;">{table}</td>
             <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{prev:,}</td>
             <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{curr:,}</td>
             <td style="padding:6px 12px;border:1px solid #ddd;text-align:right;">{diff_str}</td>
@@ -165,6 +265,7 @@ def _build_html_email(
     total_duration: float,
     row_counts_before: Optional[Dict[str, int]] = None,
     row_counts_after: Optional[Dict[str, int]] = None,
+    row_count_tables: Optional[List] = None,
 ) -> str:
     """Build HTML email body with inline CSS."""
     color = "#2e7d32" if overall_status == "SUCCESS" else "#c62828"
@@ -194,7 +295,8 @@ def _build_html_email(
 
     # Build row counts section
     row_counts_html = _build_row_counts_html(
-        row_counts_before or {}, row_counts_after or {}
+        row_counts_before or {}, row_counts_after or {},
+        tables=row_count_tables,
     )
 
     html = f"""
@@ -245,6 +347,7 @@ def send_pipeline_email(
     recipient: str = NOTIFICATION_RECIPIENT,
     row_counts_before: Optional[Dict[str, int]] = None,
     row_counts_after: Optional[Dict[str, int]] = None,
+    row_count_tables: Optional[List] = None,
 ):
     """
     Send pipeline summary email with log attachment via Gmail API.
@@ -270,6 +373,7 @@ def send_pipeline_email(
             results, overall_status, run_label,
             started_at, ended_at, total_duration,
             row_counts_before, row_counts_after,
+            row_count_tables=row_count_tables,
         )
         msg.attach(MIMEText(html_body, "html"))
 

@@ -183,28 +183,47 @@ class PipelineDB:
                 return await conn.execute(query, *args, timeout=effective_timeout)
         return self._run(_do())
 
-    def fetch(self, query: str, *args, timeout: float = None) -> List[asyncpg.Record]:
-        """Execute a query and return all rows."""
+    def fetch(self, query: str, *args, timeout: float = None, statement_timeout: int = None) -> List[asyncpg.Record]:
+        """Execute a query and return all rows.
+
+        Args:
+            timeout: Client-side timeout in seconds.
+            statement_timeout: Override server-side statement_timeout in seconds.
+                              Also sets client-side timeout to match if timeout
+                              is not explicitly provided.
+        """
         async def _do():
             async with self._pool.acquire() as conn:
-                await conn.execute(self._TIMEOUT_SQL)
-                return await conn.fetch(query, *args, timeout=timeout)
+                if statement_timeout is not None:
+                    await conn.execute(f"SET statement_timeout = '{statement_timeout}s'")
+                else:
+                    await conn.execute(self._TIMEOUT_SQL)
+                effective_timeout = timeout if timeout is not None else (statement_timeout or None)
+                return await conn.fetch(query, *args, timeout=effective_timeout)
         return self._run(_do())
 
-    def fetchrow(self, query: str, *args, timeout: float = None) -> Optional[asyncpg.Record]:
+    def fetchrow(self, query: str, *args, timeout: float = None, statement_timeout: int = None) -> Optional[asyncpg.Record]:
         """Execute a query and return the first row."""
         async def _do():
             async with self._pool.acquire() as conn:
-                await conn.execute(self._TIMEOUT_SQL)
-                return await conn.fetchrow(query, *args, timeout=timeout)
+                if statement_timeout is not None:
+                    await conn.execute(f"SET statement_timeout = '{statement_timeout}s'")
+                else:
+                    await conn.execute(self._TIMEOUT_SQL)
+                effective_timeout = timeout if timeout is not None else (statement_timeout or None)
+                return await conn.fetchrow(query, *args, timeout=effective_timeout)
         return self._run(_do())
 
-    def fetchval(self, query: str, *args, column: int = 0, timeout: float = None) -> Any:
+    def fetchval(self, query: str, *args, column: int = 0, timeout: float = None, statement_timeout: int = None) -> Any:
         """Execute a query and return a single value."""
         async def _do():
             async with self._pool.acquire() as conn:
-                await conn.execute(self._TIMEOUT_SQL)
-                return await conn.fetchval(query, *args, column=column, timeout=timeout)
+                if statement_timeout is not None:
+                    await conn.execute(f"SET statement_timeout = '{statement_timeout}s'")
+                else:
+                    await conn.execute(self._TIMEOUT_SQL)
+                effective_timeout = timeout if timeout is not None else (statement_timeout or None)
+                return await conn.fetchval(query, *args, column=column, timeout=effective_timeout)
         return self._run(_do())
 
     def executemany(self, query: str, args: Sequence[Sequence], timeout: float = None) -> None:
