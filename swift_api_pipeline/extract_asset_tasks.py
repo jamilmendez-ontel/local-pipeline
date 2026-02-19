@@ -23,7 +23,7 @@ logger = get_logger("asset_tasks")
 PAGE_SIZE = 1000
 MAX_RETRIES = 10
 MAX_WORKERS = 6  # Concurrent API + DB writer threads
-LOAD_BATCH_SIZE = 100000
+LOAD_BATCH_SIZE = 25000
 
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
