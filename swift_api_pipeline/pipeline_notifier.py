@@ -22,7 +22,11 @@ from config import get_logger
 
 logger = get_logger("notifier")
 
-NOTIFICATION_RECIPIENT = "jamil.mendez@ontel.co"
+NOTIFICATION_RECIPIENTS = [
+    "jamil.mendez@ontel.co",
+    "hajie@ontel.co",
+    "sheena@ontel.co",
+]
 TZ_EASTERN = ZoneInfo("America/New_York")
 
 # Per-pipeline table lists for row count display in emails.
@@ -344,7 +348,7 @@ def send_pipeline_email(
     started_at: datetime,
     ended_at: datetime,
     total_duration: float,
-    recipient: str = NOTIFICATION_RECIPIENT,
+    recipients: List[str] = None,
     row_counts_before: Optional[Dict[str, int]] = None,
     row_counts_after: Optional[Dict[str, int]] = None,
     row_count_tables: Optional[List] = None,
@@ -357,6 +361,9 @@ def send_pipeline_email(
     try:
         from gmail_client import authenticate
 
+        if recipients is None:
+            recipients = NOTIFICATION_RECIPIENTS
+
         service = authenticate()
 
         # Build the email
@@ -364,7 +371,7 @@ def send_pipeline_email(
         subject = f"Pipeline {overall_status}: {run_label} ({duration_str})"
 
         msg = MIMEMultipart()
-        msg["To"] = recipient
+        msg["To"] = ", ".join(recipients)
         msg["From"] = "me"
         msg["Subject"] = subject
 
@@ -394,7 +401,7 @@ def send_pipeline_email(
             body={"raw": raw},
         ).execute()
 
-        logger.info(f"Notification email sent to {recipient}: {subject}")
+        logger.info(f"Notification email sent to {', '.join(recipients)}: {subject}")
 
     except Exception as e:
         logger.error(f"Failed to send notification email: {e}\n{traceback.format_exc()}")
