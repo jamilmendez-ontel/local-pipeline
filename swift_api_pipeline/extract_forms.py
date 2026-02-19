@@ -173,13 +173,17 @@ class FormsExtractor(BaseExtractor):
                 logger.error(f"Loader error: {e}")
                 result_queue.task_done()
 
-        # Load all remaining data
-        logger.info("Flushing remaining data...")
+        # Load all remaining data — must complete before transform runs
+        remaining = sum(len(d) for d in pending_batches.values())
+        logger.info(f"Flushing remaining data ({remaining:,} rows)...")
         for table_name, data in pending_batches.items():
             if data:
-                for i in range(0, len(data), LOAD_BATCH_SIZE):
-                    batch = data[i:i + LOAD_BATCH_SIZE]
-                    self.load_batch(table_name, batch)
+                try:
+                    for i in range(0, len(data), LOAD_BATCH_SIZE):
+                        batch = data[i:i + LOAD_BATCH_SIZE]
+                        self.load_batch(table_name, batch)
+                except Exception as e:
+                    logger.error(f"Flush failed for {table_name} ({len(data):,} rows): {e}")
         logger.info("Loader complete")
 
     def clear_old_raw_data(self):
@@ -257,9 +261,15 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
         logger.info("Waiting for loader to finish...")
         result_queue.join()
 
-        # Signal loader to stop and wait for it
+        # Signal loader to stop and wait for flush to complete.
+        # No timeout — loader must finish flushing remaining partial batches
+        # to raw before we proceed to transform.  A timeout here caused data
+        # loss: rows accumulated in pending_batches (task_done() fires before
+        # DB write) would be flushed by the daemon thread AFTER the transform
+        # already ran, resulting in staging missing the last partial batch per
+        # table (e.g. 60,000 instead of 63,942).
         stop_event.set()
-        loader_thread.join(timeout=120)
+        loader_thread.join()
 
         total_records = extractor.total_loaded
 
