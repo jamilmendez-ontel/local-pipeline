@@ -292,11 +292,11 @@ def run_all_pipelines(send_email=True):
     # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
     from transform import backfill_asset_did, refresh_analytics
 
-    result = _run_and_notify(backfill_asset_did, "Asset DID Backfill", send_email)
+    result = _run_and_notify(backfill_asset_did, "Asset DID Backfill", send_email=False)
     pipeline_results.append(result)
 
     # Post-Phase 2: Refresh analytics materialized views
-    result = _run_and_notify(refresh_analytics, "Analytics MV Refresh", send_email)
+    result = _run_and_notify(refresh_analytics, "Analytics MV Refresh", send_email=False)
     pipeline_results.append(result)
 
     # Summary log
