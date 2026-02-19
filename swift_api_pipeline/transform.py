@@ -1134,6 +1134,29 @@ def backfill_asset_did():
     else:
         print("  RPC returned no data")
 
+    # Backfill carrier_group on stg_assets from carrier_group_lookup
+    updated = db.fetchval(f"""
+        WITH matched AS (
+            SELECT DISTINCT ON (a.asset_did)
+                a.asset_did, cg.carrier_group
+            FROM {SCHEMA_STAGING}.stg_assets a
+            JOIN {SCHEMA_STAGING}.carrier_group_lookup cg
+                ON a.asset_id ILIKE '%' || cg.search_term || '%'
+            WHERE a.carrier_group IS NULL
+            ORDER BY a.asset_did, cg.match_order
+        ),
+        do_update AS (
+            UPDATE {SCHEMA_STAGING}.stg_assets a
+            SET carrier_group = m.carrier_group
+            FROM matched m
+            WHERE a.asset_did = m.asset_did
+            RETURNING 1
+        )
+        SELECT COUNT(*) FROM do_update
+    """)
+    updated = updated or 0
+    print(f"  Carrier group backfill: {updated:,} assets updated")
+
     print(f"\n{'='*60}\n")
 
 
