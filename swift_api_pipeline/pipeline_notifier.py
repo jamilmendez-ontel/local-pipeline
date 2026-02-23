@@ -67,6 +67,10 @@ PIPELINE_TABLES = {
         ("data_staging", "stg_qa_form"),
     ],
     "Analytics MV Refresh": [],
+    "Calendar Leave": [
+        ("data_raw", "raw_calendar_leave"),
+        ("data_staging", "stg_calendar_leave"),
+    ],
 }
 
 # All unique tables across all pipelines (for --extract / --transform modes)
