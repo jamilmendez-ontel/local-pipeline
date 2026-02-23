@@ -166,6 +166,18 @@ _LEAVE_CODES = {
 # 2-part entries where the second part is a leave description (person is first)
 _LEAVE_DESCRIPTIONS = {"Weekend Work", "Birthday Leave", "Live Review"}
 
+# Known team names for detecting swapped team/person or team/leave_type fields
+_KNOWN_TEAMS = {
+    "CG1", "CG2", "CG3",
+    "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta",
+    "QPI", "CRTV", "CRTVS", "Admin and Ops", "Admin & Ops",
+    "Acctg", "ACCTG", "Accounting", "R&D", "DA", "T&A", "TNA",
+    "HR", "Swift", "MKTG", "Marketing",
+    "TS Admin", "PHI DS", "PHIDS", "PHIDSM", "DSM",
+    "PHI HR", "Trainee", "SD", "AI", "AIE", "T&D",
+}
+_KNOWN_TEAMS_UPPER = {t.upper() for t in _KNOWN_TEAMS}
+
 
 def _normalize_separators(summary: str) -> str:
     """Fix inconsistent dash spacing so split(' - ') works.
@@ -200,6 +212,10 @@ def parse_summary(summary: str) -> dict:
     if summary.startswith(("PH:", "PH Holiday:", "US:")):
         return {"leave_type": "PH", "team": None, "person": None, "person_note": summary}
 
+    # Broader holiday keywords (catches "Christmas Holiday (Company-Wide)" etc.)
+    if "holiday" in summary.lower():
+        return {"leave_type": "PH", "team": None, "person": None, "person_note": summary}
+
     # Normalize dash spacing
     normalized = _normalize_separators(summary)
 
@@ -217,6 +233,17 @@ def parse_summary(summary: str) -> dict:
         leave_type = parts[0]
         team = parts[1]
         person_raw = " - ".join(parts[2:])
+
+        # Detect swapped leave_type <-> team: e.g. "QPI - SL - Paolo"
+        if (leave_type.upper() in _KNOWN_TEAMS_UPPER
+                and team.upper().replace("/", "") in _LEAVE_CODES):
+            leave_type, team = team, leave_type
+
+        # Detect swapped team <-> person: e.g. "SDL - Euge - CG1"
+        person_clean = re.sub(r'\s*\([^)]*\)\s*$', '', person_raw).strip()
+        if (person_clean.upper() in _KNOWN_TEAMS_UPPER
+                and team.upper() not in _KNOWN_TEAMS_UPPER):
+            team, person_raw = person_raw, team
     elif len(parts) == 2:
         first, second = parts[0], parts[1]
         first_upper = first.upper().replace("/", "").strip()
