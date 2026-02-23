@@ -226,6 +226,19 @@ async def export(output_path: Path):
                 f"(fetch {t_fetched - t_q:.1f}s, write {t_written - t_fetched:.1f}s)"
             )
 
+        # Fetch latest loaded_at and run_id for email metadata
+        meta = await conn.fetchrow("""
+            SELECT
+                MAX(loaded_at) AT TIME ZONE 'America/New_York' AS latest_loaded_at,
+                run_id
+            FROM data_staging.stg_asset_tasks
+            GROUP BY run_id
+            ORDER BY MAX(loaded_at) DESC
+            LIMIT 1
+        """)
+        loaded_at = meta["latest_loaded_at"] if meta else None
+        run_id = str(meta["run_id"]) if meta else None
+
     finally:
         workbook.close()
         await conn.close()
@@ -233,8 +246,11 @@ async def export(output_path: Path):
 
     elapsed = time.time() - t_start
     print(f"\nTotal: {total_rows:,} rows across {len(PROJECTS)} tabs in {elapsed:.1f}s")
+    if loaded_at:
+        print(f"Data loaded at: {loaded_at:%Y-%m-%d %I:%M %p} ET")
+        print(f"Run ID: {run_id}")
     print(f"Output: {output_path}")
-    return total_rows
+    return total_rows, loaded_at, run_id
 
 
 # Google Drive folder name for exports
@@ -310,7 +326,8 @@ def upload_to_drive(file_path: Path) -> str:
     return link
 
 
-def send_export_email(file_path: Path, drive_link: str, total_rows: int, recipient: str = EMAIL_RECIPIENT):
+def send_export_email(file_path: Path, drive_link: str, total_rows: int,
+                      loaded_at=None, run_id=None, recipient: str = EMAIL_RECIPIENT):
     """Send email with Google Drive link to the exported file."""
     from gmail_client import authenticate
 
@@ -319,6 +336,9 @@ def send_export_email(file_path: Path, drive_link: str, total_rows: int, recipie
     today_et = datetime.now(ET).strftime("%B %d, %Y")
     filename = file_path.name
     file_size_mb = file_path.stat().st_size / (1024 * 1024)
+
+    loaded_at_str = loaded_at.strftime("%B %d, %Y %I:%M %p ET") if loaded_at else "Unknown"
+    run_id_str = run_id or "Unknown"
 
     subject = f"Asset Tasks Export - {today_et}"
     html_body = f"""\
@@ -334,6 +354,10 @@ def send_export_email(file_path: Path, drive_link: str, total_rows: int, recipie
             <td style="padding: 4px 12px;">{file_size_mb:.1f} MB</td></tr>
         <tr><td style="padding: 4px 12px; font-weight: bold;">Tabs</td>
             <td style="padding: 4px 12px;">TS18, TS17, TS16, TS15, TS14, TS13</td></tr>
+        <tr><td style="padding: 4px 12px; font-weight: bold;">Data Loaded At</td>
+            <td style="padding: 4px 12px;">{loaded_at_str}</td></tr>
+        <tr><td style="padding: 4px 12px; font-weight: bold;">Pipeline Run ID</td>
+            <td style="padding: 4px 12px;"><code>{run_id_str}</code></td></tr>
     </table>
     <p><a href="{drive_link}" style="display: inline-block; padding: 10px 20px;
         background-color: #1a73e8; color: white; text-decoration: none;
@@ -375,7 +399,7 @@ def main():
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
         output_path = OUTPUT_DIR / f"{today}.xlsx"
 
-    total_rows = asyncio.run(export(output_path))
+    total_rows, loaded_at, run_id = asyncio.run(export(output_path))
 
     if not args.no_upload:
         try:
@@ -385,7 +409,7 @@ def main():
             print(f"Upload took {time.time() - t0:.1f}s")
 
             print("Sending email notification...")
-            send_export_email(output_path, drive_link, total_rows)
+            send_export_email(output_path, drive_link, total_rows, loaded_at, run_id)
         except Exception as e:
             print(f"ERROR: Drive upload/email failed: {e}")
             print("Excel file was still generated successfully.")

@@ -55,6 +55,20 @@ def calculate_date_range() -> Tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
+def _queue_join_with_timeout(q, timeout):
+    """Like Queue.join() but with a timeout to prevent deadlocks."""
+    with q.all_tasks_done:
+        endtime = time.monotonic() + timeout
+        while q.unfinished_tasks:
+            remaining = endtime - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Queue.join() timed out after {timeout}s "
+                    f"({q.unfinished_tasks} unfinished tasks) - possible deadlock"
+                )
+            q.all_tasks_done.wait(remaining)
+
+
 class TimerExtractor(BaseExtractor):
     def __init__(self):
         super().__init__(pipeline_name="timer_extract")
@@ -312,7 +326,7 @@ def run_timer_pipeline(
 
         # Wait for queue to be fully processed
         logger.info("Waiting for loader to finish...")
-        result_queue.join()
+        _queue_join_with_timeout(result_queue, timeout=600)
 
         # Signal loader to stop and wait for it
         stop_event.set()

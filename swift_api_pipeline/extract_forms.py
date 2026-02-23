@@ -27,6 +27,20 @@ MAX_WORKERS = 6
 LOAD_BATCH_SIZE = 10000
 
 
+def _queue_join_with_timeout(q, timeout):
+    """Like Queue.join() but with a timeout to prevent deadlocks."""
+    with q.all_tasks_done:
+        endtime = time.monotonic() + timeout
+        while q.unfinished_tasks:
+            remaining = endtime - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Queue.join() timed out after {timeout}s "
+                    f"({q.unfinished_tasks} unfinished tasks) - possible deadlock"
+                )
+            q.all_tasks_done.wait(remaining)
+
+
 class FormsExtractor(BaseExtractor):
     def __init__(self):
         super().__init__(pipeline_name="forms_extract")
@@ -259,7 +273,7 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
 
         # Wait for queue to be fully processed
         logger.info("Waiting for loader to finish...")
-        result_queue.join()
+        _queue_join_with_timeout(result_queue, timeout=3600)
 
         # Signal loader to stop and wait for flush to complete.
         # No timeout — loader must finish flushing remaining partial batches
