@@ -181,6 +181,22 @@ Employee leave, rest days, and weekend work from Google Calendar.
 | event_created | When created in Google Calendar |
 | event_updated | When last modified |
 
+**analytics.v_calendar_leave_daily** (~13K rows)
+Daily exploded view — one row per person per day on leave. Multi-day events are expanded into individual date rows. **Use this for day-level queries** (who's out today, headcount per day, team absences this week). Use `v_calendar_leave` for event-level queries instead.
+| Column | Description |
+|--------|-------------|
+| leave_date | The specific date this person is on leave (primary filter) |
+| event_id | Links back to the original leave event in v_calendar_leave |
+| leave_type | Same normalized leave codes as v_calendar_leave |
+| team | Same normalized team names as v_calendar_leave |
+| person | Employee nickname |
+| person_note | Partial-day info (e.g., "3pm onwards") |
+| start_date / end_date | Original event date range (same across all rows for one event) |
+| days | Total days in the original event (use COUNT(*) not SUM(days) when aggregating) |
+| leave_type_raw / team_raw | Pre-normalization values |
+| summary | Raw calendar event title |
+| is_all_day | Whether all-day event |
+
 ### Staging Tables (use only when no analytics view exists)
 
 **data_staging.stg_ar_aging** — Accounts receivable aging from QuickBooks
@@ -234,23 +250,35 @@ FROM data_staging.stg_ar_aging
 WHERE as_of_date = (SELECT MAX(as_of_date) FROM data_staging.stg_ar_aging)
 GROUP BY 1;
 
--- Leave summary by type this month
+-- Leave summary by type this month (event-level)
 SELECT leave_type, COUNT(*) as events, SUM(days) as total_days
 FROM analytics.v_calendar_leave
 WHERE start_date >= '2026-02-01' AND leave_type IS NOT NULL
 GROUP BY 1 ORDER BY total_days DESC;
 
--- Team absence overview
+-- Team absence overview (event-level)
 SELECT team, COUNT(*) as leave_events
 FROM analytics.v_calendar_leave
 WHERE start_date >= '2026-01-01' AND team IS NOT NULL
 GROUP BY 1 ORDER BY leave_events DESC;
 
--- Who is on leave today
-SELECT person, team, leave_type, start_date, end_date, days
-FROM analytics.v_calendar_leave
-WHERE CURRENT_DATE BETWEEN start_date AND end_date
-  AND leave_type IS NOT NULL;
+-- Who is on leave today (daily view — simpler)
+SELECT person, team, leave_type
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date = CURRENT_DATE;
+
+-- Headcount absent per day this week (daily view)
+SELECT leave_date, COUNT(DISTINCT person) as people_out
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date BETWEEN date_trunc('week', CURRENT_DATE) AND CURRENT_DATE
+GROUP BY 1 ORDER BY 1;
+
+-- Team absences per day this month (daily view)
+SELECT team, COUNT(*) as person_days
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date >= '2026-02-01' AND leave_date < '2026-03-01'
+  AND team IS NOT NULL
+GROUP BY 1 ORDER BY person_days DESC;
 ```
 
 ## Datetime Handling
