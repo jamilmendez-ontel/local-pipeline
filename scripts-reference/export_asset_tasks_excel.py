@@ -255,7 +255,11 @@ async def export(output_path: Path):
 
 # Google Drive folder name for exports
 DRIVE_FOLDER_NAME = "Asset Tasks Exports"
-EMAIL_RECIPIENT = "jamil.mendez@ontel.co"
+EMAIL_RECIPIENTS = [
+    "jamil.mendez@ontel.co",
+    "hajie@ontel.co",
+    "sheena@ontel.co",
+]
 
 
 def get_or_create_drive_folder(drive_service, folder_name):
@@ -327,9 +331,12 @@ def upload_to_drive(file_path: Path) -> str:
 
 
 def send_export_email(file_path: Path, drive_link: str, total_rows: int,
-                      loaded_at=None, run_id=None, recipient: str = EMAIL_RECIPIENT):
+                      loaded_at=None, run_id=None, recipients=None):
     """Send email with Google Drive link to the exported file."""
     from gmail_client import authenticate
+
+    if recipients is None:
+        recipients = EMAIL_RECIPIENTS
 
     service = authenticate()
 
@@ -366,14 +373,14 @@ def send_export_email(file_path: Path, drive_link: str, total_rows: int,
     """
 
     msg = MIMEMultipart()
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["From"] = "me"
     msg["Subject"] = subject
     msg.attach(MIMEText(html_body, "html"))
 
     raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    print(f"Email sent to {recipient}: {subject}")
+    print(f"Email sent to {', '.join(recipients)}: {subject}")
 
 
 def main():
