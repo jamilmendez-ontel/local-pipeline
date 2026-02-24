@@ -21,6 +21,8 @@ The company does cell tower construction and modification work for telecom carri
 
 **Workflow**: Sites (assets) have tasks assigned → technicians perform work → submit for review → get approved or rejected. QA inspections happen in parallel. Timer logs track on-site hours.
 
+**Teams & Leave**: The company tracks employee leave, rest days, and weekend work via Google Calendar. Employees are organized into teams/groups — construction groups (CG1, CG2, CG3), named teams (Alpha, Beta, Gamma, Delta, Epsilon, Zeta), and departments (QPI, CRTV, Admin and Ops, Acctg, HR, R&D, T&A, Swift, MKTG, DA, etc.). Leave types include RD (Rest Day), VL (Vacation Leave), SL (Sick Leave), WW (Weekend Work), SDL (Sudden Leave), UT (Undertime), BL (Birthday Leave), EL (Emergency Leave), PH (Public Holiday), ML (Maternity Leave), PL (Paternity Leave), and others. Employees are identified by nickname (e.g., Luis, Merj, Corey).
+
 ## Query Guidelines
 
 - Large tables: always include WHERE filters (project_name, date range, status) to avoid scanning millions of rows
@@ -31,6 +33,7 @@ The company does cell tower construction and modification work for telecom carri
 - requirement_status values are workflow states: pending, submitted, approved, cancelled (NOT Pass/Fail)
 - For QA pass rate: approved = pass, cancelled = fail
 - carrier_group values: Verizon, AT&T/DISH, TMO/USCC
+- Calendar leave: use `v_calendar_leave_daily` for day-level questions (who's out, absences per day), use `v_calendar_leave` for event-level questions (leave summaries, multi-day event counts). When counting person-days from the daily view, use `COUNT(*)` not `SUM(days)`
 
 ## Available Tables
 
@@ -161,11 +164,19 @@ One row per date/site/task_type.
 | tasks_completed | Count approved that day |
 | project_name | Project |
 
+### Calendar Leave Views (HR / people data)
+
+These views track employee leave, rest days, and weekend work from Google Calendar. They are **separate from the construction/Swift API data** above.
+
+**Choosing the right view:**
+- **`v_calendar_leave`** — One row per leave event. Use for event-level queries: leave summaries by type, counting leave events, looking at multi-day events as single entries.
+- **`v_calendar_leave_daily`** — One row per person per day on leave. Multi-day events are expanded into individual date rows. **Use for day-level queries**: who's out today, headcount absent per day, team coverage gaps, daily attendance patterns.
+
 **analytics.v_calendar_leave** (~10.5K rows)
-Employee leave, rest days, and weekend work from Google Calendar.
+One row per leave event from Google Calendar.
 | Column | Description |
 |--------|-------------|
-| event_id | Google Calendar event ID |
+| event_id | Google Calendar event ID (primary key) |
 | summary | Raw calendar event title (e.g., "VL - Zeta - Luis") |
 | leave_type | Normalized leave code: RD (Rest Day), VL (Vacation Leave), SL (Sick Leave), WW (Weekend Work), SDL (Sudden Leave), UT (Undertime), BL (Birthday Leave), EL (Emergency Leave), PH (Public Holiday), ML (Maternity), PL (Paternity), etc. Compound types use "/": UT/SL, VL/LAC |
 | leave_type_raw | Original parsed leave code before AI normalization |
@@ -182,17 +193,17 @@ Employee leave, rest days, and weekend work from Google Calendar.
 | event_updated | When last modified |
 
 **analytics.v_calendar_leave_daily** (~13K rows)
-Daily exploded view — one row per person per day on leave. Multi-day events are expanded into individual date rows. **Use this for day-level queries** (who's out today, headcount per day, team absences this week). Use `v_calendar_leave` for event-level queries instead.
+One row per person per day on leave (multi-day events expanded).
 | Column | Description |
 |--------|-------------|
-| leave_date | The specific date this person is on leave (primary filter) |
+| leave_date | The specific date this person is on leave (primary filter — use this in WHERE clauses) |
 | event_id | Links back to the original leave event in v_calendar_leave |
 | leave_type | Same normalized leave codes as v_calendar_leave |
 | team | Same normalized team names as v_calendar_leave |
 | person | Employee nickname |
 | person_note | Partial-day info (e.g., "3pm onwards") |
-| start_date / end_date | Original event date range (same across all rows for one event) |
-| days | Total days in the original event (use COUNT(*) not SUM(days) when aggregating) |
+| start_date / end_date | Original event date range (same across all expanded rows for one event) |
+| days | Total days in the original event — **IMPORTANT: use COUNT(*) not SUM(days) when counting person-days** |
 | leave_type_raw / team_raw | Pre-normalization values |
 | summary | Raw calendar event title |
 | is_all_day | Whether all-day event |
@@ -250,35 +261,54 @@ FROM data_staging.stg_ar_aging
 WHERE as_of_date = (SELECT MAX(as_of_date) FROM data_staging.stg_ar_aging)
 GROUP BY 1;
 
--- Leave summary by type this month (event-level)
+-- === Calendar Leave Queries ===
+
+-- Who is on leave today
+SELECT person, team, leave_type, person_note
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date = CURRENT_DATE
+ORDER BY team, person;
+
+-- Who is on leave tomorrow
+SELECT person, team, leave_type, person_note
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date = CURRENT_DATE + 1
+ORDER BY team, person;
+
+-- Headcount absent per day this week
+SELECT leave_date, COUNT(DISTINCT person) as people_out
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date BETWEEN date_trunc('week', CURRENT_DATE)
+  AND date_trunc('week', CURRENT_DATE) + interval '6 days'
+GROUP BY 1 ORDER BY 1;
+
+-- Leave summary by type this month (use v_calendar_leave for event counts)
 SELECT leave_type, COUNT(*) as events, SUM(days) as total_days
 FROM analytics.v_calendar_leave
 WHERE start_date >= '2026-02-01' AND leave_type IS NOT NULL
 GROUP BY 1 ORDER BY total_days DESC;
 
--- Team absence overview (event-level)
-SELECT team, COUNT(*) as leave_events
-FROM analytics.v_calendar_leave
-WHERE start_date >= '2026-01-01' AND team IS NOT NULL
-GROUP BY 1 ORDER BY leave_events DESC;
-
--- Who is on leave today (daily view — simpler)
-SELECT person, team, leave_type
+-- Leave breakdown by team this month (use daily view for person-days)
+SELECT team, leave_type, COUNT(*) as person_days
 FROM analytics.v_calendar_leave_daily
-WHERE leave_date = CURRENT_DATE;
+WHERE leave_date >= '2026-02-01' AND leave_date < '2026-03-01'
+  AND team IS NOT NULL
+GROUP BY 1, 2 ORDER BY team, person_days DESC;
 
--- Headcount absent per day this week (daily view)
-SELECT leave_date, COUNT(DISTINCT person) as people_out
-FROM analytics.v_calendar_leave_daily
-WHERE leave_date BETWEEN date_trunc('week', CURRENT_DATE) AND CURRENT_DATE
-GROUP BY 1 ORDER BY 1;
-
--- Team absences per day this month (daily view)
-SELECT team, COUNT(*) as person_days
+-- Team absence overview this month
+SELECT team, COUNT(*) as person_days, COUNT(DISTINCT person) as unique_people
 FROM analytics.v_calendar_leave_daily
 WHERE leave_date >= '2026-02-01' AND leave_date < '2026-03-01'
   AND team IS NOT NULL
 GROUP BY 1 ORDER BY person_days DESC;
+
+-- Top leave takers this month
+SELECT person, team, COUNT(*) as days_out,
+  string_agg(DISTINCT leave_type, ', ') as leave_types
+FROM analytics.v_calendar_leave_daily
+WHERE leave_date >= '2026-02-01' AND leave_date < '2026-03-01'
+GROUP BY 1, 2 ORDER BY days_out DESC
+LIMIT 20;
 ```
 
 ## Datetime Handling
