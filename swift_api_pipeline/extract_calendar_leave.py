@@ -641,8 +641,7 @@ def run_calendar_leave_pipeline(full_refresh: bool = False, send_email: bool = T
         send_email: If True (default), send email notification on completion/failure.
     """
     setup_logging()
-    mode = "FULL REFRESH" if full_refresh else "INCREMENTAL"
-    run_label = f"Calendar Leave ({mode})"
+    run_label = "Calendar Leave"
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Calendar Leave Pipeline ({mode})")
