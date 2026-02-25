@@ -644,7 +644,7 @@ def run_calendar_leave_pipeline(full_refresh: bool = False, send_email: bool = T
     run_label = "Calendar Leave"
 
     logger.info(f"\n{'=' * 60}")
-    logger.info(f"Calendar Leave Pipeline ({mode})")
+    logger.info("Calendar Leave Pipeline")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'=' * 60}\n")
 
