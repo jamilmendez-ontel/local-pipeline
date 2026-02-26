@@ -4,7 +4,68 @@ This document tracks all development sessions, changes made, and issues identifi
 
 ---
 
-## Session: 2026-02-26
+## Session: 2026-02-26 (Part 2)
+
+### New Project: Gmail Scraper (`gmail-scraper/`)
+
+Built a new standalone project at `C:\Users\admin\Desktop\Projects\ai-projects\gmail-scraper` connected to `https://github.com/jamilmendez-ontel/gmail-scraper.git`.
+
+**Purpose:** Scrape Gmail inbox for COP (Close Out Package) emails sent to/from Ontel teams, extract structured data from the email body table, and store in Supabase for downstream use.
+
+#### Architecture
+
+Same DB pattern as local-pipeline: asyncpg pool on a background event loop thread with sync bridge via `run_coroutine_threadsafe()`.
+
+Files:
+- `config.py` — env vars, logging, schema constants
+- `db.py` — asyncpg pool + sync bridge (singleton `get_db()`)
+- `gmail_client.py` — OAuth2 auth, paginated search, recursive HTML/plain-text body extraction, retry logic on `get_full_message()`
+- `extractor.py` — incremental `run_scraper()`: queries `MAX(received_at)` → builds `after:` filter → dedup by message_id → batch insert to `data_raw.raw_emails` + `data_staging.stg_emails`
+- `parser.py` — `run_parser()`: reads `stg_emails.html_body`, finds first "CLOSE OUT PACKAGE" table, extracts all label:value pairs into JSONB → upserts `data_staging.stg_cop_emails`
+- `main.py` — CLI: `--reprocess`, `--parse-only`, `--reparse`, `--query`, `--max-results`
+- `scheduled_gmail_scraper.bat` — Windows Task Scheduler wrapper
+
+#### Gmail Query
+
+Final query: `swiftprojects.io from:ontel.co`
+
+Iteration:
+1. Started with `to/cc:vzw.cgc@ontel.co` — missed FTTH, AAHI, MP team emails
+2. Added `-subject:Re:` + 8-digit number filter — too restrictive, missed valid Re: emails with COP tables
+3. Switched to `swiftprojects.io` body filter — catches all COP emails regardless of team or Re: prefix
+4. Added `from:ontel.co` — excluded pipeline notification emails from `jamil.mendez@nanoninth.com` that also referenced swiftprojects.io
+
+#### DB Tables (applied to Supabase cloud)
+
+- `data_raw.raw_emails` — message_id (PK), thread_id, sender, recipients (JSONB), subject, received_at, html_body, headers (JSONB), labels (JSONB)
+- `data_staging.stg_emails` — parsed: sender_email, sender_name, recipients_to (TEXT[]), recipients_cc (TEXT[])
+- `data_staging.stg_cop_emails` — package_type, fields (JSONB all label:value pairs), dropbox_url, swift_url, parse_error
+
+#### COP Email Parser
+
+Identified two distinct HTML layouts and multiple email types (REVIEW, REVISION, PMI). Key insight: the important data is always in the **first "CLOSE OUT PACKAGE" table** in the email body.
+
+Parser strategy:
+1. BeautifulSoup finds the cell containing "CLOSE OUT PACKAGE" → determines package_type (REVIEW/REVISION/PMI)
+2. Walks up to the containing `<table>`
+3. For each `<tr>`, uses `recursive=False` to get only direct child cells (avoids nested table bleed)
+4. Labels = `<th>` tags OR `<td>` text ending with ":"
+5. All pairs stored in `fields` JSONB — new field types appear automatically without schema changes
+6. Dropbox/Swift URLs extracted from `<a href>` tags
+
+parse_error is set (not null) for emails that contain swiftprojects.io in quoted text but have no actual COP table — expected for conversation threads.
+
+#### Authentication
+
+Re-used `credentials.json` + `token.pickle` from `local-pipeline/swift_api_pipeline/gmail_credentials/` (same Ontel Google account). Token had `gmail.readonly` scope.
+
+#### Task Scheduler
+
+`GmailScraper-Nightly` task registered via PowerShell — runs daily at 11:00 PM.
+
+---
+
+## Session: 2026-02-26 (Part 1)
 
 ### Pipeline Failure Handling Improvements
 
