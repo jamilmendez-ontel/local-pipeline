@@ -8,13 +8,14 @@ Before bulk load: table set to UNLOGGED and non-PK indexes dropped.
 After load: indexes recreated and table set back to LOGGED.
 """
 
+import uuid
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict
 from config import (
-    SCHEMA_RAW, SCHEMA_REFERENCE, get_logger, retry_db
+    SCHEMA_RAW, SCHEMA_REFERENCE, SCHEMA_PIPELINE, get_logger, retry_db
 )
 from base_extractor import BaseExtractor
 
@@ -24,6 +25,7 @@ PAGE_SIZE = 1000
 MAX_RETRIES = 10
 MAX_WORKERS = 6  # Concurrent API + DB writer threads
 LOAD_BATCH_SIZE = 25000
+RETRY_WAIT_SECONDS = 300  # Wait before project-level retry (5 min)
 
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
@@ -202,27 +204,101 @@ class AssetTaskExtractor(BaseExtractor):
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
 
-def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX_WORKERS):
+def run_asset_task_pipeline(
+    min_project_number: int = 13,
+    max_workers: int = MAX_WORKERS,
+    project_filter: str = None,
+):
     """Main pipeline for extracting asset-tasks with parallel processing.
 
     Each worker extracts from API and writes directly to DB — no Queue overhead.
     Table is set to UNLOGGED with indexes dropped during bulk load for maximum throughput.
+
+    project_filter: if set, runs in single-project recovery mode.
+        Reuses the latest pipeline run_id, cleans only that project's raw rows,
+        re-extracts, and marks the run as success. No index drop/restore.
+        Use with: python main.py --pipeline asset_tasks --project TS16
     """
+    is_recovery = project_filter is not None
+
     logger.info(f"\n{'='*60}")
-    logger.info(f"Asset-Task Extraction Pipeline (Direct Write)")
-    logger.info(f"Projects: TECH-OPS TS{min_project_number}+")
-    logger.info(f"Workers: {max_workers}")
+    if is_recovery:
+        logger.info(f"Asset-Task Extraction Pipeline (Recovery: project_filter='{project_filter}')")
+    else:
+        logger.info(f"Asset-Task Extraction Pipeline (Direct Write)")
+        logger.info(f"Projects: TECH-OPS TS{min_project_number}+")
+        logger.info(f"Workers: {max_workers}")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}\n")
 
     extractor = AssetTaskExtractor()
 
     try:
-        extractor.start_pipeline_run()
         extractor.authenticate()
 
-        # Get projects from reference table
-        projects = extractor.get_project_dids(min_project_number)
+        all_projects = extractor.get_project_dids(min_project_number)
+
+        # ── RECOVERY MODE ─────────────────────────────────────────────────────
+        if is_recovery:
+            # Reuse the latest run_id (success or failed) — don't create a new run
+            run_row = extractor.db.fetchrow(
+                f"SELECT run_id, records_extracted FROM {SCHEMA_PIPELINE}.pipeline_runs "
+                f"WHERE pipeline_name = 'asset_tasks_extract' ORDER BY started_at DESC LIMIT 1"
+            )
+            if run_row is None:
+                raise ValueError("No previous asset_tasks_extract run found to recover")
+
+            extractor.run_id = uuid.UUID(str(run_row["run_id"]))
+            existing_rows = run_row["records_extracted"] or 0
+
+            # Filter to the single matching project
+            projects = [p for p in all_projects if project_filter in p["project_name"]]
+            if not projects:
+                raise ValueError(
+                    f"No project found matching '{project_filter}'. "
+                    f"Available: {[p['project_name'] for p in all_projects]}"
+                )
+            proj = projects[0]
+
+            logger.info(f"Recovery mode: matched project '{proj['project_name']}'")
+            logger.info(f"Reusing run_id={extractor.run_id}, existing_rows={existing_rows:,}")
+
+            # Count stale rows for this project before cleaning
+            old_row = extractor.db.fetchrow(
+                f"SELECT COUNT(*) AS cnt FROM {SCHEMA_RAW}.raw_asset_tasks "
+                f"WHERE project_did=$1 AND run_id=$2",
+                proj["project_did"], str(extractor.run_id)
+            )
+            old_project_rows = old_row["cnt"] if old_row is not None else 0
+            logger.info(f"[{proj['project_name']}] Removing {old_project_rows:,} stale rows before re-extraction")
+
+            retry_db(
+                lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                    f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
+                    did, rid
+                ),
+                description=f"clean partial raw data for {proj['project_name']}"
+            )
+
+            new_rows = extractor.extract_and_load_project(proj["project_did"], proj["project_name"])
+            new_total = existing_rows - old_project_rows + new_rows
+
+            extractor.complete_pipeline_run("success", new_total)
+
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Recovery completed successfully")
+            logger.info(f"  Project:       {proj['project_name']}")
+            logger.info(f"  Rows extracted: {new_rows:,}")
+            logger.info(f"  Updated total:  {new_total:,}")
+            logger.info(f"  Run ID:         {extractor.run_id}")
+            logger.info(f"{'='*60}\n")
+
+            return str(extractor.run_id)
+
+        # ── NORMAL (FULL) MODE ────────────────────────────────────────────────
+        extractor.start_pipeline_run()
+
+        projects = all_projects
         logger.info(f"Found {len(projects)} projects to process\n")
 
         # Prepare table for fast bulk loading
@@ -251,15 +327,44 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
                     project_rows[proj["project_name"]] = 0
                     failed_projects.append(proj["project_name"])
 
+        # ── Project-level auto-retry (before index restore — faster writes) ──
+        if failed_projects:
+            logger.warning(
+                f"Retrying {len(failed_projects)} failed project(s) after "
+                f"{RETRY_WAIT_SECONDS}s: {failed_projects}"
+            )
+            time.sleep(RETRY_WAIT_SECONDS)
+
+            still_failed = []
+            for proj_name in failed_projects:
+                proj = next(p for p in projects if p["project_name"] == proj_name)
+                # Clean partial data from first attempt before retrying
+                retry_db(
+                    lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                        f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
+                        did, rid
+                    ),
+                    description=f"clean partial raw data for {proj_name}"
+                )
+                try:
+                    rows = extractor.extract_and_load_project(proj["project_did"], proj["project_name"])
+                    project_rows[proj_name] = rows
+                    logger.info(f"[{proj_name}] Retry SUCCEEDED: {rows:,} rows")
+                except Exception as e:
+                    logger.error(f"[{proj_name}] Retry FAILED: {type(e).__name__}: {e}")
+                    still_failed.append(proj_name)
+
+            failed_projects = still_failed  # Only projects that failed even after retry
+
         total_records = extractor.total_loaded
 
-        # Restore table: recreate indexes + set LOGGED
+        # Restore table: recreate indexes
         extractor.restore_table_after_load()
 
         # Clean up old raw data now that new extraction succeeded
         extractor.clear_old_raw_data()
 
-        # Detect partial failures — some projects extracted 0 rows
+        # Detect partial failures — projects that failed even after retry
         if failed_projects:
             extractor.complete_pipeline_run("failed", total_records,
                                             error=f"Projects failed: {', '.join(failed_projects)}")
@@ -295,11 +400,12 @@ def run_asset_task_pipeline(min_project_number: int = 13, max_workers: int = MAX
         logger.error(f"\n{'='*60}")
         logger.error(f"Pipeline failed: {e}")
         logger.error(f"{'='*60}\n")
-        # Try to restore table state even on failure
-        try:
-            extractor.restore_table_after_load()
-        except Exception as restore_err:
-            logger.error(f"Failed to restore table: {restore_err}")
+        if not is_recovery:
+            # Try to restore table state even on failure (only needed in full mode)
+            try:
+                extractor.restore_table_after_load()
+            except Exception as restore_err:
+                logger.error(f"Failed to restore table: {restore_err}")
         extractor.complete_pipeline_run("failed", error=str(e))
         raise
 
@@ -309,6 +415,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract asset-tasks from Swift API")
     parser.add_argument("--min-project", type=int, default=13, help="Minimum project number (default: 13)")
     parser.add_argument("--workers", type=int, default=MAX_WORKERS, help=f"Number of parallel workers (default: {MAX_WORKERS})")
+    parser.add_argument("--project", type=str, metavar="TS16", help="Recover a single project (e.g. TS16)")
     args = parser.parse_args()
 
-    run_asset_task_pipeline(min_project_number=args.min_project, max_workers=args.workers)
+    run_asset_task_pipeline(
+        min_project_number=args.min_project,
+        max_workers=args.workers,
+        project_filter=args.project,
+    )

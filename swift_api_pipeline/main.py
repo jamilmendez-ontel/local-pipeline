@@ -70,22 +70,37 @@ def run_user_priorities_pipeline():
     return True
 
 
-def run_asset_tasks_pipeline():
-    """Run asset tasks extraction + transformation"""
+def run_asset_tasks_pipeline(project_filter: str = None):
+    """Run asset tasks extraction + transformation.
+
+    project_filter: if set, runs in single-project recovery mode (e.g. 'TS16').
+        Reuses the latest run_id, cleans only that project's raw rows, re-extracts,
+        then runs transforms + backfill + analytics refresh.
+    """
     from extract_asset_tasks import run_asset_task_pipeline
     from transform import run_assets_transform, run_asset_tasks_transform
 
     logger.info(f"\n{'#'*60}")
-    logger.info(f"# ASSET TASKS PIPELINE")
+    if project_filter:
+        logger.info(f"# ASSET TASKS PIPELINE (RECOVERY: {project_filter})")
+    else:
+        logger.info(f"# ASSET TASKS PIPELINE")
     logger.info(f"{'#'*60}")
 
-    run_id = run_asset_task_pipeline()
+    run_id = run_asset_task_pipeline(project_filter=project_filter)
 
     # Transform assets (aggregated from asset tasks)
     run_assets_transform(run_id)
 
     # Transform asset tasks (individual task records)
     run_asset_tasks_transform(run_id)
+
+    # After single-project recovery, also update backfill and analytics
+    if project_filter:
+        from transform import backfill_asset_did, refresh_analytics
+        logger.info("Recovery: running backfill_asset_did and analytics refresh...")
+        backfill_asset_did()
+        refresh_analytics()
 
     return True
 
@@ -489,6 +504,7 @@ Examples:
   python main.py --pipeline orgs                # Run orgs/projects pipeline only
   python main.py --pipeline user_priorities     # Run user priorities pipeline only
   python main.py --pipeline asset_tasks         # Run asset_tasks pipeline only
+  python main.py --pipeline asset_tasks --project TS16  # Recover single project
   python main.py --pipeline forms               # Run QA forms pipeline only
   python main.py --pipeline timer               # Run timer pipeline only
   python main.py --pipeline aging               # Run AR aging pipeline only (Gmail)
@@ -520,9 +536,18 @@ Examples:
         action="store_true",
         help="Suppress email notifications after pipeline run"
     )
+    parser.add_argument(
+        "--project",
+        type=str,
+        metavar="TS16",
+        help="Recover a single project (use with --pipeline asset_tasks only). E.g. --project TS16"
+    )
 
     args = parser.parse_args()
     send_email = not args.no_email
+
+    if args.project and args.pipeline != "asset_tasks":
+        parser.error("--project can only be used with --pipeline asset_tasks")
 
     # Map pipeline names to functions
     pipeline_funcs = {
@@ -541,7 +566,10 @@ Examples:
         elif args.transform:
             success = run_all_transformations(send_email=send_email)
         elif args.pipeline:
-            func = pipeline_funcs[args.pipeline]
+            if args.pipeline == "asset_tasks" and args.project:
+                func = lambda: run_asset_tasks_pipeline(project_filter=args.project)
+            else:
+                func = pipeline_funcs[args.pipeline]
             name = PIPELINE_NAMES[args.pipeline]
             success = run_pipeline_with_notification(func, name, send_email=send_email)
         else:
