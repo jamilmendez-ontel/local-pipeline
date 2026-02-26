@@ -55,13 +55,52 @@ Parser strategy:
 
 parse_error is set (not null) for emails that contain swiftprojects.io in quoted text but have no actual COP table — expected for conversation threads.
 
+#### Issues Encountered and Fixes
+
+**1. Wrong Gmail account (nanoninth vs Ontel)**
+- Copied `token.pickle` from `local-pipeline/swift_api_pipeline/gmail_credentials/` assuming it was the Ontel account
+- First run returned 28 emails from nanoninth senders (`jamil.mendez@nanoninth.com`, `myka.florano@ontel.co`) — pipeline notification emails, not COP emails
+- Root cause: that token was used for sending pipeline notification emails (nanoninth Gmail account)
+- Fix: deleted the token, re-ran to trigger browser OAuth — logged in with Ontel account
+- Cleared the 28 nanoninth emails from DB and re-ran with correct account
+
+**2. Gmail API timeout on first Ontel run**
+- First Ontel run fetched 500 inbox emails; timed out (`TimeoutError: The read operation timed out`) at message ~401/500
+- Nothing had been inserted yet (fetch happens before insert) so re-run was safe
+- Fix 1: Added 5-retry exponential backoff to `get_full_message()` in `gmail_client.py`
+- Fix 2: Reduced `BATCH_SIZE` from 50 to 25 to avoid DB timeout on large HTML bodies
+
+**3. Pipeline notification emails in results**
+- After switching to `swiftprojects.io from:ontel.co`, 18/38 emails were "Pipeline SUCCESS/FAILED: Asset Tasks" notifications from `jamil.mendez@nanoninth.com`
+- These contained `swiftprojects.io` because the pipeline email HTML referenced it
+- Fix: added `from:ontel.co` to Gmail query — excluded nanoninth senders entirely
+
+#### Sample Email Analysis
+
+Analyzed 4 `.eml` files to understand body structure and identify the universal filter:
+- `TEALBROOK - PMI COP Complete` (vzw.cgc) — Layout A with site photo, `<th>` labels
+- `D-HDT238 - FTTH - COP Review` (ftth@ontel.co) — same body structure, different team
+- `JUPITER STADIUM - Re: COP Review` (vzw.aahi@ontel.co) — Re: email but still has COP table
+- `Interlocken - Re: COP Review` (vzw.mp@ontel.co) — Layout B (dark header, no photo)
+
+Key finding: `swiftprojects.io` appears in **every** COP email body regardless of team, layout, or Re: status. Used as the primary Gmail body filter.
+
+#### Sender Breakdown (last 30 days)
+
+9 distinct `@ontel.co` senders captured: `vzw.cgc`, `ftth`, `vzw.bawa`, `vzw.norcal`, `vzw.mp`, `att.oh`, `merjien`, `darren`, `jamil.mendez`
+
+#### Parse Results (initial run, 20 emails)
+
+- 5 successfully parsed — had the COP table embedded (REVIEW and REVISION types confirmed working)
+- 15 parse errors (`no CLOSE OUT PACKAGE header found`) — conversation/reply threads where swiftprojects.io only appeared in quoted text, no actual COP table present. Expected behavior.
+
 #### Authentication
 
-Re-used `credentials.json` + `token.pickle` from `local-pipeline/swift_api_pipeline/gmail_credentials/` (same Ontel Google account). Token had `gmail.readonly` scope.
+Re-used `credentials.json` from `local-pipeline/swift_api_pipeline/gmail_credentials/` (same Google Cloud project). Re-authenticated with Ontel account to get a fresh `token.pickle` with `gmail.readonly` scope.
 
 #### Task Scheduler
 
-`GmailScraper-Nightly` task registered via PowerShell — runs daily at 11:00 PM.
+`GmailScraper-Nightly` task registered via PowerShell — runs daily at 11:00 PM. Logon mode: Interactive only (runs while logged in; to run while logged out, configure password in Task Scheduler GUI).
 
 ---
 
