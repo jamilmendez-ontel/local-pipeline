@@ -1,29 +1,31 @@
 """
-Export asset tasks from Supabase to Excel with one tab per TECH-OPS project (TS13-TS18).
-Matches the format of the original manually-created 20260109.xlsx file.
+Export asset tasks from raw_asset_tasks to a ZIP of CSV files.
+Each project is split into 50,000-row chunks, one CSV per chunk.
+
+Filename convention: Ontel_{project_did}_chunk_{start}_{end}.csv
+Output ZIP:         scripts-reference/asset_task_extract/YYYYMMDD.zip
 
 Usage:
     python export_asset_tasks_excel.py
-    python export_asset_tasks_excel.py --output custom_name.xlsx
-
-Output goes to scripts-reference/data_sample/YYYYMMDD.xlsx by default.
+    python export_asset_tasks_excel.py --no-upload
 """
 
 import asyncio
 import argparse
 import base64
+import csv
+import io
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+import zipfile
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import asyncpg
-import xlsxwriter
 from dotenv import load_dotenv
 
 # Add swift_api_pipeline to path for gmail_client imports
@@ -33,20 +35,20 @@ sys.path.insert(0, str(PIPELINE_DIR))
 ET = ZoneInfo("America/New_York")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ENV_PATH = SCRIPT_DIR.parent / "swift_api_pipeline" / ".env"
-OUTPUT_DIR = SCRIPT_DIR / "data_sample"
+ENV_PATH   = SCRIPT_DIR.parent / "swift_api_pipeline" / ".env"
+OUTPUT_DIR = SCRIPT_DIR / "asset_task_extract"
 
 PROJECTS = [
-    "TECH-OPS: TS18",
-    "TECH-OPS: TS17",
-    "TECH-OPS: TS16",
-    "TECH-OPS: TS15",
-    "TECH-OPS: TS14",
     "TECH-OPS: TS13",
+    "TECH-OPS: TS14",
+    "TECH-OPS: TS15",
+    "TECH-OPS: TS16",
+    "TECH-OPS: TS17",
+    "TECH-OPS: TS18",
 ]
 
-EXCEL_COLUMNS = [
-    "Source.Name",
+# CSV columns in order — names come directly from JSONB keys, plus retrieved_at
+CSV_COLUMNS = [
     "Project_DID",
     "Project_Status",
     "Asset_DID",
@@ -76,104 +78,131 @@ EXCEL_COLUMNS = [
     "retrieved_at",
 ]
 
-NUM_COLS = len(EXCEL_COLUMNS)
+CHUNK_SIZE    = 50_000
+PIPELINE_NAME = "asset_tasks_extract"
 
-# Pre-compute column categories by index
-DATE_ONLY_COLS = frozenset({
-    EXCEL_COLUMNS.index("Task_Scheduled"),
-    EXCEL_COLUMNS.index("Task_Submitted_On"),
-    EXCEL_COLUMNS.index("Task_Approved_On"),
-    EXCEL_COLUMNS.index("Task_Cancelled_On"),
-})
-DATETIME_COLS = frozenset({
-    EXCEL_COLUMNS.index("retrieved_at"),
-})
-REGULAR_COLS = frozenset(set(range(NUM_COLS)) - DATE_ONLY_COLS - DATETIME_COLS)
-
+# Query extracts all JSONB fields + retrieved_at, ordered consistently
 QUERY = """
 SELECT
-    (regexp_match(p.project_name, 'TS(\\d+)'))[1]::int AS source_name,
-    at.project_did,
-    at.project_status,
-    at.asset_did,
-    at.asset_id,
-    at.asset_name,
-    at.asset_requirement_count,
-    at.task_did,
-    at.task_name,
-    at.task_status,
-    at.task_scheduled,
-    at.task_assigned_to_did,
-    at.task_assigned_to_collection,
-    at.task_assigned_to_name,
-    at.task_assigned_to_email,
-    at.task_submitted_on,
-    at.task_submitted_by_did,
-    at.task_submitted_by_name,
-    at.task_submitted_by_email,
-    at.task_approved_on,
-    at.task_approved_by_did,
-    at.task_approved_by_name,
-    at.task_approved_by_email,
-    at.task_cancelled_on,
-    at.task_cancelled_by_did,
-    at.task_cancelled_by_name,
-    at.task_cancelled_by_email,
-    at.loaded_at
-FROM data_staging.stg_asset_tasks at
-JOIN data_staging.stg_projects p ON at.project_did = p.project_did
-WHERE p.project_name = $1
-ORDER BY at.asset_id, at.task_name
+    data->>'Project_DID'                AS "Project_DID",
+    data->>'Project_Status'             AS "Project_Status",
+    data->>'Asset_DID'                  AS "Asset_DID",
+    data->>'Asset_ID'                   AS "Asset_ID",
+    data->>'Asset_Name'                 AS "Asset_Name",
+    data->>'Asset_Requirement_Count'    AS "Asset_Requirement_Count",
+    data->>'Task_DID'                   AS "Task_DID",
+    data->>'Task_Name'                  AS "Task_Name",
+    data->>'Task_Status'                AS "Task_Status",
+    data->>'Task_Scheduled'             AS "Task_Scheduled",
+    data->>'Task_Assigned_To_DID'       AS "Task_Assigned_To_DID",
+    data->>'Task_Assigned_To_Collection' AS "Task_Assigned_To_Collection",
+    data->>'Task_Assigned_To_Name'      AS "Task_Assigned_To_Name",
+    data->>'Task_Assigned_To_Email'     AS "Task_Assigned_To_Email",
+    data->>'Task_Submitted_On'          AS "Task_Submitted_On",
+    data->>'Task_Submitted_By_DID'      AS "Task_Submitted_By_DID",
+    data->>'Task_Submitted_By_Name'     AS "Task_Submitted_By_Name",
+    data->>'Task_Submitted_By_Email'    AS "Task_Submitted_By_Email",
+    data->>'Task_Approved_On'           AS "Task_Approved_On",
+    data->>'Task_Approved_By_DID'       AS "Task_Approved_By_DID",
+    data->>'Task_Approved_By_Name'      AS "Task_Approved_By_Name",
+    data->>'Task_Approved_By_Email'     AS "Task_Approved_By_Email",
+    data->>'Task_Cancelled_On'          AS "Task_Cancelled_On",
+    data->>'Task_Cancelled_By_DID'      AS "Task_Cancelled_By_DID",
+    data->>'Task_Cancelled_By_Name'     AS "Task_Cancelled_By_Name",
+    data->>'Task_Cancelled_By_Email'    AS "Task_Cancelled_By_Email",
+    to_char(loaded_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD HH24:MI:SS') AS retrieved_at
+FROM data_raw.raw_asset_tasks
+WHERE project_did = $1 AND run_id = $2
+ORDER BY data->>'Asset_ID', data->>'Task_Name'
 """
 
 
-def write_sheet(worksheet, rows, header_fmt, date_only_fmt, datetime_fmt):
-    """Write a single sheet. Optimized with local var caching and skip-None."""
-    # Local references to avoid repeated attribute lookups
-    ws_write = worksheet.write
-    ws_write_dt = worksheet.write_datetime
-    regular = REGULAR_COLS
-    date_only = DATE_ONLY_COLS
-    datetime_cols = DATETIME_COLS
-    _ET = ET
-    _utc = timezone.utc
+async def check_pipeline_guard(conn):
+    """Abort if the latest asset_tasks_extract run failed or any project has missing rows."""
+    row = await conn.fetchrow("""
+        SELECT status, records_extracted, error_message,
+               started_at AT TIME ZONE 'America/New_York' AS started_et
+        FROM pipeline.pipeline_runs
+        WHERE pipeline_name = $1
+        ORDER BY started_at DESC
+        LIMIT 1
+    """, PIPELINE_NAME)
 
-    # Write header row
-    for col_idx, col_name in enumerate(EXCEL_COLUMNS):
-        ws_write(0, col_idx, col_name, header_fmt)
+    if row is None:
+        raise SystemExit(f"GUARD FAILED: No pipeline runs found for '{PIPELINE_NAME}'. Aborting export.")
 
-    # Write data rows — split by column type to avoid per-cell isinstance checks
-    for row_idx, record in enumerate(rows, start=1):
-        # Regular columns: write non-None values directly
-        for ci in regular:
-            val = record[ci]
-            if val is not None:
-                ws_write(row_idx, ci, val)
+    status  = row["status"]
+    started = row["started_et"]
+    records = row["records_extracted"] or 0
+    error   = row["error_message"]
 
-        # Date-only columns (date objects from DB)
-        for ci in date_only:
-            val = record[ci]
-            if val is not None:
-                ws_write_dt(row_idx, ci, val, date_only_fmt)
+    print(f"Pipeline guard: {PIPELINE_NAME}")
+    print(f"  Latest run : {started:%Y-%m-%d %H:%M} ET | status={status} | rows={records:,}")
 
-        # Datetime columns — convert to Eastern Time
-        for ci in datetime_cols:
-            val = record[ci]
-            if val is not None:
-                if val.tzinfo is not None:
-                    val = val.astimezone(_ET)
-                else:
-                    val = val.replace(tzinfo=_utc).astimezone(_ET)
-                ws_write_dt(row_idx, ci, val.replace(tzinfo=None), datetime_fmt)
+    if status != "success" or error:
+        raise SystemExit(
+            f"GUARD FAILED: Latest '{PIPELINE_NAME}' run is not successful "
+            f"(status={status}, error={error}). Aborting export."
+        )
 
-    # Set column widths
-    for col_idx, col_name in enumerate(EXCEL_COLUMNS):
-        worksheet.set_column(col_idx, col_idx, max(len(col_name) + 2, 12))
+    # Verify all 6 projects have rows in stg_asset_tasks
+    project_counts = await conn.fetch("""
+        SELECT p.project_name, COUNT(at.id) AS row_count
+        FROM data_staging.stg_projects p
+        LEFT JOIN data_staging.stg_asset_tasks at ON at.project_did = p.project_did
+        WHERE p.project_name = ANY($1::text[])
+        GROUP BY p.project_name
+        ORDER BY p.project_name
+    """, PROJECTS)
+
+    missing = [r["project_name"] for r in project_counts if r["row_count"] == 0]
+    if missing:
+        raise SystemExit(
+            f"GUARD FAILED: Projects with 0 rows in stg_asset_tasks: {', '.join(missing)}. "
+            f"Aborting export."
+        )
+
+    for r in project_counts:
+        print(f"  {r['project_name']}: {r['row_count']:,} rows")
+
+    # Verify raw and staging row counts match
+    counts = await conn.fetchrow("""
+        SELECT
+            (SELECT COUNT(*) FROM data_raw.raw_asset_tasks
+             WHERE run_id = (
+                 SELECT run_id FROM pipeline.pipeline_runs
+                 WHERE pipeline_name = 'asset_tasks_extract'
+                 ORDER BY started_at DESC LIMIT 1
+             )) AS raw_count,
+            (SELECT COUNT(*) FROM data_staging.stg_asset_tasks) AS stg_count
+    """)
+    raw_count = counts["raw_count"]
+    stg_count = counts["stg_count"]
+    print(f"  Row counts  : raw={raw_count:,} | stg={stg_count:,}")
+    if raw_count != stg_count:
+        raise SystemExit(
+            f"GUARD FAILED: raw_asset_tasks ({raw_count:,}) != stg_asset_tasks ({stg_count:,}). "
+            f"Transform may be incomplete. Aborting export."
+        )
+
+    print("  Guard passed.\n")
 
 
-async def export(output_path: Path):
+def rows_to_csv_bytes(rows: list) -> bytes:
+    """Serialize a list of asyncpg records to CSV bytes (UTF-8 with BOM for Excel compat)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_COLUMNS)
+    for record in rows:
+        writer.writerow([record[col] if record[col] is not None else "" for col in CSV_COLUMNS])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+async def export(output_dir: Path):
+    """Stream raw_asset_tasks per project, chunk into CSVs, write ZIP. Returns (zip_path, summary)."""
     load_dotenv(ENV_PATH)
     t_start = time.time()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     conn = await asyncpg.connect(
         host=os.getenv("SUPABASE_HOST"),
@@ -183,87 +212,96 @@ async def export(output_path: Path):
         password=os.getenv("SUPABASE_PASSWORD"),
         ssl="require",
     )
-    await conn.execute("SET statement_timeout = '300s'")
+    await conn.execute("SET statement_timeout = '600s'")
+    await check_pipeline_guard(conn)
 
-    workbook = xlsxwriter.Workbook(str(output_path), {"constant_memory": True})
-    header_fmt = workbook.add_format({"bold": True})
-    date_only_fmt = workbook.add_format({"num_format": "mm-dd-yy"})
-    datetime_fmt = workbook.add_format({"num_format": "m/d/yy h:mm"})
+    # Get the latest run_id and project_dids
+    run_row = await conn.fetchrow("""
+        SELECT run_id FROM pipeline.pipeline_runs
+        WHERE pipeline_name = $1
+        ORDER BY started_at DESC LIMIT 1
+    """, PIPELINE_NAME)
+    run_id = str(run_row["run_id"])
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    loop = asyncio.get_event_loop()
+    proj_rows = await conn.fetch("""
+        SELECT project_did, project_name
+        FROM data_staging.stg_projects
+        WHERE project_name = ANY($1::text[])
+        ORDER BY project_name
+    """, PROJECTS)
+    project_map = {r["project_name"]: r["project_did"] for r in proj_rows}
+
+    export_dt  = datetime.now(ET)
+    zip_name   = export_dt.strftime("%Y%m%d") + ".zip"
+    zip_path   = output_dir / zip_name
+    summary    = []   # (project_name, project_did, total_rows, num_chunks)
     total_rows = 0
 
-    try:
-        # Pipeline: fetch next project while writing current one
-        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[0]))
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for project_name in PROJECTS:
+            project_did = project_map[project_name]
+            ts_label    = project_name.split(": ")[1]
+            t_proj      = time.time()
+            proj_rows_count = 0
+            chunk_num   = 0
+            chunk_start = 1
+            pending     = []
 
-        for i, project_name in enumerate(PROJECTS):
-            ts_label = project_name.split(": ")[1]
-            t_q = time.time()
+            async with conn.transaction():
+                cur = await conn.cursor(QUERY, project_did, run_id)
+                while True:
+                    batch = await cur.fetch(CHUNK_SIZE)
+                    if not batch:
+                        break
+                    pending.extend(batch)
+                    proj_rows_count += len(batch)
 
-            # Wait for this project's data
-            rows = await next_fetch
-            t_fetched = time.time()
+                    # Flush each full chunk
+                    while len(pending) >= CHUNK_SIZE:
+                        chunk = pending[:CHUNK_SIZE]
+                        pending = pending[CHUNK_SIZE:]
+                        chunk_end  = chunk_start + len(chunk) - 1
+                        csv_name   = f"Ontel_{project_did}_chunk_{chunk_start}_{chunk_end}.csv"
+                        zf.writestr(csv_name, rows_to_csv_bytes(chunk))
+                        chunk_start = chunk_end + 1
+                        chunk_num  += 1
 
-            # Kick off next project's fetch immediately (overlaps with write)
-            if i + 1 < len(PROJECTS):
-                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[i + 1]))
+            # Flush remaining rows as final (partial) chunk
+            if pending:
+                chunk_end = chunk_start + len(pending) - 1
+                csv_name  = f"Ontel_{project_did}_chunk_{chunk_start}_{chunk_end}.csv"
+                zf.writestr(csv_name, rows_to_csv_bytes(pending))
+                chunk_num += 1
 
-            count = len(rows)
-            total_rows += count
-
-            # Write sheet in thread so DB fetch can run concurrently
-            worksheet = workbook.add_worksheet(ts_label)
-            await loop.run_in_executor(
-                executor,
-                write_sheet, worksheet, rows, header_fmt, date_only_fmt, datetime_fmt,
-            )
-            t_written = time.time()
-
+            total_rows += proj_rows_count
+            summary.append((project_name, project_did, proj_rows_count, chunk_num))
             print(
-                f"{ts_label}: {count:>9,} rows  "
-                f"(fetch {t_fetched - t_q:.1f}s, write {t_written - t_fetched:.1f}s)"
+                f"{ts_label}: {proj_rows_count:>9,} rows  "
+                f"{chunk_num} chunk(s)  ({time.time() - t_proj:.1f}s)"
             )
 
-        # Fetch latest loaded_at and run_id for email metadata
-        meta = await conn.fetchrow("""
-            SELECT
-                MAX(loaded_at) AT TIME ZONE 'America/New_York' AS latest_loaded_at,
-                run_id
-            FROM data_staging.stg_asset_tasks
-            GROUP BY run_id
-            ORDER BY MAX(loaded_at) DESC
-            LIMIT 1
-        """)
-        loaded_at = meta["latest_loaded_at"] if meta else None
-        run_id = str(meta["run_id"]) if meta else None
+    await conn.close()
 
-    finally:
-        workbook.close()
-        await conn.close()
-        executor.shutdown(wait=False)
+    zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+    elapsed     = time.time() - t_start
+    print(f"\nTotal : {total_rows:,} rows | {sum(s[3] for s in summary)} files | {zip_size_mb:.1f} MB")
+    print(f"Output: {zip_path}")
+    print(f"Time  : {elapsed:.1f}s")
 
-    elapsed = time.time() - t_start
-    print(f"\nTotal: {total_rows:,} rows across {len(PROJECTS)} tabs in {elapsed:.1f}s")
-    if loaded_at:
-        print(f"Data loaded at: {loaded_at:%Y-%m-%d %I:%M %p} ET")
-        print(f"Run ID: {run_id}")
-    print(f"Output: {output_path}")
-    return total_rows, loaded_at, run_id
+    return zip_path, summary
 
 
 # Google Drive folder name for exports
 DRIVE_FOLDER_NAME = "Asset Tasks Exports"
-EMAIL_RECIPIENTS = [
+EMAIL_RECIPIENTS  = [
     "jamil.mendez@ontel.co",
     "hajie@ontel.co",
     "sheena@ontel.co",
+    "john@ontel.co",
 ]
 
 
-def get_or_create_drive_folder(drive_service, folder_name):
-    """Find existing folder by name, or create it. Returns folder ID."""
+def get_or_create_drive_folder(drive_service, folder_name: str) -> str:
     result = drive_service.files().list(
         q=f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
         spaces="drive",
@@ -273,56 +311,41 @@ def get_or_create_drive_folder(drive_service, folder_name):
     if files:
         return files[0]["id"]
 
-    # Create folder
-    metadata = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-    }
-    folder = drive_service.files().create(body=metadata, fields="id").execute()
+    metadata = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
+    folder   = drive_service.files().create(body=metadata, fields="id").execute()
     print(f"Created Drive folder: {folder_name}")
     return folder["id"]
 
 
 def upload_to_drive(file_path: Path) -> str:
-    """Upload file to Google Drive and return a shareable link."""
+    """Upload ZIP to Google Drive and return a shareable link."""
     from gmail_client import authenticate_drive
     from googleapiclient.http import MediaFileUpload
 
     drive_service = authenticate_drive()
+    folder_id     = get_or_create_drive_folder(drive_service, DRIVE_FOLDER_NAME)
+    filename      = file_path.name
 
-    folder_id = get_or_create_drive_folder(drive_service, DRIVE_FOLDER_NAME)
-
-    # Check if file with same name already exists in folder — replace it
-    filename = file_path.name
-    result = drive_service.files().list(
+    result   = drive_service.files().list(
         q=f"name = '{filename}' and '{folder_id}' in parents and trashed = false",
         spaces="drive",
         fields="files(id)",
     ).execute()
     existing = result.get("files", [])
-
-    media = MediaFileUpload(str(file_path), resumable=True)
+    media    = MediaFileUpload(str(file_path), resumable=True)
 
     if existing:
-        # Update existing file
         file_id = existing[0]["id"]
-        drive_service.files().update(
-            fileId=file_id, media_body=media,
-        ).execute()
-        print(f"Updated existing file in Drive: {filename}")
+        drive_service.files().update(fileId=file_id, media_body=media).execute()
+        print(f"Updated in Drive: {filename}")
     else:
-        # Create new file
         metadata = {"name": filename, "parents": [folder_id]}
-        file_obj = drive_service.files().create(
-            body=metadata, media_body=media, fields="id",
-        ).execute()
-        file_id = file_obj["id"]
+        file_obj = drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
+        file_id  = file_obj["id"]
         print(f"Uploaded to Drive: {filename}")
 
-    # Set anyone-with-link can view
     drive_service.permissions().create(
-        fileId=file_id,
-        body={"type": "anyone", "role": "reader"},
+        fileId=file_id, body={"type": "anyone", "role": "reader"},
     ).execute()
 
     link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
@@ -330,51 +353,68 @@ def upload_to_drive(file_path: Path) -> str:
     return link
 
 
-def send_export_email(file_path: Path, drive_link: str, total_rows: int,
-                      loaded_at=None, run_id=None, recipients=None):
-    """Send email with Google Drive link to the exported file."""
+def send_export_email(zip_path: Path, drive_link: str, summary: list, recipients=None):
+    """Send email with Drive link and per-project summary table."""
     from gmail_client import authenticate
 
     if recipients is None:
         recipients = EMAIL_RECIPIENTS
 
-    service = authenticate()
+    service      = authenticate()
+    today_et     = datetime.now(ET).strftime("%B %d, %Y")
+    total_rows   = sum(s[2] for s in summary)
+    total_chunks = sum(s[3] for s in summary)
+    zip_size_mb  = zip_path.stat().st_size / (1024 * 1024)
 
-    today_et = datetime.now(ET).strftime("%B %d, %Y")
-    filename = file_path.name
-    file_size_mb = file_path.stat().st_size / (1024 * 1024)
+    rows_html = ""
+    for project_name, project_did, row_count, num_chunks in summary:
+        ts_label = project_name.split(": ")[1]
+        rows_html += (
+            f"<tr>"
+            f"<td style='padding:4px 12px;'>{ts_label}</td>"
+            f"<td style='padding:4px 12px; font-family:monospace; font-size:12px;'>{project_did}</td>"
+            f"<td style='padding:4px 12px; text-align:right;'>{row_count:,}</td>"
+            f"<td style='padding:4px 12px; text-align:right;'>{num_chunks}</td>"
+            f"</tr>"
+        )
 
-    loaded_at_str = loaded_at.strftime("%B %d, %Y %I:%M %p ET") if loaded_at else "Unknown"
-    run_id_str = run_id or "Unknown"
-
-    subject = f"Asset Tasks Export - {today_et}"
+    subject   = f"Asset Tasks Export - {today_et}"
     html_body = f"""\
     <html><body style="font-family: Arial, sans-serif;">
     <h2>Asset Tasks Export</h2>
-    <p>The daily asset tasks export is ready.</p>
+    <p>The daily asset tasks export is ready as a ZIP of CSV files (50,000 rows per file).</p>
+    <table style="border-collapse: collapse; margin: 16px 0; border: 1px solid #ddd;">
+        <thead>
+            <tr style="background:#f5f5f5;">
+                <th style="padding:6px 12px; text-align:left; border-bottom:1px solid #ddd;">Project</th>
+                <th style="padding:6px 12px; text-align:left; border-bottom:1px solid #ddd;">Project DID</th>
+                <th style="padding:6px 12px; text-align:right; border-bottom:1px solid #ddd;">Rows</th>
+                <th style="padding:6px 12px; text-align:right; border-bottom:1px solid #ddd;">CSV Files</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows_html}
+        </tbody>
+    </table>
     <table style="border-collapse: collapse; margin: 16px 0;">
-        <tr><td style="padding: 4px 12px; font-weight: bold;">File</td>
-            <td style="padding: 4px 12px;">{filename}</td></tr>
-        <tr><td style="padding: 4px 12px; font-weight: bold;">Total Rows</td>
-            <td style="padding: 4px 12px;">{total_rows:,}</td></tr>
-        <tr><td style="padding: 4px 12px; font-weight: bold;">Size</td>
-            <td style="padding: 4px 12px;">{file_size_mb:.1f} MB</td></tr>
-        <tr><td style="padding: 4px 12px; font-weight: bold;">Tabs</td>
-            <td style="padding: 4px 12px;">TS18, TS17, TS16, TS15, TS14, TS13</td></tr>
-        <tr><td style="padding: 4px 12px; font-weight: bold;">Data Loaded At</td>
-            <td style="padding: 4px 12px;">{loaded_at_str}</td></tr>
-        <tr><td style="padding: 4px 12px; font-weight: bold;">Pipeline Run ID</td>
-            <td style="padding: 4px 12px;"><code>{run_id_str}</code></td></tr>
+        <tr><td style="padding:4px 12px; font-weight:bold;">ZIP File</td>
+            <td style="padding:4px 12px;">{zip_path.name}</td></tr>
+        <tr><td style="padding:4px 12px; font-weight:bold;">Total Rows</td>
+            <td style="padding:4px 12px;">{total_rows:,}</td></tr>
+        <tr><td style="padding:4px 12px; font-weight:bold;">Total CSV Files</td>
+            <td style="padding:4px 12px;">{total_chunks}</td></tr>
+        <tr><td style="padding:4px 12px; font-weight:bold;">ZIP Size</td>
+            <td style="padding:4px 12px;">{zip_size_mb:.1f} MB</td></tr>
     </table>
     <p><a href="{drive_link}" style="display: inline-block; padding: 10px 20px;
         background-color: #1a73e8; color: white; text-decoration: none;
-        border-radius: 4px; font-weight: bold;">Download from Google Drive</a></p>
+        border-radius: 4px; font-weight: bold;">Download ZIP from Google Drive</a></p>
     </body></html>
     """
 
     msg = MIMEMultipart()
-    msg["To"] = ", ".join(recipients)
-    msg["From"] = "me"
+    msg["To"]      = ", ".join(recipients)
+    msg["From"]    = "me"
     msg["Subject"] = subject
     msg.attach(MIMEText(html_body, "html"))
 
@@ -384,12 +424,8 @@ def send_export_email(file_path: Path, drive_link: str, total_rows: int,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export asset tasks to Excel")
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output filename (default: YYYYMMDD.xlsx)",
+    parser = argparse.ArgumentParser(
+        description="Export asset tasks to ZIP of CSVs (50,000 rows per file)"
     )
     parser.add_argument(
         "--no-upload",
@@ -398,28 +434,20 @@ def main():
     )
     args = parser.parse_args()
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    if args.output:
-        output_path = OUTPUT_DIR / args.output
-    else:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        output_path = OUTPUT_DIR / f"{today}.xlsx"
-
-    total_rows, loaded_at, run_id = asyncio.run(export(output_path))
+    zip_path, summary = asyncio.run(export(OUTPUT_DIR))
 
     if not args.no_upload:
         try:
             print("\nUploading to Google Drive...")
-            t0 = time.time()
-            drive_link = upload_to_drive(output_path)
+            t0         = time.time()
+            drive_link = upload_to_drive(zip_path)
             print(f"Upload took {time.time() - t0:.1f}s")
 
             print("Sending email notification...")
-            send_export_email(output_path, drive_link, total_rows, loaded_at, run_id)
+            send_export_email(zip_path, drive_link, summary)
         except Exception as e:
             print(f"ERROR: Drive upload/email failed: {e}")
-            print("Excel file was still generated successfully.")
+            print("ZIP file was still generated successfully.")
 
 
 if __name__ == "__main__":
