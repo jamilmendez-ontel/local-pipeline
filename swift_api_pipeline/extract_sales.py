@@ -16,6 +16,7 @@ Usage:
 """
 
 import os
+import re
 import json
 import uuid
 import tempfile
@@ -34,6 +35,13 @@ logger = get_logger("sales_detail")
 LOAD_BATCH_SIZE = 1000
 GMAIL_QUERY = 'subject:"Daily Revenue Report" has:attachment'
 ATTACHMENT_PATTERN = "Sales+by++ProductService"
+
+# Monthly summary files have just "Month YYYY" (no day number) — skip these
+# Daily files have "Month DD, YYYY" or "M.DD.YYYY" etc.
+_MONTHLY_SUMMARY_RE = re.compile(
+    r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\.xlsx$',
+    re.IGNORECASE,
+)
 
 
 def get_existing_received_timestamps(db) -> set:
@@ -154,6 +162,16 @@ def run_sales_pipeline(max_emails: int = 100, reprocess: bool = False):
 
             filename = os.path.basename(filepath)
             logger.info(f"  Downloaded: {filename}")
+
+            # Skip monthly summary files (e.g. "...Detail February 2026.xlsx")
+            if _MONTHLY_SUMMARY_RE.search(filename):
+                logger.info(f"  SKIPPED -- monthly summary file (not a daily report)")
+                total_skipped += 1
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                continue
 
             try:
                 as_of_date, rows = parse_sales_excel(filepath)
