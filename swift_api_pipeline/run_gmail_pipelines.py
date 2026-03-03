@@ -110,12 +110,16 @@ def main():
     # Run whichever pipeline has new data
     from main import run_pipeline_with_notification
 
+    # Gmail pipelines only notify Jamil (not the full team)
+    gmail_recipients = ["jamil.mendez@ontel.co"]
+
     if aging_new:
         logger.info("Running AR Aging pipeline...")
         try:
             from main import run_aging_pipeline_full
             run_pipeline_with_notification(
-                run_aging_pipeline_full, "AR Aging", send_email=True
+                run_aging_pipeline_full, "AR Aging", send_email=True,
+                recipients=gmail_recipients
             )
             logger.info("AR Aging pipeline completed.")
         except Exception as e:
@@ -126,7 +130,8 @@ def main():
         try:
             from main import run_sales_pipeline_full
             run_pipeline_with_notification(
-                run_sales_pipeline_full, "Sales Detail", send_email=True
+                run_sales_pipeline_full, "Sales Detail", send_email=True,
+                recipients=gmail_recipients
             )
             logger.info("Sales Detail pipeline completed.")
         except Exception as e:

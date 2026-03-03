@@ -163,7 +163,7 @@ def run_sales_pipeline_full():
     return True
 
 
-def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=None):
+def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=None, recipients=None):
     """Run a single pipeline with log capture and email notification."""
     tables = PIPELINE_TABLES.get(name)
     started_at = datetime.now(timezone.utc)
@@ -190,6 +190,7 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
                     started_at=started_at,
                     ended_at=ended_at,
                     total_duration=duration,
+                    recipients=recipients,
                     row_counts_before=row_counts_before,
                     row_counts_after=row_counts_after,
                     row_count_tables=tables,
@@ -216,6 +217,7 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
                     started_at=started_at,
                     ended_at=ended_at,
                     total_duration=duration,
+                    recipients=recipients,
                     row_counts_before=row_counts_before,
                     row_counts_after=row_counts_after,
                     row_count_tables=tables,
