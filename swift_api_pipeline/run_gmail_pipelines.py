@@ -1,7 +1,7 @@
 """
 run_gmail_pipelines.py -- Poll Gmail for new Daily Revenue Report emails.
 
-Designed to be called every 30 minutes by Task Scheduler (1 AM - 10 AM).
+Designed to be called every 15 minutes by Task Scheduler (1 AM - 10 AM).
 Checks if Gmail has any unprocessed emails by comparing the most recent
 email's received date against the latest loaded email_received_date in
 each raw table. Only runs pipelines when new data is detected.
@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import setup_logging, get_logger, get_db, SCHEMA_RAW
+from config import setup_logging, get_logger, get_db, SCHEMA_RAW, SCHEMA_PIPELINE
 
 setup_logging()
 logger = get_logger("gmail_scheduler")
@@ -25,15 +25,42 @@ ET_TZ = ZoneInfo("America/New_York")
 GMAIL_QUERY = 'subject:"Daily Revenue Report" has:attachment'
 
 
-def has_new_emails(db, service, table: str) -> bool:
-    """Check if Gmail has emails newer than the latest loaded in a raw table.
+def _get_last_seen_email_ts(db, pipeline_name: str):
+    """Get the max email timestamp we've already processed (loaded or skipped).
 
-    Compares the 3 most recent matching Gmail messages against our max
-    email_received_date. Only makes 1 search call + up to 3 detail calls.
+    Checks pipeline_runs metadata for the most recent email_received_date
+    we attempted to process, regardless of whether rows were actually loaded.
+    This prevents re-triggering on emails whose attachments were skipped
+    (e.g. monthly summaries).
     """
-    max_date = db.fetchval(
+    row = db.fetchval(
+        f"SELECT MAX((metadata->>'email_received_date')::timestamptz) "
+        f"FROM {SCHEMA_PIPELINE}.pipeline_runs "
+        f"WHERE pipeline_name = $1 AND metadata->>'email_received_date' IS NOT NULL",
+        pipeline_name
+    )
+    return row
+
+
+def has_new_emails(db, service, table: str, pipeline_name: str = None) -> bool:
+    """Check if Gmail has emails newer than the latest we've processed.
+
+    Compares against both the max loaded email_received_date in the raw table
+    AND the max email timestamp in pipeline_runs (to avoid re-triggering on
+    emails that were processed but had no loadable attachment).
+    """
+    max_loaded = db.fetchval(
         f'SELECT MAX(email_received_date) FROM {SCHEMA_RAW}.{table}'
     )
+
+    # Also check pipeline_runs for emails we've already attempted
+    max_seen = _get_last_seen_email_ts(db, pipeline_name) if pipeline_name else None
+
+    # Use the more recent of the two as our watermark
+    if max_loaded and max_seen:
+        max_date = max(max_loaded, max_seen)
+    else:
+        max_date = max_loaded or max_seen
 
     if max_date is None:
         logger.info(f"  {table}: no data loaded yet -- needs full run")
@@ -51,7 +78,7 @@ def has_new_emails(db, service, table: str) -> bool:
         if received and received > max_date:
             logger.info(
                 f"  {table}: new email found (received {received:%Y-%m-%d %H:%M:%S} "
-                f"> latest loaded {max_date:%Y-%m-%d %H:%M:%S})"
+                f"> latest processed {max_date:%Y-%m-%d %H:%M:%S})"
             )
             return True
 
@@ -68,8 +95,8 @@ def main():
     from gmail_client import authenticate
     service = authenticate()
 
-    aging_new = has_new_emails(db, service, "raw_ar_aging")
-    sales_new = has_new_emails(db, service, "raw_sales_detail")
+    aging_new = has_new_emails(db, service, "raw_ar_aging", pipeline_name="ar_aging_extract")
+    sales_new = has_new_emails(db, service, "raw_sales_detail", pipeline_name="sales_detail_extract")
 
     if not aging_new:
         logger.info("  AR Aging: no new emails")

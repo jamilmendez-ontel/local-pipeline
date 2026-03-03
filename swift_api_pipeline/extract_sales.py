@@ -167,6 +167,14 @@ def run_sales_pipeline(max_emails: int = 100, reprocess: bool = False):
             if _MONTHLY_SUMMARY_RE.search(filename):
                 logger.info(f"  SKIPPED -- monthly summary file (not a daily report)")
                 total_skipped += 1
+                # Record a skipped pipeline run so the scheduler watermark advances
+                skip_run_id = str(uuid.uuid4())
+                start_pipeline_run(db, skip_run_id, metadata={
+                    "source_file": filename,
+                    "email_received_date": received_date.isoformat(),
+                    "skip_reason": "monthly_summary",
+                })
+                complete_pipeline_run(db, skip_run_id, "skipped", records=0)
                 try:
                     os.remove(filepath)
                 except OSError:
