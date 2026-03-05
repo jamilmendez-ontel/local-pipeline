@@ -72,6 +72,10 @@ PIPELINE_TABLES = {
         ("data_raw", "raw_calendar_leave"),
         ("data_staging", "stg_calendar_leave"),
     ],
+    "Timer Discrepancies": [
+        ("data_raw", "raw_timer_discrepancies"),
+        ("data_staging", "stg_timer_discrepancies"),
+    ],
 }
 
 # All unique tables across all pipelines (for --extract / --transform modes)

@@ -1,9 +1,11 @@
 """
-Export asset tasks from raw_asset_tasks to a ZIP of CSV files.
-Each project is split into 50,000-row chunks, one CSV per chunk.
+Export asset tasks from raw_asset_tasks to two ZIP files:
+  1. CSV ZIP  — 50K-row chunks, attached to email (~21 MB)
+  2. XLSX ZIP — single workbook with one sheet per project, uploaded to Drive (~168 MB)
 
-Filename convention: Ontel_{project_did}_chunk_{start}_{end}.csv
-Output ZIP:         scripts-reference/asset_task_extract/YYYYMMDD.zip
+Output:
+    scripts-reference/asset_task_extract/YYYYMMDD.zip   (CSV chunks)
+    scripts-reference/YYYYMMDD.zip                      (XLSX workbook)
 
 Usage:
     python export_asset_tasks_excel.py
@@ -20,13 +22,13 @@ import sys
 import time
 import zipfile
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import asyncpg
 from dotenv import load_dotenv
+from xlsxwriter import Workbook
 
 # Add swift_api_pipeline to path for gmail_client imports
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "swift_api_pipeline"
@@ -198,8 +200,43 @@ def rows_to_csv_bytes(rows: list) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+def build_xlsx_zip(project_data: dict, xlsx_zip_path: Path):
+    """Write a single XLSX workbook (one sheet per project) into a ZIP file.
+
+    Args:
+        project_data: {ts_label: [[col_values], ...], ...} — all rows per project
+        xlsx_zip_path: Output path for the ZIP containing the XLSX
+    """
+    t0 = time.time()
+    xlsx_name = xlsx_zip_path.stem + ".xlsx"
+    xlsx_tmp  = xlsx_zip_path.parent / xlsx_name
+
+    wb = Workbook(str(xlsx_tmp), {"constant_memory": True})
+    for ts_label, rows in project_data.items():
+        ws = wb.add_worksheet(ts_label)
+        # Header row
+        for col_idx, col_name in enumerate(CSV_COLUMNS):
+            ws.write(0, col_idx, col_name)
+        # Data rows
+        for row_idx, row in enumerate(rows, start=1):
+            for col_idx, val in enumerate(row):
+                ws.write(row_idx, col_idx, val)
+    wb.close()
+
+    with zipfile.ZipFile(xlsx_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(xlsx_tmp, xlsx_name)
+    xlsx_tmp.unlink()
+
+    size_mb = xlsx_zip_path.stat().st_size / (1024 * 1024)
+    print(f"XLSX ZIP: {xlsx_zip_path.name} ({size_mb:.1f} MB, {time.time() - t0:.1f}s)")
+    return xlsx_zip_path
+
+
 async def export(output_dir: Path):
-    """Stream raw_asset_tasks per project, chunk into CSVs, write ZIP. Returns (zip_path, summary)."""
+    """Stream raw_asset_tasks per project, build CSV ZIP + XLSX ZIP.
+
+    Returns (csv_zip_path, xlsx_zip_path, summary).
+    """
     load_dotenv(ENV_PATH)
     t_start = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -232,12 +269,15 @@ async def export(output_dir: Path):
     project_map = {r["project_name"]: r["project_did"] for r in proj_rows}
 
     export_dt  = datetime.now(ET)
-    zip_name   = export_dt.strftime("%Y%m%d") + ".zip"
-    zip_path   = output_dir / zip_name
+    date_str   = export_dt.strftime("%Y%m%d")
+    csv_zip_path  = output_dir / (date_str + ".zip")
+    xlsx_zip_path = SCRIPT_DIR / (date_str + ".zip")
     summary    = []   # (project_name, project_did, total_rows, num_chunks)
     total_rows = 0
+    # Collect rows per project for XLSX generation
+    project_data = {}  # {ts_label: [[col_values], ...]}
 
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(csv_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for project_name in PROJECTS:
             project_did = project_map[project_name]
             ts_label    = project_name.split(": ")[1]
@@ -246,6 +286,7 @@ async def export(output_dir: Path):
             chunk_num   = 0
             chunk_start = 1
             pending     = []
+            xlsx_rows   = []
 
             async with conn.transaction():
                 cur = await conn.cursor(QUERY, project_did, run_id)
@@ -255,6 +296,13 @@ async def export(output_dir: Path):
                         break
                     pending.extend(batch)
                     proj_rows_count += len(batch)
+
+                    # Collect for XLSX
+                    for record in batch:
+                        xlsx_rows.append([
+                            record[col] if record[col] is not None else ""
+                            for col in CSV_COLUMNS
+                        ])
 
                     # Flush each full chunk
                     while len(pending) >= CHUNK_SIZE:
@@ -273,6 +321,7 @@ async def export(output_dir: Path):
                 zf.writestr(csv_name, rows_to_csv_bytes(pending))
                 chunk_num += 1
 
+            project_data[ts_label] = xlsx_rows
             total_rows += proj_rows_count
             summary.append((project_name, project_did, proj_rows_count, chunk_num))
             print(
@@ -282,13 +331,17 @@ async def export(output_dir: Path):
 
     await conn.close()
 
-    zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+    csv_size_mb = csv_zip_path.stat().st_size / (1024 * 1024)
     elapsed     = time.time() - t_start
-    print(f"\nTotal : {total_rows:,} rows | {sum(s[3] for s in summary)} files | {zip_size_mb:.1f} MB")
-    print(f"Output: {zip_path}")
+    print(f"\nTotal : {total_rows:,} rows | {sum(s[3] for s in summary)} files | {csv_size_mb:.1f} MB")
+    print(f"CSV ZIP : {csv_zip_path}")
     print(f"Time  : {elapsed:.1f}s")
 
-    return zip_path, summary
+    # Build XLSX workbook ZIP
+    print("\nBuilding XLSX workbook...")
+    build_xlsx_zip(project_data, xlsx_zip_path)
+
+    return csv_zip_path, xlsx_zip_path, summary
 
 
 # Google Drive folder name for exports
@@ -353,8 +406,15 @@ def upload_to_drive(file_path: Path) -> str:
     return link
 
 
-def send_export_email(zip_path: Path, drive_link: str, summary: list, recipients=None):
-    """Send email with Drive link and per-project summary table."""
+def send_export_email(
+    csv_drive_link: str | None,
+    xlsx_drive_link: str | None,
+    summary: list,
+    csv_size_mb: float,
+    xlsx_size_mb: float,
+    recipients=None,
+):
+    """Send lightweight email with Google Drive links for both ZIP files."""
     from gmail_client import authenticate
 
     if recipients is None:
@@ -364,7 +424,6 @@ def send_export_email(zip_path: Path, drive_link: str, summary: list, recipients
     today_et     = datetime.now(ET).strftime("%B %d, %Y")
     total_rows   = sum(s[2] for s in summary)
     total_chunks = sum(s[3] for s in summary)
-    zip_size_mb  = zip_path.stat().st_size / (1024 * 1024)
 
     rows_html = ""
     for project_name, project_did, row_count, num_chunks in summary:
@@ -378,11 +437,29 @@ def send_export_email(zip_path: Path, drive_link: str, summary: list, recipients
             f"</tr>"
         )
 
+    # Build download buttons
+    btn_style = ("display:inline-block; padding:10px 20px; color:white; "
+                 "text-decoration:none; border-radius:4px; font-weight:bold; margin-right:12px;")
+
+    xlsx_btn = ""
+    if xlsx_drive_link:
+        xlsx_btn = (
+            f'<a href="{xlsx_drive_link}" style="{btn_style} background-color:#1a73e8;">'
+            f'Download XLSX Workbook ({xlsx_size_mb:.0f} MB)</a>'
+        )
+
+    csv_btn = ""
+    if csv_drive_link:
+        csv_btn = (
+            f'<a href="{csv_drive_link}" style="{btn_style} background-color:#34a853;">'
+            f'Download CSV ZIP ({csv_size_mb:.0f} MB)</a>'
+        )
+
     subject   = f"Asset Tasks Export - {today_et}"
     html_body = f"""\
     <html><body style="font-family: Arial, sans-serif;">
     <h2>Asset Tasks Export</h2>
-    <p>The daily asset tasks export is ready as a ZIP of CSV files (50,000 rows per file).</p>
+    <p>The daily asset tasks export is ready.</p>
     <table style="border-collapse: collapse; margin: 16px 0; border: 1px solid #ddd;">
         <thead>
             <tr style="background:#f5f5f5;">
@@ -397,35 +474,36 @@ def send_export_email(zip_path: Path, drive_link: str, summary: list, recipients
         </tbody>
     </table>
     <table style="border-collapse: collapse; margin: 16px 0;">
-        <tr><td style="padding:4px 12px; font-weight:bold;">ZIP File</td>
-            <td style="padding:4px 12px;">{zip_path.name}</td></tr>
         <tr><td style="padding:4px 12px; font-weight:bold;">Total Rows</td>
             <td style="padding:4px 12px;">{total_rows:,}</td></tr>
         <tr><td style="padding:4px 12px; font-weight:bold;">Total CSV Files</td>
             <td style="padding:4px 12px;">{total_chunks}</td></tr>
-        <tr><td style="padding:4px 12px; font-weight:bold;">ZIP Size</td>
-            <td style="padding:4px 12px;">{zip_size_mb:.1f} MB</td></tr>
     </table>
-    <p><a href="{drive_link}" style="display: inline-block; padding: 10px 20px;
-        background-color: #1a73e8; color: white; text-decoration: none;
-        border-radius: 4px; font-weight: bold;">Download ZIP from Google Drive</a></p>
+    <h3>Download from Google Drive</h3>
+    <p style="margin: 16px 0;">
+        {xlsx_btn}
+        {csv_btn}
+    </p>
+    <ul style="color:#555; font-size:13px;">
+        <li><strong>XLSX Workbook</strong> — single Excel file with one sheet per project</li>
+        <li><strong>CSV ZIP</strong> — bulk CSV files split into {CHUNK_SIZE:,}-row chunks</li>
+    </ul>
     </body></html>
     """
 
-    msg = MIMEMultipart()
+    msg = MIMEText(html_body, "html")
     msg["To"]      = ", ".join(recipients)
     msg["From"]    = "me"
     msg["Subject"] = subject
-    msg.attach(MIMEText(html_body, "html"))
 
-    raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
     print(f"Email sent to {', '.join(recipients)}: {subject}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export asset tasks to ZIP of CSVs (50,000 rows per file)"
+        description="Export asset tasks to CSV ZIP + XLSX ZIP"
     )
     parser.add_argument(
         "--no-upload",
@@ -434,20 +512,45 @@ def main():
     )
     args = parser.parse_args()
 
-    zip_path, summary = asyncio.run(export(OUTPUT_DIR))
+    csv_zip_path, xlsx_zip_path, summary = asyncio.run(export(OUTPUT_DIR))
+    csv_size_mb  = csv_zip_path.stat().st_size / (1024 * 1024)
+    xlsx_size_mb = xlsx_zip_path.stat().st_size / (1024 * 1024)
 
     if not args.no_upload:
-        try:
-            print("\nUploading to Google Drive...")
-            t0         = time.time()
-            drive_link = upload_to_drive(zip_path)
-            print(f"Upload took {time.time() - t0:.1f}s")
+        xlsx_drive_link = None
+        csv_drive_link  = None
 
-            print("Sending email notification...")
-            send_export_email(zip_path, drive_link, summary)
+        # Step 1: Upload XLSX to Drive
+        try:
+            print("\nUploading XLSX ZIP to Google Drive...")
+            t0 = time.time()
+            xlsx_drive_link = upload_to_drive(xlsx_zip_path)
+            print(f"Upload took {time.time() - t0:.1f}s")
         except Exception as e:
-            print(f"ERROR: Drive upload/email failed: {e}")
-            print("ZIP file was still generated successfully.")
+            print(f"ERROR: XLSX Drive upload failed: {e}")
+
+        # Step 2: Upload CSV ZIP to Drive
+        try:
+            print("Uploading CSV ZIP to Google Drive...")
+            t0 = time.time()
+            csv_drive_link = upload_to_drive(csv_zip_path)
+            print(f"Upload took {time.time() - t0:.1f}s")
+        except Exception as e:
+            print(f"ERROR: CSV Drive upload failed: {e}")
+
+        # Step 3: Send lightweight email with Drive links (no attachment)
+        if xlsx_drive_link or csv_drive_link:
+            try:
+                print("Sending email notification...")
+                send_export_email(
+                    csv_drive_link, xlsx_drive_link, summary,
+                    csv_size_mb, xlsx_size_mb,
+                )
+            except Exception as e:
+                print(f"ERROR: Email send failed: {e}")
+        else:
+            print("ERROR: Both Drive uploads failed. Skipping email.")
+            print("ZIP files were still generated successfully.")
 
 
 if __name__ == "__main__":
