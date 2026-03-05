@@ -222,13 +222,16 @@ def fetch_rows(creds) -> tuple[list[str], list[list[str]]]:
     return headers, data_rows
 
 
-def load_raw(db, run_id: str, headers: list[str], data_rows: list[list[str]]):
-    """Insert raw rows as JSONB into data_raw.raw_timer_discrepancies."""
-    for i in range(0, len(data_rows), LOAD_BATCH_SIZE):
-        batch = data_rows[i:i + LOAD_BATCH_SIZE]
+def load_raw(db, run_id: str, headers: list[str], numbered_rows: list[tuple[int, list[str]]]):
+    """Insert raw rows as JSONB into data_raw.raw_timer_discrepancies.
+
+    Args:
+        numbered_rows: List of (row_number, row_data) tuples.
+    """
+    for i in range(0, len(numbered_rows), LOAD_BATCH_SIZE):
+        batch = numbered_rows[i:i + LOAD_BATCH_SIZE]
         tuples = []
-        for j, row in enumerate(batch):
-            row_num = i + j + 1  # 1-based
+        for row_num, row in batch:
             data = {}
             for col_idx, val in enumerate(row):
                 header = headers[col_idx] if col_idx < len(headers) else f"col_{col_idx}"
@@ -242,7 +245,7 @@ def load_raw(db, run_id: str, headers: list[str], data_rows: list[list[str]]):
             ),
             description=f"insert raw_timer_discrepancies batch {i // LOAD_BATCH_SIZE + 1}",
         )
-    logger.info(f"  Loaded {len(data_rows)} raw rows")
+    logger.info(f"  Loaded {len(numbered_rows)} raw rows")
 
 
 def transform_row(headers: list[str], row: list[str], row_number: int, run_id: str) -> dict:
@@ -277,13 +280,14 @@ def transform_to_staging(
     db,
     run_id: str,
     headers: list[str],
-    data_rows: list[list[str]],
+    numbered_rows: list[tuple[int, list[str]]],
     full_refresh: bool = False,
-    max_timestamp: datetime | None = None,
 ):
     """Parse rows and load into staging.
 
-    For incremental mode, only inserts rows with submission_timestamp > max_timestamp.
+    Args:
+        numbered_rows: List of (row_number, row_data) tuples (already filtered).
+
     Uses ON CONFLICT (row_number) DO UPDATE for upsert.
     """
     logger.info("Transforming to staging...")
@@ -299,26 +303,17 @@ def transform_to_staging(
     # Parse all rows
     rows = []
     parse_errors = 0
-    skipped = 0
-    for i, row in enumerate(data_rows):
-        row_number = i + 1
+    for row_number, row in numbered_rows:
         try:
             parsed = transform_row(headers, row, row_number, run_id)
             if parsed["submission_timestamp"] is None:
                 parse_errors += 1
                 logger.warning(f"  Row {row_number}: no valid timestamp, skipping")
                 continue
-            # Incremental: skip rows already loaded
-            if not full_refresh and max_timestamp and parsed["submission_timestamp"] <= max_timestamp:
-                skipped += 1
-                continue
             rows.append(parsed)
         except Exception as e:
             parse_errors += 1
             logger.warning(f"  Row {row_number} parse error: {e}")
-
-    if not full_refresh and skipped:
-        logger.info(f"  Skipped {skipped} rows already in staging")
 
     if not rows:
         logger.info("  No new rows to load into staging")
@@ -414,23 +409,38 @@ def _run_pipeline_core(full_refresh: bool = False):
             complete_pipeline_run(db, run_id, "success", records=0)
             return
 
-        # 4. Load raw (always append all rows)
-        logger.info("Loading raw data...")
-        load_raw(db, run_id, headers, data_rows)
+        # 4. Filter to new rows only (incremental)
+        if not full_refresh and max_timestamp:
+            ts_col = headers.index("Timestamp") if "Timestamp" in headers else 0
+            new_rows = []
+            for i, row in enumerate(data_rows):
+                ts = _parse_timestamp(row[ts_col] if ts_col < len(row) else "")
+                if ts and ts > max_timestamp:
+                    new_rows.append((i + 1, row))  # (row_number, row)
+            logger.info(f"  New rows since last run: {len(new_rows)} of {len(data_rows)}")
+            if not new_rows:
+                logger.info("  No new rows to process")
+                complete_pipeline_run(db, run_id, "success", records=0)
+                return
+        else:
+            new_rows = [(i + 1, row) for i, row in enumerate(data_rows)]
 
-        # 5. Transform to staging (incremental or full)
+        # 5. Load raw (new rows only)
+        logger.info("Loading raw data...")
+        load_raw(db, run_id, headers, new_rows)
+
+        # 6. Transform to staging
         staging_count = transform_to_staging(
-            db, run_id, headers, data_rows,
+            db, run_id, headers, new_rows,
             full_refresh=full_refresh,
-            max_timestamp=max_timestamp,
         )
 
-        # 6. Complete
+        # 7. Complete
         complete_pipeline_run(db, run_id, "success", records=staging_count)
 
         logger.info(f"\n{'=' * 60}")
         logger.info("Timer Discrepancies Pipeline Complete")
-        logger.info(f"  Raw rows loaded: {len(data_rows)}")
+        logger.info(f"  Raw rows loaded: {len(new_rows)}")
         logger.info(f"  Staging rows {'loaded' if full_refresh else 'upserted'}: {staging_count}")
         logger.info(f"{'=' * 60}\n")
 

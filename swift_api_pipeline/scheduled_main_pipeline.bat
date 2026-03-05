@@ -23,6 +23,11 @@ if %PIPELINE_EXIT% NEQ 0 (
     goto :end
 )
 
+REM Timer discrepancies (Google Form -> Supabase, incremental)
+echo [%date% %time%] Starting timer discrepancies extract >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+"%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
+echo [%date% %time%] Timer discrepancies finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+
 REM Export asset tasks Excel (runs after pipeline + email are done)
 set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
 echo [%date% %time%] Starting asset tasks Excel export >> "%LOG_DIR%\main_%TIMESTAMP%.log"
