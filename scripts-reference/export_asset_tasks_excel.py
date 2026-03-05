@@ -370,14 +370,19 @@ def get_or_create_drive_folder(drive_service, folder_name: str) -> str:
     return folder["id"]
 
 
-def upload_to_drive(file_path: Path) -> str:
-    """Upload ZIP to Google Drive and return a shareable link."""
+def upload_to_drive(file_path: Path, drive_filename: str = None) -> str:
+    """Upload ZIP to Google Drive and return a shareable link.
+
+    Args:
+        file_path: Local file to upload.
+        drive_filename: Name to use in Drive (defaults to file_path.name).
+    """
     from gmail_client import authenticate_drive
     from googleapiclient.http import MediaFileUpload
 
     drive_service = authenticate_drive()
     folder_id     = get_or_create_drive_folder(drive_service, DRIVE_FOLDER_NAME)
-    filename      = file_path.name
+    filename      = drive_filename or file_path.name
 
     result   = drive_service.files().list(
         q=f"name = '{filename}' and '{folder_id}' in parents and trashed = false",
@@ -520,11 +525,14 @@ def main():
         xlsx_drive_link = None
         csv_drive_link  = None
 
+        # Use distinct Drive filenames (both local ZIPs are YYYYMMDD.zip)
+        date_str = xlsx_zip_path.stem  # e.g. "20260305"
+
         # Step 1: Upload XLSX to Drive
         try:
             print("\nUploading XLSX ZIP to Google Drive...")
             t0 = time.time()
-            xlsx_drive_link = upload_to_drive(xlsx_zip_path)
+            xlsx_drive_link = upload_to_drive(xlsx_zip_path, f"{date_str}_xlsx.zip")
             print(f"Upload took {time.time() - t0:.1f}s")
         except Exception as e:
             print(f"ERROR: XLSX Drive upload failed: {e}")
@@ -533,7 +541,7 @@ def main():
         try:
             print("Uploading CSV ZIP to Google Drive...")
             t0 = time.time()
-            csv_drive_link = upload_to_drive(csv_zip_path)
+            csv_drive_link = upload_to_drive(csv_zip_path, f"{date_str}_csv.zip")
             print(f"Upload took {time.time() - t0:.1f}s")
         except Exception as e:
             print(f"ERROR: CSV Drive upload failed: {e}")
