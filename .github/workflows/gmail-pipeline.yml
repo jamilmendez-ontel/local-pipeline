@@ -1,0 +1,99 @@
+name: Gmail Revenue Pipelines
+
+on:
+  repository_dispatch:
+    types: [gmail-revenue-report]
+  workflow_dispatch:
+
+concurrency:
+  group: gmail-pipeline
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  gmail-pipelines:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          DOTENV
+          echo "SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}" >> .env
+          echo "SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}" >> .env
+
+      - name: Decode Gmail credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Run aging pipeline
+        id: aging
+        continue-on-error: true
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline aging || {
+            echo "Aging failed, retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline aging
+          }
+
+      - name: Run sales pipeline
+        id: sales
+        continue-on-error: true
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline sales || {
+            echo "Sales failed, retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline sales
+          }
+
+      - name: Check results
+        if: always()
+        run: |
+          failed=0
+          if [ "${{ steps.aging.outcome }}" = "failure" ]; then
+            echo "::error::Aging pipeline failed after retry"
+            failed=1
+          fi
+          if [ "${{ steps.sales.outcome }}" = "failure" ]; then
+            echo "::error::Sales pipeline failed after retry"
+            failed=1
+          fi
+          if [ "$failed" -eq 1 ]; then
+            exit 1
+          fi
+          echo "All Gmail pipelines completed successfully."
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmail-pipeline-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7
