@@ -1,8 +1,6 @@
 @echo off
-setlocal enabledelayedexpansion
 REM Calendar Leave Pipeline - Daily incremental run (12:30 AM)
 REM Fetches new/updated leave events from Google Calendar into Supabase
-REM Retries once after 5 min on failure.
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
@@ -17,14 +15,4 @@ cd /d "%SCRIPT_DIR%"
 
 echo [%date% %time%] Starting calendar leave pipeline >> "%LOG_DIR%\calendar_%TIMESTAMP%.log"
 "%VENV_PYTHON%" -u extract_calendar_leave.py >> "%LOG_DIR%\calendar_%TIMESTAMP%.log" 2>&1
-set EXIT_CODE=!ERRORLEVEL!
-echo [%date% %time%] Calendar leave pipeline finished with exit code !EXIT_CODE! >> "%LOG_DIR%\calendar_%TIMESTAMP%.log"
-
-if !EXIT_CODE! NEQ 0 (
-    echo [%date% %time%] Calendar leave FAILED - retrying after 5 minutes >> "%LOG_DIR%\calendar_%TIMESTAMP%.log"
-    timeout /t 300 /nobreak > nul
-    "%VENV_PYTHON%" -u extract_calendar_leave.py >> "%LOG_DIR%\calendar_%TIMESTAMP%.log" 2>&1
-    echo [%date% %time%] Calendar leave retry finished with exit code !ERRORLEVEL! >> "%LOG_DIR%\calendar_%TIMESTAMP%.log"
-)
-
-endlocal
+echo [%date% %time%] Calendar leave pipeline finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\calendar_%TIMESTAMP%.log"

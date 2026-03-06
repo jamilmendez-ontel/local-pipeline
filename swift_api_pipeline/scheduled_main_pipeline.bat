@@ -1,6 +1,9 @@
 @echo off
-REM Swift API Pipeline - Nightly Full Run (12:01 AM)
-REM Logs output to pipeline_logs directory
+setlocal enabledelayedexpansion
+REM Swift API Pipeline - Nightly Local Run (12:01 AM)
+REM Runs: asset_tasks -> backfill -> analytics -> timer discrepancies -> exports
+REM Light pipelines (orgs, timer, user_priorities, forms) run on GitHub Actions.
+REM Each step retries once after 5 min on failure.
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
@@ -13,37 +16,87 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 cd /d "%SCRIPT_DIR%"
 
-echo [%date% %time%] Starting nightly pipeline run >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-"%VENV_PYTHON%" -u main.py >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
-set PIPELINE_EXIT=%ERRORLEVEL%
-echo [%date% %time%] Pipeline finished with exit code %PIPELINE_EXIT% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+set LOGFILE=%LOG_DIR%\main_%TIMESTAMP%.log
 
-if %PIPELINE_EXIT% NEQ 0 (
-    echo [%date% %time%] Pipeline FAILED - skipping all exports >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-    goto :end
+echo [%date% %time%] Starting nightly local pipeline run >> "%LOGFILE%"
+
+REM === 1. Asset Tasks (extract + transform) ===
+echo [%date% %time%] Starting asset_tasks pipeline >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline asset_tasks >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] asset_tasks finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] asset_tasks FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u main.py --pipeline asset_tasks >> "%LOGFILE%" 2>&1
+    set EXIT_CODE=!ERRORLEVEL!
+    echo [%date% %time%] asset_tasks retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
 )
 
-REM Timer discrepancies (Google Form -> Supabase, incremental)
-echo [%date% %time%] Starting timer discrepancies extract >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-"%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
-echo [%date% %time%] Timer discrepancies finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] asset_tasks FAILED after retry - skipping backfill and analytics >> "%LOGFILE%"
+    goto :timer_discrepancies
+)
 
-REM Export asset tasks Excel (runs after pipeline + email are done)
+REM === 2. Asset DID Backfill ===
+echo [%date% %time%] Starting backfill >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline backfill --no-email >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] backfill finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] backfill FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u main.py --pipeline backfill --no-email >> "%LOGFILE%" 2>&1
+    set EXIT_CODE=!ERRORLEVEL!
+    echo [%date% %time%] backfill retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+)
+
+REM === 3. Analytics MV Refresh ===
+echo [%date% %time%] Starting analytics refresh >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline analytics --no-email >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] analytics finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] analytics FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u main.py --pipeline analytics --no-email >> "%LOGFILE%" 2>&1
+    set EXIT_CODE=!ERRORLEVEL!
+    echo [%date% %time%] analytics retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+)
+
+REM === 4. Timer Discrepancies (independent, always runs) ===
+:timer_discrepancies
+echo [%date% %time%] Starting timer discrepancies extract >> "%LOGFILE%"
+"%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] Timer discrepancies finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] Timer discrepancies FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOGFILE%" 2>&1
+    echo [%date% %time%] Timer discrepancies retry finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
+)
+
+REM === 5. Excel Exports (always run) ===
 set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
-echo [%date% %time%] Starting asset tasks Excel export >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-"%VENV_PYTHON%" -u "%EXPORT_SCRIPT%" >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
-echo [%date% %time%] Excel export finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+echo [%date% %time%] Starting asset tasks Excel export >> "%LOGFILE%"
+"%VENV_PYTHON%" -u "%EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
+echo [%date% %time%] Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 
-REM Export timer data Excel (runs after asset tasks export)
 set TIMER_EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_timer_excel.py
-echo [%date% %time%] Starting timer data Excel export >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-"%VENV_PYTHON%" -u "%TIMER_EXPORT_SCRIPT%" >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
-echo [%date% %time%] Timer Excel export finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+echo [%date% %time%] Starting timer data Excel export >> "%LOGFILE%"
+"%VENV_PYTHON%" -u "%TIMER_EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
+echo [%date% %time%] Timer Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 
-REM Export QA form Excel (runs after timer export)
 set QA_EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_qa_form_excel.py
-echo [%date% %time%] Starting QA form Excel export >> "%LOG_DIR%\main_%TIMESTAMP%.log"
-"%VENV_PYTHON%" -u "%QA_EXPORT_SCRIPT%" >> "%LOG_DIR%\main_%TIMESTAMP%.log" 2>&1
-echo [%date% %time%] QA form Excel export finished with exit code %ERRORLEVEL% >> "%LOG_DIR%\main_%TIMESTAMP%.log"
+echo [%date% %time%] Starting QA form Excel export >> "%LOGFILE%"
+"%VENV_PYTHON%" -u "%QA_EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
+echo [%date% %time%] QA form Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 
-:end
+echo [%date% %time%] Nightly local pipeline run complete >> "%LOGFILE%"
+
+endlocal

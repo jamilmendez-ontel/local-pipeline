@@ -37,6 +37,8 @@ PIPELINE_NAMES = {
     "timer": "Timer Activities",
     "aging": "AR Aging",
     "sales": "Sales Detail",
+    "backfill": "Asset DID Backfill",
+    "analytics": "Analytics MV Refresh",
 }
 
 
@@ -132,6 +134,30 @@ def run_timer_pipeline_full():
     run_id = run_timer_pipeline()
     run_timer_transform(run_id)
 
+    return True
+
+
+def run_backfill():
+    """Run asset DID backfill on timer + QA form tables"""
+    from transform import backfill_asset_did
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET DID BACKFILL")
+    logger.info(f"{'#'*60}")
+
+    backfill_asset_did()
+    return True
+
+
+def run_analytics_refresh():
+    """Refresh analytics materialized views"""
+    from transform import refresh_analytics
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ANALYTICS MV REFRESH")
+    logger.info(f"{'#'*60}")
+
+    refresh_analytics()
     return True
 
 
@@ -511,6 +537,8 @@ Examples:
   python main.py --pipeline timer               # Run timer pipeline only
   python main.py --pipeline aging               # Run AR aging pipeline only (Gmail)
   python main.py --pipeline sales               # Run sales detail pipeline only (Gmail)
+  python main.py --pipeline backfill            # Run asset DID backfill only
+  python main.py --pipeline analytics           # Run analytics MV refresh only
   python main.py --no-email                     # Run all pipelines without email notification
         """
     )
@@ -529,7 +557,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer", "aging", "sales"],
+        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer", "aging", "sales", "backfill", "analytics"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -560,6 +588,8 @@ Examples:
         "timer": run_timer_pipeline_full,
         "aging": run_aging_pipeline_full,
         "sales": run_sales_pipeline_full,
+        "backfill": run_backfill,
+        "analytics": run_analytics_refresh,
     }
 
     try:
