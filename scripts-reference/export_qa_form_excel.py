@@ -291,6 +291,7 @@ EMAIL_RECIPIENTS  = [
     "jamil.mendez@ontel.co",
     "hajie@ontel.co",
     "sheena@ontel.co",
+    "merjien@ontel.co",
 ]
 
 

@@ -115,20 +115,39 @@ class PipelineDB:
         self._loop.run_forever()
 
     async def _create_pool(self):
-        """Create the asyncpg connection pool."""
+        """Create the asyncpg connection pool with retry on transient failures."""
         # Supabase cloud requires SSL
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        self._pool = await asyncpg.create_pool(
-            DSN,
-            min_size=4,
-            max_size=20,
-            command_timeout=300,
-            init=_init_connection,
-            ssl=ssl_ctx,
-        )
+        max_attempts = 3
+        base_delay = 5  # seconds, doubles each retry
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._pool = await asyncpg.create_pool(
+                    DSN,
+                    min_size=4,
+                    max_size=20,
+                    command_timeout=300,
+                    init=_init_connection,
+                    ssl=ssl_ctx,
+                )
+                return
+            except Exception as e:
+                if attempt == max_attempts:
+                    logger.error(
+                        f"Failed to create connection pool after {max_attempts} attempts: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    f"Connection pool creation failed (attempt {attempt}/{max_attempts}): "
+                    f"{type(e).__name__}: {e}. Retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
 
     def close(self):
         """Shut down pool and event loop."""
