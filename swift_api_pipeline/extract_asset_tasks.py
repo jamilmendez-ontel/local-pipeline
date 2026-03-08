@@ -26,6 +26,7 @@ MAX_RETRIES = 10
 MAX_WORKERS = 6  # Concurrent API + DB writer threads
 LOAD_BATCH_SIZE = 25000
 RETRY_WAIT_SECONDS = 300  # Wait before project-level retry (5 min)
+PROJECT_TIMEOUT_SECONDS = 3600  # Max 1 hour per project extraction
 
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
@@ -81,10 +82,20 @@ class AssetTaskExtractor(BaseExtractor):
         project_rows = 0
         run_id_str = str(self.run_id)
         pending = []  # accumulate before flushing
+        start_time = time.monotonic()
 
         logger.info(f"[{project_name}] Starting extraction...")
 
         while True:
+            # Guard against hung workers — bail if project exceeds timeout
+            elapsed = time.monotonic() - start_time
+            if elapsed > PROJECT_TIMEOUT_SECONDS:
+                if pending:
+                    self._write_batch(run_id_str, project_did, pending)
+                raise TimeoutError(
+                    f"[{project_name}] Exceeded {PROJECT_TIMEOUT_SECONDS}s timeout "
+                    f"after {project_rows:,} rows ({page_count} pages)"
+                )
             if after_ap and after_id:
                 params['afterAp'] = after_ap
                 params['after'] = after_id
@@ -305,6 +316,8 @@ def run_asset_task_pipeline(
         extractor.prepare_table_for_bulk_load()
 
         # Extract and load projects in parallel — each worker writes directly to DB
+        # Overall timeout: PROJECT_TIMEOUT_SECONDS + 5 min buffer for all workers
+        overall_timeout = PROJECT_TIMEOUT_SECONDS + 300
         project_rows = {}
         failed_projects = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -317,15 +330,25 @@ def run_asset_task_pipeline(
                 for proj in projects
             }
 
-            for future in as_completed(futures):
-                proj = futures[future]
-                try:
-                    rows = future.result()
-                    project_rows[proj["project_name"]] = rows
-                except Exception as e:
-                    logger.error(f"[{proj['project_name']}] FAILED: {type(e).__name__}: {e}")
-                    project_rows[proj["project_name"]] = 0
-                    failed_projects.append(proj["project_name"])
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    proj = futures[future]
+                    try:
+                        rows = future.result()
+                        project_rows[proj["project_name"]] = rows
+                    except Exception as e:
+                        logger.error(f"[{proj['project_name']}] FAILED: {type(e).__name__}: {e}")
+                        project_rows[proj["project_name"]] = 0
+                        failed_projects.append(proj["project_name"])
+            except TimeoutError:
+                # Identify which workers are still running
+                for fut, proj in futures.items():
+                    if not fut.done():
+                        name = proj["project_name"]
+                        logger.error(f"[{name}] TIMED OUT after {overall_timeout}s — cancelling")
+                        fut.cancel()
+                        project_rows[name] = 0
+                        failed_projects.append(name)
 
         # ── Project-level auto-retry (before index restore — faster writes) ──
         if failed_projects:
