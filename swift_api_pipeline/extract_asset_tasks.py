@@ -320,7 +320,8 @@ def run_asset_task_pipeline(
         overall_timeout = PROJECT_TIMEOUT_SECONDS + 300
         project_rows = {}
         failed_projects = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             futures = {
                 executor.submit(
                     extractor.extract_and_load_project,
@@ -330,6 +331,7 @@ def run_asset_task_pipeline(
                 for proj in projects
             }
 
+            timed_out = False
             try:
                 for future in as_completed(futures, timeout=overall_timeout):
                     proj = futures[future]
@@ -341,14 +343,18 @@ def run_asset_task_pipeline(
                         project_rows[proj["project_name"]] = 0
                         failed_projects.append(proj["project_name"])
             except TimeoutError:
+                timed_out = True
                 # Identify which workers are still running
                 for fut, proj in futures.items():
                     if not fut.done():
                         name = proj["project_name"]
-                        logger.error(f"[{name}] TIMED OUT after {overall_timeout}s — cancelling")
-                        fut.cancel()
+                        logger.error(f"[{name}] TIMED OUT after {overall_timeout}s")
                         project_rows[name] = 0
                         failed_projects.append(name)
+        finally:
+            # shutdown(wait=False) so stuck threads don't block the pipeline
+            # cancel_futures=True prevents queued tasks from starting
+            executor.shutdown(wait=not timed_out, cancel_futures=True)
 
         # ── Project-level auto-retry (before index restore — faster writes) ──
         if failed_projects:
