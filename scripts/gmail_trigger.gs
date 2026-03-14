@@ -91,13 +91,19 @@ function scheduleTokenRotationReminder() {
   reminderDate.setDate(reminderDate.getDate() + EXPIRY_DAYS - REMINDER_DAYS_BEFORE);
 
   var event = CalendarApp.getDefaultCalendar().createAllDayEvent(
-    'Rotate GitHub PAT for Gmail Revenue Pipeline',
+    'Rotate GitHub PAT for Pipeline Triggers',
     reminderDate,
     {
       description:
         'The fine-grained GitHub PAT (local-pipeline repo, contents:read+write) expires in 5 days.\n\n' +
+        'This PAT is used by ALL pipeline triggers in Apps Script:\n' +
+        '- Gmail Revenue Pipelines (gmail_trigger.gs)\n' +
+        '- Orgs, Timer, Priorities, Forms (pipeline_trigger.gs)\n\n' +
         'Steps:\n' +
         '1. Go to https://github.com/settings/tokens and generate a new 90-day PAT\n' +
+        '   - Repository: local-pipeline only\n' +
+        '   - Permissions: Contents → Read and Write\n' +
+        '   - Expiration: 90 days\n' +
         '2. Update GITHUB_TOKEN in Apps Script project settings (Script Properties)\n' +
         '3. Run scheduleTokenRotationReminder() again to set the next reminder'
     }
