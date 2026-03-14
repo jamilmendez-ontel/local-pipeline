@@ -81,21 +81,11 @@ if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] Timer discrepancies retry finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 )
 
-REM === 5. Excel Exports (always run) ===
+REM === 5. Asset Tasks Excel Export (timer + QA form exports moved to GHA) ===
 set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
 echo [%date% %time%] Starting asset tasks Excel export >> "%LOGFILE%"
 "%VENV_PYTHON%" -u "%EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
 echo [%date% %time%] Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
-
-set TIMER_EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_timer_excel.py
-echo [%date% %time%] Starting timer data Excel export >> "%LOGFILE%"
-"%VENV_PYTHON%" -u "%TIMER_EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
-echo [%date% %time%] Timer Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
-
-set QA_EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_qa_form_excel.py
-echo [%date% %time%] Starting QA form Excel export >> "%LOGFILE%"
-"%VENV_PYTHON%" -u "%QA_EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
-echo [%date% %time%] QA form Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 
 echo [%date% %time%] Nightly local pipeline run complete >> "%LOGFILE%"
 
