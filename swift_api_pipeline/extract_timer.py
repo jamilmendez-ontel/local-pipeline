@@ -86,6 +86,23 @@ class TimerExtractor(BaseExtractor):
         )
         return [dict(r) for r in rows]
 
+    def _split_into_daily_chunks(self, start_date: str, end_date: str) -> List[Tuple[str, str]]:
+        """Split a date range into daily chunks to avoid API silent truncation.
+
+        The Swift API silently drops older rows when a single date range
+        returns more than ~1,000 rows total (regardless of pagination).
+        Daily chunks keep each request well under that limit.
+        """
+        from datetime import date as _date
+        start = _date.fromisoformat(start_date)
+        end = _date.fromisoformat(end_date)
+        chunks = []
+        d = start
+        while d <= end:
+            chunks.append((d.isoformat(), d.isoformat()))
+            d += timedelta(days=1)
+        return chunks
+
     def extract_project_timer(
         self,
         project: Dict,
@@ -93,7 +110,11 @@ class TimerExtractor(BaseExtractor):
         end_date: str,
         result_queue: Queue
     ) -> int:
-        """Extract timer activities for a project within date range"""
+        """Extract timer activities for a project within date range.
+
+        Splits into weekly chunks to work around the Swift API's ~3K row
+        silent truncation limit per request.
+        """
         if not self.token:
             self.authenticate()
 
@@ -101,21 +122,49 @@ class TimerExtractor(BaseExtractor):
         project_name = project["project_name"]
         project_number = project["project_number"]
 
+        chunks = self._split_into_daily_chunks(start_date, end_date)
+        logger.info(f"[TS{project_number}] Starting extraction ({start_date} to {end_date}, {len(chunks)} daily chunks)...")
+
+        total_rows = 0
+
+        for chunk_start, chunk_end in chunks:
+            chunk_rows = self._extract_chunk(
+                project_did, project_number, chunk_start, chunk_end,
+                start_date, end_date, result_queue
+            )
+            total_rows += chunk_rows
+
+        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
+        return total_rows
+
+    def _extract_chunk(
+        self,
+        project_did: str,
+        project_number: int,
+        chunk_start: str,
+        chunk_end: str,
+        overall_start: str,
+        overall_end: str,
+        result_queue: Queue
+    ) -> int:
+        """Extract a single weekly chunk for one project.
+
+        API requests use chunk_start/chunk_end, but raw records are tagged
+        with the overall month start/end so downstream behaviour is unchanged.
+        """
         headers = {"Authorization": f"Bearer {self.token}"}
         url = f"{self.base_url}/api/timer-activities/_report"
 
-        # Convert dates to timestamps (timezone-aware)
+        # Convert chunk dates to timestamps for the API call (timezone-aware)
         import zoneinfo
         tz = zoneinfo.ZoneInfo(TIMEZONE)
-        from_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=tz)
-        to_dt = datetime.strptime(end_date + " 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
+        from_dt = datetime.strptime(chunk_start, "%Y-%m-%d").replace(tzinfo=tz)
+        to_dt = datetime.strptime(chunk_end + " 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
         from_ts = int(from_dt.timestamp() * 1000)
         to_ts = int(to_dt.timestamp() * 1000)
 
         page = 0
-        total_rows = 0
-
-        logger.info(f"[TS{project_number}] Starting extraction ({start_date} to {end_date})...")
+        chunk_rows = 0
 
         while True:
             params = {
@@ -140,8 +189,7 @@ class TimerExtractor(BaseExtractor):
 
                     # Check for empty response
                     if resp.status_code == 204 or not resp.content.strip():
-                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
-                        return total_rows
+                        return chunk_rows
 
                     resp.raise_for_status()
 
@@ -149,25 +197,23 @@ class TimerExtractor(BaseExtractor):
                     try:
                         data = resp.json().get("list", [])
                     except ValueError:
-                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
-                        return total_rows
+                        return chunk_rows
 
                     if not data:
-                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
-                        return total_rows
+                        return chunk_rows
 
                     # Stream batch to queue with metadata
-                    result_queue.put((project_did, project_number, start_date, end_date, data))
-                    total_rows += len(data)
+                    # Tag with overall month range, not chunk range
+                    result_queue.put((project_did, project_number, overall_start, overall_end, data))
+                    chunk_rows += len(data)
                     page += 1
 
                     if page % 5 == 0:
-                        logger.info(f"[TS{project_number}] Page {page} - {total_rows:,} rows")
+                        logger.info(f"[TS{project_number}] {start_date}..{end_date} page {page} - {chunk_rows:,} rows")
 
                     # Check if last page
                     if len(data) < PAGE_SIZE:
-                        logger.info(f"[TS{project_number}] Complete - {total_rows:,} rows")
-                        return total_rows
+                        return chunk_rows
 
                     break
 

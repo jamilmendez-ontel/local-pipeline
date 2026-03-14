@@ -841,10 +841,12 @@ def transform_timer_activities(db, run_id: str):
 
     print(f"[{datetime.now():%H:%M:%S}] Run date: {run_date}, Date range: {start_date} to {end_date}")
 
-    # Delete existing staging data for this run_id only
+    # Delete ALL staging data for the same extraction month (start_date).
+    # Each nightly run extracts the full month-to-date, so the latest run
+    # is always a superset. Scoping by start_date prevents stacking across runs.
     db.execute(
-        f'DELETE FROM {SCHEMA_STAGING}.stg_timer_activities WHERE run_id = $1',
-        run_id
+        f'DELETE FROM {SCHEMA_STAGING}.stg_timer_activities WHERE start_date = $1',
+        start_date
     )
 
     # Fetch all raw data
@@ -858,11 +860,21 @@ def transform_timer_activities(db, run_id: str):
         return 0
 
     rows = []
+    seen = set()  # Deduplicate across daily chunks (API can return same row in adjacent days)
+    duplicates = 0
     for record in result:
         data = record["data"]
         project = data.get("Project", "")
         project_number = extract_project_number(project)
         task = data.get("Task")
+        start_time = parse_timestamp(data.get("Start Time"))
+
+        # Dedup key: project + user + start_time
+        dedup_key = (record["project_did"], data.get("User Email"), start_time)
+        if dedup_key in seen:
+            duplicates += 1
+            continue
+        seen.add(dedup_key)
 
         rows.append((
             project, project_number, record["project_did"],
@@ -871,11 +883,14 @@ def transform_timer_activities(db, run_id: str):
             data.get("Site Lat"), data.get("Site Long"),
             data.get("User Lat"), data.get("User Long"),
             data.get("User Accuracy (m)"), data.get("Site vs User (km)"),
-            parse_timestamp(data.get("Start Time")), parse_timestamp(data.get("End Time")),
+            start_time, parse_timestamp(data.get("End Time")),
             data.get("Duration (min)"),
             data.get("User Name"), data.get("User Email"), data.get("User Role"),
             run_id, run_date, start_date, end_date
         ))
+
+    if duplicates:
+        print(f"[{datetime.now():%H:%M:%S}] Deduplicated {duplicates:,} rows (daily chunk overlap)")
 
     batch_size = 5000
     total = len(rows)
@@ -933,9 +948,12 @@ def transform_ar_aging(db, run_id: str):
     """Transform raw_ar_aging to stg_ar_aging for a specific run_id (append mode)."""
     print(f"[{datetime.now():%H:%M:%S}] Transforming AR aging...")
 
-    # Delete existing staging data for this run_id
+    # Delete staging rows for any email dates covered by this run.
+    # Scoping by email_received_date (not run_id) prevents stacking when
+    # the same email is re-processed across different pipeline runs.
     db.execute(
-        f'DELETE FROM {SCHEMA_STAGING}.stg_ar_aging WHERE run_id = $1',
+        f'DELETE FROM {SCHEMA_STAGING}.stg_ar_aging WHERE email_received_date IN '
+        f'(SELECT DISTINCT email_received_date FROM {SCHEMA_RAW}.raw_ar_aging WHERE run_id = $1)',
         run_id
     )
 
@@ -1022,9 +1040,12 @@ def transform_sales_detail(db, run_id: str):
     """Transform raw_sales_detail to stg_sales_detail for a specific run_id (append mode)."""
     print(f"[{datetime.now():%H:%M:%S}] Transforming sales detail...")
 
-    # Delete existing staging data for this run_id
+    # Delete staging rows for any email dates covered by this run.
+    # Scoping by email_received_date (not run_id) prevents stacking when
+    # the same email is re-processed across different pipeline runs.
     db.execute(
-        f'DELETE FROM {SCHEMA_STAGING}.stg_sales_detail WHERE run_id = $1',
+        f'DELETE FROM {SCHEMA_STAGING}.stg_sales_detail WHERE email_received_date IN '
+        f'(SELECT DISTINCT email_received_date FROM {SCHEMA_RAW}.raw_sales_detail WHERE run_id = $1)',
         run_id
     )
 

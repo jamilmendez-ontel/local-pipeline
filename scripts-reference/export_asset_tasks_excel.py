@@ -47,6 +47,7 @@ PROJECTS = [
     "TECH-OPS: TS16",
     "TECH-OPS: TS17",
     "TECH-OPS: TS18",
+    "TECH-OPS: TS19",
 ]
 
 # CSV columns in order — names come directly from JSONB keys, plus retrieved_at
@@ -516,6 +517,11 @@ def main():
         action="store_true",
         help="Skip Google Drive upload and email",
     )
+    parser.add_argument(
+        "--recipients",
+        nargs="+",
+        help="Override email recipients (space-separated)",
+    )
     args = parser.parse_args()
 
     csv_zip_path, xlsx_zip_path, summary = asyncio.run(export(OUTPUT_DIR))
@@ -554,6 +560,7 @@ def main():
                 send_export_email(
                     csv_drive_link, xlsx_drive_link, summary,
                     csv_size_mb, xlsx_size_mb,
+                    recipients=args.recipients,
                 )
             except Exception as e:
                 print(f"ERROR: Email send failed: {e}")

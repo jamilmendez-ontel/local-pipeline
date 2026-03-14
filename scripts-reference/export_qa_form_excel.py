@@ -45,6 +45,7 @@ PROJECTS = [
     ("TECH-OPS: TS16", "-O99xSQdLiGywc6KRVw-"),
     ("TECH-OPS: TS17", "-ONLJdAstPfeGwVNgpYH"),
     ("TECH-OPS: TS18", "-O_IpQNpLVwhdVC3QYIm"),
+    ("TECH-OPS: TS19", "-OmzvGwfYsSskngv6SEo"),
 ]
 
 # (db_column, excel_header) in display order
@@ -432,6 +433,11 @@ def main():
         action="store_true",
         help="Skip Google Drive upload and email",
     )
+    parser.add_argument(
+        "--recipients",
+        nargs="+",
+        help="Override email recipients (space-separated)",
+    )
     args = parser.parse_args()
 
     results, loaded_at, run_id = asyncio.run(export(OUTPUT_DIR))
@@ -444,7 +450,7 @@ def main():
             print(f"Upload took {time.time() - t0:.1f}s")
 
             print("Sending email notification...")
-            send_export_email(enriched, loaded_at, run_id)
+            send_export_email(enriched, loaded_at, run_id, recipients=args.recipients)
         except Exception as e:
             print(f"ERROR: Drive upload/email failed: {e}")
             print("Excel files were still generated successfully.")

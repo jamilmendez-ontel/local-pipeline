@@ -45,6 +45,7 @@ PROJECTS = [
     "TECH-OPS: TS16",
     "TECH-OPS: TS17",
     "TECH-OPS: TS18",
+    "TECH-OPS: TS19",
 ]
 
 EXCEL_COLUMNS = [
@@ -109,7 +110,7 @@ async def check_pipeline_guard(conn):
 
 
 QUERY = """
-SELECT
+SELECT DISTINCT ON (t.project_did, t.user_email, t.start_time)
     t.project,
     t.site_name,
     t.site_id,
@@ -127,8 +128,10 @@ SELECT
     t.user_email,
     t.user_role
 FROM data_staging.stg_timer_activities t
-WHERE t.project = $1 AND t.run_id = $2
-ORDER BY t.start_time, t.site_name
+WHERE t.project = $1
+  AND t.start_time >= $2
+  AND t.start_time < $3
+ORDER BY t.project_did, t.user_email, t.start_time, t.loaded_at DESC
 """
 
 
@@ -202,22 +205,31 @@ async def export(output_dir: Path):
     await conn.execute("SET statement_timeout = '300s'")
     await check_pipeline_guard(conn)
 
-    # Get run_id from latest successful pipeline run
-    run_row = await conn.fetchrow("""
-        SELECT run_id FROM pipeline.pipeline_runs
-        WHERE pipeline_name = $1
-        ORDER BY started_at DESC LIMIT 1
-    """, PIPELINE_NAME)
-    run_id_uuid = run_row["run_id"]
-
     executor = ThreadPoolExecutor(max_workers=1)
     loop = asyncio.get_event_loop()
     export_dt = datetime.now(ET)
     results = []
 
+    # Determine month boundaries (same logic as make_filename)
+    if export_dt.day == 1:
+        prev_month = export_dt.replace(day=1) - timedelta(days=1)
+        month_start = prev_month.replace(day=1)
+    else:
+        month_start = export_dt.replace(day=1)
+    # Next month start
+    if month_start.month == 12:
+        month_end = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        month_end = month_start.replace(month=month_start.month + 1)
+    # Convert to UTC for query
+    from zoneinfo import ZoneInfo
+    month_start_utc = datetime(month_start.year, month_start.month, month_start.day, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+    month_end_utc = datetime(month_end.year, month_end.month, month_end.day, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+    print(f"Export month: {month_start:%Y-%m-%d} to {month_end:%Y-%m-%d} ET\n")
+
     try:
         # Pipeline: prefetch next project while writing current one
-        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[0], run_id_uuid))
+        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[0], month_start_utc, month_end_utc))
 
         for i, project_name in enumerate(PROJECTS):
             ts_label = project_name.split(": ")[1]
@@ -227,7 +239,7 @@ async def export(output_dir: Path):
             t_fetched = time.time()
 
             if i + 1 < len(PROJECTS):
-                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[i + 1], run_id_uuid))
+                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[i + 1], month_start_utc, month_end_utc))
 
             count = len(rows)
             file_path = output_dir / make_filename(ts_label, export_dt)
@@ -242,14 +254,16 @@ async def export(output_dir: Path):
             )
             results.append((ts_label, file_path, count))
 
-        # Fetch latest loaded_at for email metadata
+        # Fetch latest loaded_at and run_id for email metadata
         meta = await conn.fetchrow("""
-            SELECT MAX(loaded_at) AT TIME ZONE 'America/New_York' AS latest_loaded_at
-            FROM data_staging.stg_timer_activities
-            WHERE run_id = $1
-        """, run_id_uuid)
+            SELECT started_at AT TIME ZONE 'America/New_York' AS latest_loaded_at,
+                   run_id
+            FROM pipeline.pipeline_runs
+            WHERE pipeline_name = $1 AND status = 'success'
+            ORDER BY started_at DESC LIMIT 1
+        """, PIPELINE_NAME)
         loaded_at = meta["latest_loaded_at"] if meta else None
-        run_id = str(run_id_uuid)
+        run_id = str(meta["run_id"]) if meta else None
 
     finally:
         await conn.close()
@@ -422,6 +436,11 @@ def main():
         action="store_true",
         help="Skip Google Drive upload and email",
     )
+    parser.add_argument(
+        "--recipients",
+        nargs="+",
+        help="Override email recipients (space-separated)",
+    )
     args = parser.parse_args()
 
     results, loaded_at, run_id = asyncio.run(export(OUTPUT_DIR))
@@ -434,7 +453,7 @@ def main():
             print(f"Upload took {time.time() - t0:.1f}s")
 
             print("Sending email notification...")
-            send_export_email(enriched, loaded_at, run_id)
+            send_export_email(enriched, loaded_at, run_id, recipients=args.recipients)
         except Exception as e:
             print(f"ERROR: Drive upload/email failed: {e}")
             print("Excel files were still generated successfully.")

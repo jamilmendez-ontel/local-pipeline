@@ -76,4 +76,9 @@ QA_FORMS = {
         "table_name": "raw_form_qa_ts18",
         "display_name": "QA Form TS18"
     },
+    "qa_ts19": {
+        "form_id": "-Omun_NWXeQE1tEhSPXf",
+        "table_name": "raw_form_qa_ts19",
+        "display_name": "QA Form TS19"
+    },
 }
