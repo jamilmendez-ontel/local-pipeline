@@ -1,8 +1,10 @@
 name: "Pipeline: Orgs & Projects"
 
 on:
+  repository_dispatch:
+    types: [pipeline-orgs]
   schedule:
-    # 10:13 PM EST = 3:13 AM UTC
+    # Fallback: 10:13 PM EST = 3:13 AM UTC (Apps Script is primary trigger)
     - cron: '13 3 * * *'
   workflow_dispatch:
 
