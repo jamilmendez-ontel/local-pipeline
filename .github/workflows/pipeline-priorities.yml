@@ -3,9 +3,6 @@ name: "Pipeline: User Priorities"
 on:
   repository_dispatch:
     types: [pipeline-priorities]
-  schedule:
-    # Fallback: 12:13 AM EST = 5:13 AM UTC (Apps Script is primary trigger)
-    - cron: '13 5 * * *'
   workflow_dispatch:
 
 concurrency:

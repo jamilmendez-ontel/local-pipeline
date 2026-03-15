@@ -3,9 +3,6 @@ name: "Pipeline: QA Forms"
 on:
   repository_dispatch:
     types: [pipeline-forms]
-  schedule:
-    # Fallback: 12:17 AM EST = 5:17 AM UTC (Apps Script is primary trigger)
-    - cron: '17 5 * * *'
   workflow_dispatch:
 
 concurrency:

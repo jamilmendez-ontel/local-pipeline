@@ -3,9 +3,6 @@ name: "Pipeline: Timer"
 on:
   repository_dispatch:
     types: [pipeline-timer]
-  schedule:
-    # Fallback: 12:09 AM EST = 5:09 AM UTC (Apps Script is primary trigger)
-    - cron: '9 5 * * *'
   workflow_dispatch:
 
 concurrency:
