@@ -352,7 +352,6 @@ EMAIL_RECIPIENTS  = [
     "hajie@ontel.co",
     "sheena@ontel.co",
     "john@ontel.co",
-    "merjien@ontel.co",
 ]
 
 
