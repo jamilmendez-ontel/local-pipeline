@@ -860,21 +860,12 @@ def transform_timer_activities(db, run_id: str):
         return 0
 
     rows = []
-    seen = set()  # Deduplicate across daily chunks (API can return same row in adjacent days)
-    duplicates = 0
     for record in result:
         data = record["data"]
         project = data.get("Project", "")
         project_number = extract_project_number(project)
         task = data.get("Task")
         start_time = parse_timestamp(data.get("Start Time"))
-
-        # Dedup key: project + user + start_time
-        dedup_key = (record["project_did"], data.get("User Email"), start_time)
-        if dedup_key in seen:
-            duplicates += 1
-            continue
-        seen.add(dedup_key)
 
         rows.append((
             project, project_number, record["project_did"],
@@ -888,9 +879,6 @@ def transform_timer_activities(db, run_id: str):
             data.get("User Name"), data.get("User Email"), data.get("User Role"),
             run_id, run_date, start_date, end_date
         ))
-
-    if duplicates:
-        print(f"[{datetime.now():%H:%M:%S}] Deduplicated {duplicates:,} rows (daily chunk overlap)")
 
     batch_size = 5000
     total = len(rows)

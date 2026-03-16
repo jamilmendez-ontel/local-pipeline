@@ -110,7 +110,7 @@ async def check_pipeline_guard(conn):
 
 
 QUERY = """
-SELECT DISTINCT ON (t.project_did, t.user_email, t.start_time)
+SELECT
     t.project,
     t.site_name,
     t.site_id,
@@ -131,7 +131,39 @@ FROM data_staging.stg_timer_activities t
 WHERE t.project = $1
   AND t.start_time >= $2
   AND t.start_time < $3
-ORDER BY t.project_did, t.user_email, t.start_time, t.loaded_at DESC
+ORDER BY t.start_time
+"""
+
+DUPLICATES_QUERY = """
+SELECT
+    t.project,
+    t.site_name,
+    t.site_id,
+    t.task,
+    t.site_lat,
+    t.user_lat,
+    t.site_long,
+    t.user_long,
+    t.user_accuracy_m,
+    t.site_vs_user_km,
+    t.start_time,
+    t.end_time,
+    t.duration_min,
+    t.user_name,
+    t.user_email,
+    t.user_role
+FROM data_staging.stg_timer_activities t
+WHERE t.start_time >= $1
+  AND t.start_time < $2
+  AND (t.project_did, t.user_email, t.start_time) IN (
+      SELECT t2.project_did, t2.user_email, t2.start_time
+      FROM data_staging.stg_timer_activities t2
+      WHERE t2.start_time >= $1
+        AND t2.start_time < $2
+      GROUP BY t2.project_did, t2.user_email, t2.start_time
+      HAVING COUNT(*) > 1
+  )
+ORDER BY t.project, t.user_email, t.start_time, t.loaded_at DESC
 """
 
 
@@ -188,6 +220,58 @@ def write_workbook(file_path: Path, rows: list):
     workbook.close()
 
 
+def write_duplicates_workbook(file_path: Path, rows: list):
+    """Write a workbook containing only duplicate timer entries (same user+start_time, different snapshots)."""
+    workbook = xlsxwriter.Workbook(str(file_path), {"constant_memory": True})
+    header_fmt = workbook.add_format({"bold": True})
+    datetime_fmt = workbook.add_format({"num_format": "m/d/yy h:mm"})
+    highlight_fmt = workbook.add_format({"bg_color": "#FFF2CC"})  # light yellow for alternating groups
+
+    worksheet = workbook.add_worksheet("Duplicates")
+    ws_write = worksheet.write
+    ws_write_dt = worksheet.write_datetime
+    _ET = ET
+    _utc = timezone.utc
+
+    # Header row
+    for col_idx, col_name in enumerate(EXCEL_COLUMNS):
+        ws_write(0, col_idx, col_name, header_fmt)
+
+    # Data rows — alternate highlight per duplicate group
+    prev_key = None
+    group_even = False
+    for row_idx, record in enumerate(rows, start=1):
+        cur_key = (record[EXCEL_COLUMNS.index("User Email")],
+                   record[EXCEL_COLUMNS.index("Start Time")])
+        if cur_key != prev_key:
+            group_even = not group_even
+            prev_key = cur_key
+        fmt = highlight_fmt if group_even else None
+
+        for ci in REGULAR_COLS:
+            val = record[ci]
+            if val is not None:
+                if fmt:
+                    ws_write(row_idx, ci, val, fmt)
+                else:
+                    ws_write(row_idx, ci, val)
+
+        for ci in DATETIME_COLS:
+            val = record[ci]
+            if val is not None:
+                if val.tzinfo is not None:
+                    val = val.astimezone(_ET)
+                else:
+                    val = val.replace(tzinfo=_utc).astimezone(_ET)
+                ws_write_dt(row_idx, ci, val.replace(tzinfo=None), datetime_fmt)
+
+    # Column widths
+    for col_idx, col_name in enumerate(EXCEL_COLUMNS):
+        worksheet.set_column(col_idx, col_idx, max(len(col_name) + 2, 14))
+
+    workbook.close()
+
+
 async def export(output_dir: Path):
     """Export one workbook per project. Returns list of (ts_label, file_path, row_count)."""
     load_dotenv(ENV_PATH)
@@ -227,32 +311,37 @@ async def export(output_dir: Path):
     month_end_utc = datetime(month_end.year, month_end.month, month_end.day, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
     print(f"Export month: {month_start:%Y-%m-%d} to {month_end:%Y-%m-%d} ET\n")
 
-    try:
-        # Pipeline: prefetch next project while writing current one
-        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[0], month_start_utc, month_end_utc))
+    dup_results = []
 
+    try:
         for i, project_name in enumerate(PROJECTS):
             ts_label = project_name.split(": ")[1]
             t_q = time.time()
 
-            rows = await next_fetch
+            rows = await conn.fetch(QUERY, project_name, month_start_utc, month_end_utc)
             t_fetched = time.time()
-
-            if i + 1 < len(PROJECTS):
-                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[i + 1], month_start_utc, month_end_utc))
 
             count = len(rows)
             file_path = output_dir / make_filename(ts_label, export_dt)
 
             await loop.run_in_executor(executor, write_workbook, file_path, rows)
-            t_written = time.time()
 
             print(
                 f"{ts_label}: {count:>9,} rows  "
-                f"(fetch {t_fetched - t_q:.1f}s, write {t_written - t_fetched:.1f}s)"
+                f"(fetch {t_fetched - t_q:.1f}s, write {time.time() - t_fetched:.1f}s)"
                 f"  -> {file_path.name}"
             )
             results.append((ts_label, file_path, count))
+
+        # Fetch all duplicates across all projects in one query
+        all_dup_rows = await conn.fetch(DUPLICATES_QUERY, month_start_utc, month_end_utc)
+        dup_count = len(all_dup_rows)
+        if dup_count > 0:
+            dup_filename = f"Duplicates_{export_dt.strftime('%Y%m')}_{export_dt.strftime('%Y%m%d')}.xlsx"
+            dup_path = output_dir / dup_filename
+            await loop.run_in_executor(executor, write_duplicates_workbook, dup_path, all_dup_rows)
+            dup_results.append(("All Projects", dup_path, dup_count))
+            print(f"\nDuplicates: {dup_count} rows -> {dup_filename}")
 
         # Fetch latest loaded_at and run_id for email metadata
         meta = await conn.fetchrow("""
@@ -270,13 +359,16 @@ async def export(output_dir: Path):
         executor.shutdown(wait=False)
 
     total_rows = sum(r[2] for r in results)
+    total_dups = sum(r[2] for r in dup_results)
     elapsed = time.time() - t_start
     print(f"\nTotal: {total_rows:,} rows across {len(results)} files in {elapsed:.1f}s")
+    if total_dups:
+        print(f"Duplicate rows: {total_dups:,} across {len(dup_results)} projects")
     if loaded_at:
         print(f"Data loaded at: {loaded_at:%Y-%m-%d %I:%M %p} ET")
         print(f"Run ID: {run_id}")
 
-    return results, loaded_at, run_id
+    return results, dup_results, loaded_at, run_id
 
 
 # Google Drive folder name for exports
@@ -357,12 +449,15 @@ def upload_all_to_drive(results: list) -> list:
     return enriched
 
 
-def send_export_email(enriched_results: list, loaded_at=None, run_id=None, recipients=None):
+def send_export_email(enriched_results: list, enriched_dups: list = None,
+                      loaded_at=None, run_id=None, recipients=None):
     """Send one email with a table of all project files and their Drive links."""
     from gmail_client import authenticate
 
     if recipients is None:
         recipients = EMAIL_RECIPIENTS
+    if enriched_dups is None:
+        enriched_dups = []
 
     service = authenticate()
 
@@ -387,6 +482,18 @@ def send_export_email(enriched_results: list, loaded_at=None, run_id=None, recip
             f"</tr>"
         )
 
+    # Build duplicates section if any
+    dups_html = ""
+    if enriched_dups:
+        _, dup_path, dup_count, dup_link = enriched_dups[0]
+        dups_html = f"""
+        <h3 style="color:#d93025;">Duplicate Entries ({dup_count:,} rows)</h3>
+        <p>Timer entries captured in multiple API snapshots (same user + start time, different end time/duration).
+        All projects combined in one file, grouped and highlighted for easy comparison.</p>
+        <p><a href='{dup_link}' style='color:#1a73e8; font-weight:bold;'>Download Duplicates File</a>
+        ({dup_path.name})</p>
+        """
+
     subject = f"Timer Data Export - {today_et}"
     html_body = f"""\
     <html><body style="font-family: Arial, sans-serif;">
@@ -406,6 +513,7 @@ def send_export_email(enriched_results: list, loaded_at=None, run_id=None, recip
             {rows_html}
         </tbody>
     </table>
+    {dups_html}
     <table style="border-collapse: collapse; margin: 16px 0;">
         <tr><td style="padding:4px 12px; font-weight:bold;">Total Rows</td>
             <td style="padding:4px 12px;">{total_rows:,}</td></tr>
@@ -442,17 +550,18 @@ def main():
     )
     args = parser.parse_args()
 
-    results, loaded_at, run_id = asyncio.run(export(OUTPUT_DIR))
+    results, dup_results, loaded_at, run_id = asyncio.run(export(OUTPUT_DIR))
 
     if not args.no_upload:
         try:
             print("\nUploading to Google Drive...")
             t0 = time.time()
             enriched = upload_all_to_drive(results)
+            enriched_dups = upload_all_to_drive(dup_results) if dup_results else []
             print(f"Upload took {time.time() - t0:.1f}s")
 
             print("Sending email notification...")
-            send_export_email(enriched, loaded_at, run_id, recipients=args.recipients)
+            send_export_email(enriched, enriched_dups, loaded_at, run_id, recipients=args.recipients)
         except Exception as e:
             print(f"ERROR: Drive upload/email failed: {e}")
             print("Excel files were still generated successfully.")
