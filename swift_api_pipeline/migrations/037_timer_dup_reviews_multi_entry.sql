@@ -10,11 +10,16 @@
 -- selected_entry now allows any uppercase letter (A-Z).
 
 -- =========================================================================
--- 1. Add new JSONB columns
+-- 1. Add new columns
 -- =========================================================================
 ALTER TABLE data_staging.stg_timer_duplicate_reviews
     ADD COLUMN IF NOT EXISTS entries JSONB,
-    ADD COLUMN IF NOT EXISTS rejected_entries JSONB;
+    ADD COLUMN IF NOT EXISTS rejected_entries JSONB,
+    ADD COLUMN IF NOT EXISTS notification_thread_id TEXT,
+    ADD COLUMN IF NOT EXISTS notification_message_id TEXT,
+    ADD COLUMN IF NOT EXISTS site_name TEXT,
+    ADD COLUMN IF NOT EXISTS site_id TEXT,
+    ADD COLUMN IF NOT EXISTS task TEXT;
 
 -- =========================================================================
 -- 2. Migrate existing data from entry_a/entry_b columns into JSONB
@@ -101,6 +106,9 @@ BEGIN
               AND t.project_did = r.project_did
               AND t.user_email  = r.user_email
               AND t.start_time  = r.start_time
+              AND t.site_name IS NOT DISTINCT FROM r.site_name
+              AND t.site_id   IS NOT DISTINCT FROM r.site_id
+              AND t.task      IS NOT DISTINCT FROM r.task
               AND t.end_time IS NOT DISTINCT FROM (rej->>'end_time')::timestamptz
               AND t.duration_min IS NOT DISTINCT FROM (rej->>'duration_min')::numeric
         )
@@ -114,6 +122,9 @@ BEGIN
               AND t.project_did = r.project_did
               AND t.user_email  = r.user_email
               AND t.start_time  = r.start_time
+              AND t.site_name IS NOT DISTINCT FROM r.site_name
+              AND t.site_id   IS NOT DISTINCT FROM r.site_id
+              AND t.task      IS NOT DISTINCT FROM r.task
               -- This row matches one of the entries in this group...
               AND t.end_time IS NOT DISTINCT FROM (e->>'end_time')::timestamptz
               AND t.duration_min IS NOT DISTINCT FROM (e->>'duration_min')::numeric
