@@ -81,6 +81,8 @@ if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] Timer discrepancies retry finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
 )
 
+REM === 4b. Timer Duplicate Review moved to GHA (runs after timer pipeline) ===
+
 REM === 5. Asset Tasks Excel Export (timer + QA form exports moved to GHA) ===
 set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
 echo [%date% %time%] Starting asset tasks Excel export >> "%LOGFILE%"

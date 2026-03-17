@@ -50,6 +50,7 @@ jobs:
           mkdir -p gmail_credentials
           echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+          echo "${{ secrets.SHEETS_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_token.pickle
 
       - name: Run timer pipeline (with retry)
         working-directory: ${{ env.PIPELINE_DIR }}
@@ -65,6 +66,23 @@ jobs:
         run: |
           echo "Timer pipeline succeeded — running export..."
           python -u export_timer_excel.py
+
+      - name: Timer duplicate review - resolve
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        run: python -u timer_duplicate_review.py --resolve
+
+      - name: Timer duplicate review - notify
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        # TODO: Remove --test flag once team is ready for production
+        run: python -u timer_duplicate_review.py --notify --test
+
+      - name: Timer duplicate review - remind
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        # TODO: Remove --test flag once team is ready for production
+        run: python -u timer_duplicate_review.py --remind --test
 
       - name: Upload logs on failure
         if: failure()
