@@ -629,17 +629,15 @@ def run_resolve():
 # --------------------------------------------------------------------------
 
 def run_remind(test_mode: bool = False):
-    """Send reminder emails for unresolved groups older than REMINDER_AFTER_DAYS."""
+    """Send daily reminder emails for all unresolved groups."""
     db = get_db()
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=REMINDER_AFTER_DAYS)
 
     unresolved = retry_db(
         lambda: db.fetch(
             f"SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews "
             f"WHERE status IN ('pending', 'notified') "
-            f"  AND notified_at IS NOT NULL AND notified_at < $1",
-            cutoff,
+            f"  AND notified_at IS NOT NULL",
         ),
         description="find unresolved reviews for reminder",
     )
@@ -652,6 +650,7 @@ def run_remind(test_mode: bool = False):
     groups = []
     for r in unresolved:
         entries = r["entries"] if isinstance(r["entries"], list) else json.loads(r["entries"])
+        days_pending = (now - r["notified_at"]).days
         groups.append({
             "group_id": r["group_id"],
             "project_did": r["project_did"],
@@ -662,6 +661,7 @@ def run_remind(test_mode: bool = False):
             "site_id": r["site_id"],
             "task": r["task"],
             "entries": entries,
+            "days_pending": days_pending,
             "notification_thread_id": r.get("notification_thread_id"),
             "notification_message_id": r.get("notification_message_id"),
         })
@@ -678,23 +678,35 @@ def run_remind(test_mode: bool = False):
     for user_email, user_groups in by_user.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(user_groups)
+        max_days = max(g["days_pending"] for g in user_groups)
 
         # Build a simple summary list (no buttons — tech should reply from original email)
         summary_items = []
         for g in user_groups:
             site = g.get("site_name") or "(no site)"
             task = g.get("task") or "(no task)"
+            days = g["days_pending"]
+            days_label = f"{days} day{'s' if days != 1 else ''}"
             summary_items.append(
                 f'<li>{g["project"]} &mdash; {site} &mdash; {task} '
+                f'<span style="color:#c62828;">({days_label})</span> '
                 f'<span style="color:#888;">(ID: {g["group_id"]})</span></li>'
             )
         summary_html = "\n".join(summary_items)
+
+        days_left = max(0, AUTO_RESOLVE_DAYS - max_days)
+        auto_resolve_warning = (
+            f"Entries will be auto-resolved in <strong>{days_left} day{'s' if days_left != 1 else ''}</strong> "
+            f"(latest end time kept)."
+            if days_left > 0
+            else "Entries will be <strong>auto-resolved today</strong> (latest end time kept)."
+        )
 
         html_body = f"""
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#e65100;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Duplicate Review - Reminder</h2>
+                <h2 style="margin:0;">Timer Duplicate Review - Reminder ({max_days} day{'s' if max_days != 1 else ''} pending)</h2>
             </div>
             <div style="padding:24px;">
                 <p>Hi,</p>
@@ -708,8 +720,7 @@ def run_remind(test_mode: bool = False):
                 </ul>
 
                 <p style="color:#c62828;font-size:13px;margin-top:24px;font-weight:bold;">
-                    Entries not resolved within 7 days of the original notification will be
-                    auto-resolved (latest end time kept).
+                    {auto_resolve_warning}
                 </p>
             </div>
         </body>
@@ -728,8 +739,8 @@ def run_remind(test_mode: bool = False):
         msg = MIMEMultipart()
         msg["To"] = recipient
         msg["From"] = "me"
-        # "Re:" prefix + same subject so Gmail threads it as a reply
-        msg["Subject"] = f"Re: Timer Duplicate Review - {n} {'entry needs' if n == 1 else 'entries need'} your input"
+        # "Re:" prefix so Gmail threads it as a reply
+        msg["Subject"] = f"Re: Timer Duplicate Review - {n} {'entry needs' if n == 1 else 'entries need'} your input ({max_days} day{'s' if max_days != 1 else ''} not reviewed)"
         # Set reply headers so the reminder shows under the original in the thread
         if orig_message_id:
             msg["In-Reply-To"] = orig_message_id
