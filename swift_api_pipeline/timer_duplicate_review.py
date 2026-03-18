@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Timer Duplicate Review System
+Timer Discrepancies Review System
 
 Detects duplicate timer entries (same user + start_time, different end_time/duration),
 emails techs with a comparison table and pre-filled Google Form links to pick the
@@ -349,7 +349,7 @@ def send_review_emails(db, groups: list[dict], test_mode: bool = False):
     for user_email, user_groups in by_user.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(user_groups)
-        subject = f"Timer Duplicate Review - {n} {'entry needs' if n == 1 else 'entries need'} your input"
+        subject = f"Timer Discrepancies Review - {n} {'entry needs' if n == 1 else 'entries need'} your input"
 
         comparisons_html = _build_comparison_html(user_groups)
 
@@ -357,7 +357,7 @@ def send_review_emails(db, groups: list[dict], test_mode: bool = False):
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#1976d2;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Duplicate Review</h2>
+                <h2 style="margin:0;">Timer Discrepancies Review</h2>
             </div>
             <div style="padding:24px;">
                 <p>Hi,</p>
@@ -706,7 +706,7 @@ def run_remind(test_mode: bool = False):
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#e65100;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Duplicate Review - Reminder ({max_days} day{'s' if max_days != 1 else ''} pending)</h2>
+                <h2 style="margin:0;">Timer Discrepancies Review - Reminder ({max_days} day{'s' if max_days != 1 else ''} pending)</h2>
             </div>
             <div style="padding:24px;">
                 <p>Hi,</p>
@@ -740,7 +740,7 @@ def run_remind(test_mode: bool = False):
         msg["To"] = recipient
         msg["From"] = "me"
         # "Re:" prefix so Gmail threads it as a reply
-        msg["Subject"] = f"Re: Timer Duplicate Review - {n} {'entry needs' if n == 1 else 'entries need'} your input ({max_days} day{'s' if max_days != 1 else ''} not reviewed)"
+        msg["Subject"] = f"Re: Timer Discrepancies Review - {n} {'entry needs' if n == 1 else 'entries need'} your input ({max_days} day{'s' if max_days != 1 else ''} not reviewed)"
         # Set reply headers so the reminder shows under the original in the thread
         if orig_message_id:
             msg["In-Reply-To"] = orig_message_id
@@ -777,7 +777,7 @@ def run_remind(test_mode: bool = False):
 
 def main():
     setup_logging()
-    parser = argparse.ArgumentParser(description="Timer Duplicate Review System")
+    parser = argparse.ArgumentParser(description="Timer Discrepancies Review System")
     parser.add_argument("--notify", action="store_true", help="Detect new duplicates and email techs")
     parser.add_argument("--resolve", action="store_true", help="Process form responses + auto-resolve stale")
     parser.add_argument("--remind", action="store_true", help="Send reminder emails for unresolved groups")
