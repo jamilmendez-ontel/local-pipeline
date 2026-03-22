@@ -1001,7 +1001,7 @@ def run_remind(test_mode: bool = False):
         # Find the latest daily email thread for this user (for reply threading)
         notif = retry_db(
             lambda ue=user_email: db.fetchrow(
-                f"""SELECT thread_id, message_id FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+                f"""SELECT thread_id, message_id, send_date FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
                     WHERE user_email = $1
                     ORDER BY send_date DESC LIMIT 1
                 """, ue,
@@ -1056,8 +1056,12 @@ def run_remind(test_mode: bool = False):
         </html>
         """
 
-        subject = (f"Re: Timer Activity Entries - Duplicate Reminder "
-                   f"({max_days} day{'s' if max_days != 1 else ''} pending)")
+        # Subject must match original email for Gmail threading
+        if notif and notif.get("send_date"):
+            orig_date_str = notif["send_date"].strftime("%B %d, %Y")
+        else:
+            orig_date_str = "Review"
+        subject = f"Re: Timer Activity Entries - {orig_date_str}"
 
         msg = MIMEMultipart()
         msg["To"] = recipient
