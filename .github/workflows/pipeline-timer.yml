@@ -67,23 +67,6 @@ jobs:
           echo "Timer pipeline succeeded — running export..."
           python -u export_timer_excel.py
 
-      - name: Timer duplicate review - resolve
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        run: python -u timer_duplicate_review.py --resolve
-
-      - name: Timer duplicate review - notify
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        # TODO: Remove --test flag once team is ready for production
-        run: python -u timer_duplicate_review.py --notify --test
-
-      - name: Timer duplicate review - remind
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        # TODO: Remove --test flag once team is ready for production
-        run: python -u timer_duplicate_review.py --remind --test
-
       - name: Timer corrections - apply pending
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true

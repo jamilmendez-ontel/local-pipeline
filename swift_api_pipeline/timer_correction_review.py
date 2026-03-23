@@ -953,8 +953,9 @@ def run_apply():
 def run_remind(test_mode: bool = False):
     """Send reminder emails for unresolved duplicate groups.
 
-    Replies to the original daily entries email so the tech sees it in the
-    same thread.
+    Sends one reminder per (user, date) so each threads with the correct
+    daily entries email.  Falls back to standalone if no notification record
+    exists for that date.
     """
     db = get_db()
     now = datetime.now(timezone.utc)
@@ -964,9 +965,11 @@ def run_remind(test_mode: bool = False):
             f"""SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews
                 WHERE status IN ('pending', 'notified')
                   AND notified_at IS NOT NULL
+                  AND (last_reminder_at IS NULL
+                       OR last_reminder_at < NOW() - INTERVAL '20 hours')
             """,
         ),
-        description="find unresolved duplicate reviews",
+        description="find unresolved duplicate reviews needing reminder",
     )
 
     if not unresolved:
@@ -975,12 +978,17 @@ def run_remind(test_mode: bool = False):
 
     from gmail_client import authenticate
 
-    # Group by user_email
-    by_user = {}
+    # Group by (user_email, entry_date) so each reminder is per-date
+    by_user_date = {}
     for r in unresolved:
         entries = r["entries"] if isinstance(r["entries"], list) else json.loads(r["entries"])
         days_pending = (now - r["notified_at"]).days
-        by_user.setdefault(r["user_email"], []).append({
+        st = r["start_time"]
+        if st.tzinfo is None:
+            st = st.replace(tzinfo=timezone.utc)
+        entry_date = st.astimezone(TZ_EASTERN).date()
+        key = (r["user_email"], entry_date)
+        by_user_date.setdefault(key, []).append({
             "group_id": r["group_id"],
             "project": r["project"],
             "site_name": r["site_name"],
@@ -990,35 +998,57 @@ def run_remind(test_mode: bool = False):
             "days_pending": days_pending,
         })
 
-    service = authenticate()
+    # In test mode, limit to dates that have notification records (for threading)
+    # to avoid spamming jamil with hundreds of standalone reminders
+    if test_mode:
+        dates_with_notifs = set()
+        notif_dates = retry_db(
+            lambda: db.fetch(
+                f"SELECT DISTINCT send_date FROM {SCHEMA_STAGING}.stg_timer_daily_notifications"
+            ),
+            description="get dates with notification records",
+        )
+        if notif_dates:
+            dates_with_notifs = {r["send_date"] for r in notif_dates}
+        original_count = len(by_user_date)
+        by_user_date = {k: v for k, v in by_user_date.items() if k[1] in dates_with_notifs}
+        skipped = original_count - len(by_user_date)
+        if skipped:
+            logger.info(f"Test mode: skipped {skipped} reminders for dates without notification records")
 
-    for user_email, user_groups in by_user.items():
+    service = authenticate()
+    all_group_ids = []
+
+    for (user_email, entry_date), groups in by_user_date.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
-        n = len(user_groups)
-        max_days = max(g["days_pending"] for g in user_groups)
+        n = len(groups)
+        max_days = max(g["days_pending"] for g in groups)
         days_left = max(0, AUTO_RESOLVE_DAYS - max_days)
 
-        # Find the latest daily email thread for this user (for reply threading)
+        # Look up notification thread for this specific (user, date)
         notif = retry_db(
-            lambda ue=user_email: db.fetchrow(
-                f"""SELECT thread_id, message_id, send_date FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
-                    WHERE user_email = $1
-                    ORDER BY send_date DESC LIMIT 1
-                """, ue,
+            lambda ue=user_email, sd=entry_date: db.fetchrow(
+                f"""SELECT thread_id, message_id, send_date
+                    FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    WHERE user_email = $1 AND send_date = $2
+                """, ue, sd,
             ),
-            description=f"lookup notification thread for {user_email}",
+            description=f"lookup notification thread for {user_email} on {entry_date}",
         )
 
-        # Build summary list of duplicate groups needing action
+        date_str = entry_date.strftime("%B %d, %Y")
+
+        # Build summary list of duplicate groups
         summary_items = []
-        for g in user_groups:
+        for g in groups:
             site = g.get("site_name") or "(no site)"
             task = g.get("task") or "(no task)"
             days = g["days_pending"]
             n_entries = len(g["entries"])
+            start_time = _fmt_time_short(g["start_time"])
             summary_items.append(
-                f'<li><strong>{g["project"]}</strong> &mdash; {site} &mdash; {task} '
-                f'({n_entries} entries, '
+                f'<li>{site} &mdash; {task} '
+                f'(Start: {start_time}, {n_entries} entries, '
                 f'<span style="color:#c62828;">{days} day{"s" if days != 1 else ""} pending</span>)</li>'
             )
         summary_html = "\n".join(summary_items)
@@ -1034,12 +1064,14 @@ def run_remind(test_mode: bool = False):
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#e65100;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Entries - Duplicate Reminder ({max_days} day{'s' if max_days != 1 else ''} pending)</h2>
+                <h2 style="margin:0;">Duplicate Reminder - {date_str}</h2>
+                <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{max_days} day{'s' if max_days != 1 else ''} pending</p>
             </div>
             <div style="padding:24px;">
                 <p>Hi,</p>
                 <p>You have <strong>{n}</strong> duplicate timer
-                   {'group' if n == 1 else 'groups'} that still need attention.
+                   {'group' if n == 1 else 'groups'} from <strong>{date_str}</strong>
+                   that still need attention.
                    Please go back to the original timer entries email and click
                    <strong style="color:#c62828;">Remove</strong> on the incorrect entries.</p>
 
@@ -1056,12 +1088,8 @@ def run_remind(test_mode: bool = False):
         </html>
         """
 
-        # Subject must match original email for Gmail threading
-        if notif and notif.get("send_date"):
-            orig_date_str = notif["send_date"].strftime("%B %d, %Y")
-        else:
-            orig_date_str = "Review"
-        subject = f"Re: Timer Activity Entries - {orig_date_str}"
+        # Subject matches original daily email for Gmail threading
+        subject = f"Re: Timer Activity Entries - {date_str}"
 
         msg = MIMEMultipart()
         msg["To"] = recipient
@@ -1078,24 +1106,27 @@ def run_remind(test_mode: bool = False):
             if notif and notif.get("thread_id"):
                 send_body["threadId"] = notif["thread_id"]
             service.users().messages().send(userId="me", body=send_body).execute()
-            logger.info(f"Sent duplicate reminder to {recipient} ({n} groups, "
-                        f"thread={notif.get('thread_id') if notif else 'none'})")
+            logger.info(f"Sent duplicate reminder to {recipient} for {entry_date} "
+                        f"({n} groups, thread={notif.get('thread_id') if notif else 'none'})")
         except Exception as e:
-            logger.error(f"Failed to send reminder to {user_email}: {e}")
+            logger.error(f"Failed to send reminder to {user_email} for {entry_date}: {e}")
+
+        all_group_ids.extend(g["group_id"] for g in groups)
 
     # Update reminder counts
-    group_ids = [g["group_id"] for ug in by_user.values() for g in ug]
-    retry_db(
-        lambda: db.execute(
-            f"""UPDATE {SCHEMA_STAGING}.stg_timer_duplicate_reviews
-                SET reminder_count = reminder_count + 1, last_reminder_at = $1, updated_at = $1
-                WHERE group_id = ANY($2)
-            """, now, group_ids,
-        ),
-        description="update reminder counts",
-    )
-    total_groups = sum(len(v) for v in by_user.values())
-    logger.info(f"Remind complete: sent reminders for {total_groups} groups to {len(by_user)} techs")
+    if all_group_ids:
+        retry_db(
+            lambda: db.execute(
+                f"""UPDATE {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+                    SET reminder_count = reminder_count + 1, last_reminder_at = $1, updated_at = $1
+                    WHERE group_id = ANY($2)
+                """, now, all_group_ids,
+            ),
+            description="update reminder counts",
+        )
+    total_groups = len(all_group_ids)
+    total_emails = len(by_user_date)
+    logger.info(f"Remind complete: sent {total_emails} reminder emails for {total_groups} groups")
 
 
 # --------------------------------------------------------------------------
