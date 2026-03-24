@@ -91,9 +91,10 @@ def check_token_health():
     from google.auth.transport.requests import Request
 
     TOKEN_DIR = Path(__file__).parent / "gmail_credentials"
+    # Only check tokens used by this script (sheets for --apply)
+    # Calendar token is only used by calendar_client.py, not deployed in GHA
     tokens = {
         "sheets_token.pickle": "Google Sheets (Drive API) — used by --apply",
-        "calendar_token.pickle": "Google Calendar API — used by calendar pipeline",
     }
 
     failed = []
@@ -881,7 +882,31 @@ def apply_responses(db, responses: list[dict]):
     now = datetime.now(timezone.utc)
     applied = 0
 
-    for resp in responses:
+    # Pre-fetch already-stored entry_ids to skip re-processing (major speedup)
+    all_ids = [r["entry_id"] for r in responses]
+    existing_corrections = retry_db(
+        lambda: db.fetch(
+            f"SELECT entry_id FROM {SCHEMA_STAGING}.stg_timer_corrections WHERE entry_id = ANY($1)",
+            all_ids,
+        ),
+        description="batch check existing corrections",
+    )
+    existing_removals = retry_db(
+        lambda: db.fetch(
+            f"SELECT entry_id FROM {SCHEMA_STAGING}.stg_timer_entry_removals WHERE entry_id = ANY($1)",
+            all_ids,
+        ),
+        description="batch check existing removals",
+    )
+    already_stored = {r["entry_id"] for r in (existing_corrections or [])} | \
+                     {r["entry_id"] for r in (existing_removals or [])}
+
+    new_responses = [r for r in responses if r["entry_id"] not in already_stored]
+    if len(responses) > len(new_responses):
+        logger.info(f"Skipping {len(responses) - len(new_responses)} already-processed responses, "
+                     f"{len(new_responses)} new to process")
+
+    for resp in new_responses:
         entry_id = resp["entry_id"]
         action = resp["action"]
         corrected_duration = resp.get("corrected_duration_min")
