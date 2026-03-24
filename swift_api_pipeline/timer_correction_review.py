@@ -75,6 +75,98 @@ AUTO_RESOLVE_DAYS = 7
 
 
 # --------------------------------------------------------------------------
+# OAuth Token Health Check
+# --------------------------------------------------------------------------
+
+def check_token_health():
+    """Verify OAuth refresh tokens are still valid. Alert via email if any fail.
+
+    Catches the 'invalid_grant' error that occurs when a refresh token is
+    revoked (e.g. GCP project reverted to Testing mode). Sends alert to
+    jamil so the token can be manually re-authenticated before the pipeline
+    starts silently failing.
+    """
+    import pickle
+    from pathlib import Path
+    from google.auth.transport.requests import Request
+
+    TOKEN_DIR = Path(__file__).parent / "gmail_credentials"
+    tokens = {
+        "sheets_token.pickle": "Google Sheets (Drive API) — used by --apply",
+        "calendar_token.pickle": "Google Calendar API — used by calendar pipeline",
+    }
+
+    failed = []
+    for filename, description in tokens.items():
+        token_path = TOKEN_DIR / filename
+        if not token_path.exists():
+            failed.append((filename, description, "File not found"))
+            continue
+        try:
+            with open(token_path, "rb") as f:
+                creds = pickle.load(f)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            elif not creds.valid and not creds.refresh_token:
+                failed.append((filename, description, "No refresh token"))
+                continue
+        except Exception as e:
+            failed.append((filename, description, str(e)))
+
+    if not failed:
+        logger.info("Token health check passed — all refresh tokens valid")
+        return True
+
+    # Build alert email
+    for filename, description, error in failed:
+        logger.error(f"TOKEN HEALTH CHECK FAILED: {filename} — {error}")
+
+    try:
+        from gmail_client import authenticate
+        service = authenticate()
+
+        items = "\n".join(
+            f"<li><strong>{fn}</strong> ({desc})<br>"
+            f"<span style='color:#c62828;'>{err}</span></li>"
+            for fn, desc, err in failed
+        )
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;">
+            <div style="background:#c62828;color:white;padding:16px 24px;">
+                <h2 style="margin:0;">OAuth Token Alert</h2>
+            </div>
+            <div style="padding:24px;">
+                <p>The following OAuth tokens failed their refresh health check:</p>
+                <ul>{items}</ul>
+                <p>This likely means the GCP project (<code>prefab-reducer-487104-r0</code>)
+                   has reverted to <strong>Testing</strong> mode, which expires refresh tokens
+                   after 7 days.</p>
+                <p><strong>To fix:</strong></p>
+                <ol>
+                    <li>Google Cloud Console → project <code>prefab-reducer-487104-r0</code>
+                        (nanoninth account)</li>
+                    <li>Google Auth platform → Audience → Publish App</li>
+                    <li>Delete expired token locally, re-authenticate, update GHA secret</li>
+                </ol>
+            </div>
+        </body></html>
+        """
+        msg = MIMEMultipart()
+        msg["To"] = "jamil.mendez@ontel.co"
+        msg["From"] = "me"
+        msg["Subject"] = "Pipeline Alert: OAuth Token Refresh Failed"
+        msg.attach(MIMEText(html, "html"))
+
+        raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info("Token health alert email sent to jamil.mendez@ontel.co")
+    except Exception as e:
+        logger.error(f"Failed to send token health alert email: {e}")
+
+    return False
+
+
+# --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 
@@ -215,10 +307,12 @@ def _parse_duration_response(value: str) -> float | None:
 # --send: Email each tech with previous day's entries
 # --------------------------------------------------------------------------
 
-def get_previous_day_entries(db) -> list[dict]:
-    """Query previous day's timer entries (Eastern Time)."""
-    now_et = datetime.now(TZ_EASTERN)
-    yesterday = (now_et - timedelta(days=1)).date()
+def get_previous_day_entries(db, target_date=None) -> list[dict]:
+    """Query timer entries for a given date (Eastern Time). Defaults to yesterday."""
+    if target_date is None:
+        now_et = datetime.now(TZ_EASTERN)
+        target_date = (now_et - timedelta(days=1)).date()
+    yesterday = target_date
 
     rows = retry_db(
         lambda: db.fetch(f"""
@@ -525,15 +619,16 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     logger.info(f"Tracked {len(new_groups)} new duplicate groups from daily entries")
 
 
-def run_send(test_mode: bool = False):
+def run_send(test_mode: bool = False, target_date=None):
     """Send daily timer entry emails and track duplicates."""
     if "PLACEHOLDER" in CORRECT_FORM_ID or "PLACEHOLDER" in REMOVE_FORM_ID:
         logger.warning("Google Form ID is still a placeholder — emails will have broken links.")
 
     db = get_db()
 
-    logger.info("Fetching previous day's timer entries...")
-    entries = get_previous_day_entries(db)
+    date_label = target_date or "previous day"
+    logger.info(f"Fetching timer entries for {date_label}...")
+    entries = get_previous_day_entries(db, target_date=target_date)
 
     if not entries:
         logger.info("No timer entries found for previous day")
@@ -1140,10 +1235,19 @@ def main():
     parser.add_argument("--apply", action="store_true", help="Process form responses + auto-resolve stale")
     parser.add_argument("--remind", action="store_true", help="Send duplicate reminder emails")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
+    parser.add_argument("--date", type=str, help="Target date YYYY-MM-DD (default: yesterday). For backfill sends.")
     args = parser.parse_args()
 
     if not any([args.send, args.apply, args.remind]):
         parser.error("At least one of --send, --apply, --remind is required")
+
+    target_date = None
+    if args.date:
+        from datetime import date as date_type
+        target_date = date_type.fromisoformat(args.date)
+
+    # Check OAuth token health before doing anything
+    check_token_health()
 
     try:
         if args.apply:
@@ -1152,7 +1256,7 @@ def main():
 
         if args.send:
             logger.info("=== Running --send ===")
-            run_send(test_mode=args.test)
+            run_send(test_mode=args.test, target_date=target_date)
 
         if args.remind:
             logger.info("=== Running --remind ===")
