@@ -84,14 +84,32 @@ class AssetTaskExtractor(BaseExtractor):
         pending = []  # accumulate before flushing
         start_time = time.monotonic()
 
-        logger.info(f"[{project_name}] Starting extraction...")
+        # Check for resume point from a prior interrupted extraction
+        progress = self.db.fetchrow(
+            f'SELECT rows_written, after_ap, after_id '
+            f'FROM {SCHEMA_PIPELINE}.extraction_progress '
+            f'WHERE run_id = $1 AND project_did = $2',
+            run_id_str, project_did
+        )
+        if progress and progress["rows_written"] > 0 and progress["after_ap"]:
+            project_rows = progress["rows_written"]
+            after_ap = progress["after_ap"]
+            after_id = progress["after_id"]
+            page_count = project_rows // PAGE_SIZE
+            logger.info(
+                f"[{project_name}] Resuming from page {page_count} "
+                f"({project_rows:,} rows already written)"
+            )
+        else:
+            logger.info(f"[{project_name}] Starting extraction...")
 
         while True:
             # Guard against hung workers — bail if project exceeds timeout
             elapsed = time.monotonic() - start_time
             if elapsed > PROJECT_TIMEOUT_SECONDS:
                 if pending:
-                    self._write_batch(run_id_str, project_did, pending)
+                    self._write_batch(run_id_str, project_did, pending,
+                                      after_ap=after_ap, after_id=after_id)
                 raise TimeoutError(
                     f"[{project_name}] Exceeded {PROJECT_TIMEOUT_SECONDS}s timeout "
                     f"after {project_rows:,} rows ({page_count} pages)"
@@ -130,7 +148,8 @@ class AssetTaskExtractor(BaseExtractor):
                     while len(pending) >= LOAD_BATCH_SIZE:
                         batch = pending[:LOAD_BATCH_SIZE]
                         pending = pending[LOAD_BATCH_SIZE:]
-                        self._write_batch(run_id_str, project_did, batch)
+                        self._write_batch(run_id_str, project_did, batch,
+                                          after_ap=after_ap, after_id=after_id)
 
                     if page_count % 50 == 0:
                         logger.info(f"[{project_name}] Page {page_count} - {project_rows:,} rows")
@@ -160,10 +179,13 @@ class AssetTaskExtractor(BaseExtractor):
             else:
                 raise RuntimeError(f"[{project_name}] Failed after {MAX_RETRIES} attempts")
 
-    def _write_batch(self, run_id_str: str, project_did: str, records: list):
-        """Write a batch of records directly to raw_asset_tasks via COPY."""
+    def _write_batch(self, run_id_str: str, project_did: str, records: list,
+                     after_ap: str = None, after_id: str = None):
+        """Write a batch of records directly to raw_asset_tasks via COPY.
+        Verifies the COPY result and saves cursor for resume capability."""
+        expected = len(records)
         tuples = [(run_id_str, project_did, rec) for rec in records]
-        retry_db(
+        result = retry_db(
             lambda: self.db.copy_records(
                 "raw_asset_tasks",
                 schema_name=SCHEMA_RAW,
@@ -172,7 +194,32 @@ class AssetTaskExtractor(BaseExtractor):
             ),
             description="copy raw_asset_tasks"
         )
-        self.increment_loaded(len(records))
+        # Verify rows persisted — asyncpg returns "COPY <n>"
+        if result:
+            try:
+                actual = int(result.split()[-1])
+            except (ValueError, IndexError):
+                actual = -1
+            if actual != expected:
+                raise RuntimeError(
+                    f"COPY verification failed: expected {expected} rows, got '{result}'"
+                )
+        self.increment_loaded(expected)
+
+        # Save cursor for resume-on-failure
+        if after_ap is not None or after_id is not None:
+            retry_db(
+                lambda: self.db.execute(
+                    f'INSERT INTO {SCHEMA_PIPELINE}.extraction_progress '
+                    f'(run_id, project_did, rows_written, after_ap, after_id, updated_at) '
+                    f'VALUES ($1, $2, $3, $4, $5, NOW()) '
+                    f'ON CONFLICT (run_id, project_did) DO UPDATE SET '
+                    f'rows_written = pipeline.extraction_progress.rows_written + $3, '
+                    f'after_ap = $4, after_id = $5, updated_at = NOW()',
+                    run_id_str, project_did, expected, after_ap, after_id
+                ),
+                description="upsert extraction_progress"
+            )
 
     def prepare_table_for_bulk_load(self):
         """Drop non-PK indexes for fast bulk loading.
@@ -200,13 +247,44 @@ class AssetTaskExtractor(BaseExtractor):
             self.db.execute(idx_def, statement_timeout=600)
         logger.info("Indexes restored")
 
+    # New run must have at least 90% of old run rows to allow cleanup
+    CLEANUP_ROW_THRESHOLD = 0.90
+
     def clear_old_raw_data(self):
-        """Clear old raw data (keep current run_id). Single query."""
-        logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
+        """Clear old raw data only if the new run has sufficient rows.
+
+        Compares new vs old run row counts before deleting. Refuses to
+        delete if the new run has < 90% of the old run's rows, which
+        indicates data loss during extraction.
+        """
+        logger.info(f"Verifying new run data before cleanup (run_id={self.run_id})...")
+        run_id_str = str(self.run_id)
+
+        new_count = self.db.fetchval(
+            f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id = $1',
+            run_id_str
+        ) or 0
+
+        old_count = self.db.fetchval(
+            f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id != $1',
+            run_id_str
+        ) or 0
+
+        if old_count > 0 and new_count < old_count * self.CLEANUP_ROW_THRESHOLD:
+            raise RuntimeError(
+                f"Cleanup aborted: new run has {new_count:,} rows but old run has "
+                f"{old_count:,} rows (threshold: {self.CLEANUP_ROW_THRESHOLD:.0%}). "
+                f"This suggests data loss during extraction."
+            )
+
+        logger.info(
+            f"Row count verified: new={new_count:,}, old={old_count:,}. "
+            f"Proceeding with cleanup."
+        )
         retry_db(
             lambda: self.db.execute(
                 f'DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id != $1',
-                str(self.run_id)
+                run_id_str
             ),
             description="delete old raw_asset_tasks"
         )
@@ -364,34 +442,92 @@ def run_asset_task_pipeline(
             )
             time.sleep(RETRY_WAIT_SECONDS)
 
-            still_failed = []
+            # For failed projects: resume from cursor if available, else clean and restart
             for proj_name in failed_projects:
                 proj = next(p for p in projects if p["project_name"] == proj_name)
-                # Clean partial data from first attempt before retrying
-                retry_db(
-                    lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
-                        f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
-                        did, rid
-                    ),
-                    description=f"clean partial raw data for {proj_name}"
+                progress = extractor.db.fetchrow(
+                    f'SELECT rows_written, after_ap FROM {SCHEMA_PIPELINE}.extraction_progress '
+                    f'WHERE run_id = $1 AND project_did = $2',
+                    str(extractor.run_id), proj["project_did"]
                 )
+                if progress and progress["after_ap"]:
+                    logger.info(
+                        f"[{proj_name}] Has resume point at {progress['rows_written']:,} rows "
+                        f"— will resume instead of re-extracting"
+                    )
+                else:
+                    # No resume point — delete partial data and start fresh
+                    retry_db(
+                        lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                            f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
+                            did, rid
+                        ),
+                        description=f"clean partial raw data for {proj_name}"
+                    )
+                    retry_db(
+                        lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                            f"DELETE FROM {SCHEMA_PIPELINE}.extraction_progress WHERE run_id=$1 AND project_did=$2",
+                            rid, did
+                        ),
+                        description=f"clean extraction_progress for {proj_name}"
+                    )
+
+            # Retry failed projects in parallel using ThreadPoolExecutor
+            retry_projects = [
+                next(p for p in projects if p["project_name"] == name)
+                for name in failed_projects
+            ]
+            still_failed = []
+            retry_executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                retry_futures = {
+                    retry_executor.submit(
+                        extractor.extract_and_load_project,
+                        proj["project_did"],
+                        proj["project_name"],
+                    ): proj
+                    for proj in retry_projects
+                }
                 try:
-                    rows = extractor.extract_and_load_project(proj["project_did"], proj["project_name"])
-                    project_rows[proj_name] = rows
-                    logger.info(f"[{proj_name}] Retry SUCCEEDED: {rows:,} rows")
-                except Exception as e:
-                    logger.error(f"[{proj_name}] Retry FAILED: {type(e).__name__}: {e}")
-                    still_failed.append(proj_name)
+                    for future in as_completed(retry_futures, timeout=overall_timeout):
+                        proj = retry_futures[future]
+                        try:
+                            rows = future.result()
+                            project_rows[proj["project_name"]] = rows
+                            logger.info(f"[{proj['project_name']}] Retry SUCCEEDED: {rows:,} rows")
+                        except Exception as e:
+                            logger.error(f"[{proj['project_name']}] Retry FAILED: {type(e).__name__}: {e}")
+                            still_failed.append(proj["project_name"])
+                except TimeoutError:
+                    for fut, proj in retry_futures.items():
+                        if not fut.done():
+                            name = proj["project_name"]
+                            logger.error(f"[{name}] Retry TIMED OUT after {overall_timeout}s")
+                            still_failed.append(name)
+            finally:
+                retry_executor.shutdown(wait=False, cancel_futures=True)
 
             failed_projects = still_failed  # Only projects that failed even after retry
 
-        total_records = extractor.total_loaded
+        # Recalculate from project_rows — the accumulating counter may be
+        # inflated by rows written in round 1 that were deleted before retry.
+        total_records = sum(project_rows.values())
+        extractor.total_loaded = total_records
 
         # Restore table: recreate indexes
         extractor.restore_table_after_load()
 
         # Clean up old raw data now that new extraction succeeded
         extractor.clear_old_raw_data()
+
+        # Clean up extraction progress tracking for this run
+        retry_db(
+            lambda: extractor.db.execute(
+                f'DELETE FROM {SCHEMA_PIPELINE}.extraction_progress WHERE run_id = $1',
+                str(extractor.run_id)
+            ),
+            description="clean extraction_progress"
+        )
 
         # Detect partial failures — projects that failed even after retry
         if failed_projects:

@@ -41,7 +41,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 # Re-export database functions (replaces Supabase client code)
-from db import get_db, close_db, retry_db
+from db import get_db, close_db, reconnect_db, retry_db
 
 
 # QA Forms configuration (TS13+) — single source of truth

@@ -159,22 +159,31 @@ def capture_logs(logger_prefixes: Optional[Sequence[str]] = None):
 def snapshot_row_counts(tables: Optional[List] = None) -> Dict[str, int]:
     """Take a snapshot of table row counts for email comparison.
 
+    Retries once with a fresh DB pool if the connection is stale (common after
+    long-running pipelines where the pool's connections get closed server-side).
+
     Args:
         tables: List of (schema, table) tuples to count. If None, returns empty.
     """
     if not tables:
         return {}
-    try:
-        from config import get_db
-        db = get_db()
-        counts = {}
-        for schema, table in tables:
-            count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
-            counts[f"{schema}.{table}"] = count if count is not None else 0
-        return counts
-    except Exception as e:
-        logger.warning(f"Failed to snapshot row counts: {e}")
-        return {}
+    from db import get_db, close_db
+    for attempt in range(2):
+        try:
+            if attempt > 0:
+                close_db()
+            db = get_db()
+            counts = {}
+            for schema, table in tables:
+                count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
+                counts[f"{schema}.{table}"] = count if count is not None else 0
+            return counts
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"Snapshot row counts failed, retrying with fresh connection: {e}")
+            else:
+                logger.warning(f"Failed to snapshot row counts after retry: {e}")
+    return {}
 
 
 def _format_duration(seconds: float) -> str:

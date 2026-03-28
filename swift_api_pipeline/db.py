@@ -162,6 +162,26 @@ class PipelineDB:
                 self._thread.join(timeout=5)
             logger.info("Database pool closed")
 
+    def reconnect(self):
+        """Close stale pool and create a fresh one. Blocks until ready."""
+        logger.warning("Reconnecting database pool...")
+        if self._pool and self._loop and self._loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._pool.close(), self._loop)
+                future.result(timeout=10)
+            except Exception:
+                pass
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread:
+                self._thread.join(timeout=5)
+
+        self._pool = None
+        self._loop = None
+        self._thread = None
+        self._ready = threading.Event()
+        self.start()
+        logger.info("Database pool reconnected successfully")
+
     # ------------------------------------------------------------------
     # Internal bridge: submit coroutine, block for result
     # ------------------------------------------------------------------
@@ -307,12 +327,43 @@ def close_db():
         _db_instance = None
 
 
+def reconnect_db():
+    """Reconnect the singleton PipelineDB instance (fresh pool)."""
+    global _db_instance
+    with _db_lock:
+        if _db_instance is not None:
+            _db_instance.reconnect()
+        else:
+            _db_instance = PipelineDB()
+            _db_instance.start()
+    return _db_instance
+
+
+# Connection-level exceptions that warrant a pool reconnect
+_CONNECTION_ERRORS = (
+    asyncpg.ConnectionDoesNotExistError,
+    asyncpg.InterfaceError,
+    OSError,
+)
+
+
 def retry_db(fn, max_retries=5, description="operation"):
-    """Execute a database operation with retry and exponential backoff."""
+    """Execute a database operation with retry, exponential backoff,
+    and automatic pool reconnect on connection-level failures."""
     _logger = logging.getLogger("pipeline.retry")
     for attempt in range(max_retries):
         try:
             return fn()
+        except _CONNECTION_ERRORS as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = min(2 ** attempt, 15)
+            _logger.warning(
+                f"{description} connection lost (attempt {attempt + 1}/{max_retries}): "
+                f"{type(e).__name__}: {e}. Reconnecting pool in {wait}s..."
+            )
+            time.sleep(wait)
+            reconnect_db()
         except Exception as e:
             if attempt == max_retries - 1:
                 raise
