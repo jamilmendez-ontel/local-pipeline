@@ -1017,7 +1017,11 @@ def rebuild_clean_table(db):
 
 
 def auto_resolve_stale(db):
-    """Auto-resolve duplicate groups older than AUTO_RESOLVE_DAYS: keep latest end_time."""
+    """Auto-resolve duplicate groups older than AUTO_RESOLVE_DAYS: keep longest duration.
+
+    Short entries are typically system-generated phantom timers from Swift
+    mobile/desktop sync issues. The real work session has the longest duration.
+    """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=AUTO_RESOLVE_DAYS)
 
@@ -1039,7 +1043,7 @@ def auto_resolve_stale(db):
 
     for review in stale:
         entries = review["entries"] if isinstance(review["entries"], list) else json.loads(review["entries"])
-        best = max(entries, key=lambda e: e.get("end_time") or "")
+        best = max(entries, key=lambda e: float(e.get("duration_min") or 0))
         selection = best["label"]
         rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
                      for e in entries if e["label"] != selection]
@@ -1189,9 +1193,9 @@ def run_remind(test_mode: bool = False):
 
         auto_resolve_warning = (
             f"Duplicate entries will be auto-resolved in <strong>{days_left} day{'s' if days_left != 1 else ''}</strong> "
-            f"(latest end time kept)."
+            f"(longest duration kept)."
             if days_left > 0
-            else "Duplicate entries will be <strong>auto-resolved today</strong> (latest end time kept)."
+            else "Duplicate entries will be <strong>auto-resolved today</strong> (longest duration kept)."
         )
 
         html_body = f"""
