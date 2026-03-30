@@ -487,10 +487,20 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                     </tbody>
                 </table>
 
-                <p style="color:#888;font-size:12px;margin-top:24px;">
-                    Only click a button if something needs to be changed.
-                    Links remain valid &mdash; you can correct or remove entries from older emails too.
-                </p>
+                <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
+                    <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
+                    <ul style="margin:0;padding-left:20px;line-height:1.8;">
+                        <li>You'll receive daily reminders until all duplicate entries are resolved.</li>
+                        <li>The <strong>duplicate icon</strong> highlights entries that share the same start time
+                            &mdash; these are likely system-generated duplicates.</li>
+                        <li>Entries are <strong>color-coded</strong> by site and task so you can easily
+                            spot related groups.</li>
+                    </ul>
+                    <p style="margin:8px 0 0;color:#888;font-size:12px;">
+                        Only click a button if something needs to be changed.
+                        Links remain valid &mdash; you can correct or remove entries from older emails too.
+                    </p>
+                </div>
             </div>
         </body>
         </html>
