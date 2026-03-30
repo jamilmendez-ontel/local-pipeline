@@ -53,6 +53,20 @@ logger = get_logger("timer_correction")
 
 TZ_EASTERN = ZoneInfo("America/New_York")
 
+
+def _first_name(email):
+    """Extract first name from email for greeting.
+
+    jamil.mendez@ontel.co -> Jamil
+    james@ontel.co -> James
+    jm.chan@ontel.co -> Jm
+    """
+    if not email:
+        return "there"
+    local = email.split("@")[0] if "@" in email else email
+    first = local.split(".")[0] if "." in local else local
+    return first.capitalize() if first else "there"
+
 # --------------------------------------------------------------------------
 # Google Form configuration (jamil.mendez@ontel.co)
 # --------------------------------------------------------------------------
@@ -447,7 +461,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                 <h2 style="margin:0;">Timer Activity Entries - {date_str}</h2>
             </div>
             <div style="padding:24px;">
-                <p>Hi,</p>
+                <p>Hi {_first_name(user_email)},</p>
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
                    from <strong>{date_str}</strong>.</p>
                 <ul style="font-size:13px;color:#555;margin:8px 0 16px;">
@@ -1188,7 +1202,7 @@ def run_remind(test_mode: bool = False):
                 <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{max_days} day{'s' if max_days != 1 else ''} pending</p>
             </div>
             <div style="padding:24px;">
-                <p>Hi,</p>
+                <p>Hi {_first_name(user_email)},</p>
                 <p>You have <strong>{n}</strong> duplicate timer
                    {'group' if n == 1 else 'groups'} from <strong>{date_str}</strong>
                    that still need attention.

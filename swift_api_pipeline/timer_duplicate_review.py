@@ -60,6 +60,19 @@ REMINDER_AFTER_DAYS = 1
 LABELS = list(string.ascii_uppercase)
 
 
+def _first_name(email):
+    """Extract first name from email for greeting.
+
+    jamil.mendez@ontel.co -> Jamil
+    james@ontel.co -> James
+    """
+    if not email:
+        return "there"
+    local = email.split("@")[0] if "@" in email else email
+    first = local.split(".")[0] if "." in local else local
+    return first.capitalize() if first else "there"
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -360,7 +373,7 @@ def send_review_emails(db, groups: list[dict], test_mode: bool = False):
                 <h2 style="margin:0;">Timer Discrepancies Review</h2>
             </div>
             <div style="padding:24px;">
-                <p>Hi,</p>
+                <p>Hi {_first_name(user_email)},</p>
                 <p>We found <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'} with duplicate
                    start times that need your review. For each one below, please click the button
                    for the entry you want to <strong>keep</strong>. All others will be removed.</p>
@@ -368,7 +381,7 @@ def send_review_emails(db, groups: list[dict], test_mode: bool = False):
                 {comparisons_html}
 
                 <p style="color:#888;font-size:13px;margin-top:24px;">
-                    If no selection is made within 7 days, the entry with the latest end time will
+                    If no selection is made within 7 days, the entry with the longest duration will
                     be kept automatically.
                 </p>
             </div>
@@ -713,7 +726,7 @@ def run_remind(test_mode: bool = False):
                 <h2 style="margin:0;">Timer Discrepancies Review - Reminder ({max_days} day{'s' if max_days != 1 else ''} pending)</h2>
             </div>
             <div style="padding:24px;">
-                <p>Hi,</p>
+                <p>Hi {_first_name(user_email)},</p>
                 <p>This is a reminder that <strong>{n}</strong> timer duplicate
                    {'review is' if n == 1 else 'reviews are'} still pending.
                    Please go back to the original review email and select the correct entry.</p>

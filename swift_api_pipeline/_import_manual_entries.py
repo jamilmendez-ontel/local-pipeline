@@ -87,7 +87,7 @@ def read_manual_entries():
         else:
             continue
 
-        if disc_date.year != 2025:
+        if disc_date.year not in (2025, 2026):
             continue
 
         manual = ws.cell(row, 18).value
