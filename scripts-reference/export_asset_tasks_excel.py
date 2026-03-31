@@ -233,8 +233,42 @@ def build_xlsx_zip(project_data: dict, xlsx_zip_path: Path):
     return xlsx_zip_path
 
 
+async def fetch_project_rows(dsn: dict, project_did: str, run_id: str, ts_label: str):
+    """Fetch all rows for one project using a dedicated connection with retry."""
+    MAX_RETRIES = 3
+    for attempt in range(1, MAX_RETRIES + 1):
+        conn = None
+        try:
+            conn = await asyncpg.connect(**dsn)
+            await conn.execute("SET statement_timeout = '600s'")
+            rows = []
+            async with conn.transaction():
+                cur = await conn.cursor(QUERY, project_did, run_id)
+                while True:
+                    batch = await cur.fetch(CHUNK_SIZE)
+                    if not batch:
+                        break
+                    rows.extend(batch)
+            return rows
+        except (asyncpg.InterfaceError, ConnectionResetError, OSError) as e:
+            if attempt == MAX_RETRIES:
+                raise
+            wait = 10 * attempt
+            print(f"  {ts_label}: connection lost (attempt {attempt}/{MAX_RETRIES}), retrying in {wait}s...")
+            await asyncio.sleep(wait)
+        finally:
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+
+
 async def export(output_dir: Path):
     """Stream raw_asset_tasks per project, build CSV ZIP + XLSX ZIP.
+
+    Each project uses its own DB connection with retry to survive
+    transient connection resets from the remote host.
 
     Returns (csv_zip_path, xlsx_zip_path, summary).
     """
@@ -242,7 +276,7 @@ async def export(output_dir: Path):
     t_start = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    conn = await asyncpg.connect(
+    dsn = dict(
         host=os.getenv("SUPABASE_HOST"),
         port=int(os.getenv("SUPABASE_PORT", "5432")),
         database=os.getenv("SUPABASE_DB"),
@@ -250,10 +284,12 @@ async def export(output_dir: Path):
         password=os.getenv("SUPABASE_PASSWORD"),
         ssl="require",
     )
+
+    # Guard check + metadata on a short-lived connection
+    conn = await asyncpg.connect(**dsn)
     await conn.execute("SET statement_timeout = '600s'")
     await check_pipeline_guard(conn)
 
-    # Get the latest run_id and project_dids
     run_row = await conn.fetchrow("""
         SELECT run_id FROM pipeline.pipeline_runs
         WHERE pipeline_name = $1
@@ -268,6 +304,7 @@ async def export(output_dir: Path):
         ORDER BY project_name
     """, PROJECTS)
     project_map = {r["project_name"]: r["project_did"] for r in proj_rows}
+    await conn.close()
 
     export_dt  = datetime.now(ET)
     date_str   = export_dt.strftime("%Y%m%d")
@@ -275,7 +312,6 @@ async def export(output_dir: Path):
     xlsx_zip_path = SCRIPT_DIR / (date_str + ".zip")
     summary    = []   # (project_name, project_did, total_rows, num_chunks)
     total_rows = 0
-    # Collect rows per project for XLSX generation
     project_data = {}  # {ts_label: [[col_values], ...]}
 
     with zipfile.ZipFile(csv_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -283,54 +319,34 @@ async def export(output_dir: Path):
             project_did = project_map[project_name]
             ts_label    = project_name.split(": ")[1]
             t_proj      = time.time()
-            proj_rows_count = 0
+
+            # Fetch all rows with retry on connection failure
+            rows = await fetch_project_rows(dsn, project_did, run_id, ts_label)
+            proj_rows_count = len(rows)
+
+            # Write CSV chunks
             chunk_num   = 0
             chunk_start = 1
-            pending     = []
-            xlsx_rows   = []
-
-            async with conn.transaction():
-                cur = await conn.cursor(QUERY, project_did, run_id)
-                while True:
-                    batch = await cur.fetch(CHUNK_SIZE)
-                    if not batch:
-                        break
-                    pending.extend(batch)
-                    proj_rows_count += len(batch)
-
-                    # Collect for XLSX
-                    for record in batch:
-                        xlsx_rows.append([
-                            record[col] if record[col] is not None else ""
-                            for col in CSV_COLUMNS
-                        ])
-
-                    # Flush each full chunk
-                    while len(pending) >= CHUNK_SIZE:
-                        chunk = pending[:CHUNK_SIZE]
-                        pending = pending[CHUNK_SIZE:]
-                        chunk_end  = chunk_start + len(chunk) - 1
-                        csv_name   = f"Ontel_{project_did}_chunk_{chunk_start}_{chunk_end}.csv"
-                        zf.writestr(csv_name, rows_to_csv_bytes(chunk))
-                        chunk_start = chunk_end + 1
-                        chunk_num  += 1
-
-            # Flush remaining rows as final (partial) chunk
-            if pending:
-                chunk_end = chunk_start + len(pending) - 1
+            for i in range(0, len(rows), CHUNK_SIZE):
+                chunk     = rows[i:i + CHUNK_SIZE]
+                chunk_end = chunk_start + len(chunk) - 1
                 csv_name  = f"Ontel_{project_did}_chunk_{chunk_start}_{chunk_end}.csv"
-                zf.writestr(csv_name, rows_to_csv_bytes(pending))
-                chunk_num += 1
+                zf.writestr(csv_name, rows_to_csv_bytes(chunk))
+                chunk_start = chunk_end + 1
+                chunk_num  += 1
 
-            project_data[ts_label] = xlsx_rows
+            # Collect for XLSX
+            project_data[ts_label] = [
+                [record[col] if record[col] is not None else "" for col in CSV_COLUMNS]
+                for record in rows
+            ]
+
             total_rows += proj_rows_count
             summary.append((project_name, project_did, proj_rows_count, chunk_num))
             print(
                 f"{ts_label}: {proj_rows_count:>9,} rows  "
                 f"{chunk_num} chunk(s)  ({time.time() - t_proj:.1f}s)"
             )
-
-    await conn.close()
 
     csv_size_mb = csv_zip_path.stat().st_size / (1024 * 1024)
     elapsed     = time.time() - t_start

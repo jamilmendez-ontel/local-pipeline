@@ -61,11 +61,20 @@ jobs:
             python -u main.py --pipeline timer
           }
 
+      - name: Decode shared Drive token
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
+
       - name: Export timer data
         working-directory: scripts-reference
         run: |
           echo "Timer pipeline succeeded — running export..."
           python -u export_timer_excel.py
+
+      - name: Upload timer to shared Drive
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u upload_to_shared_drive.py --export timer
 
       - name: Timer corrections - apply pending
         working-directory: ${{ env.PIPELINE_DIR }}

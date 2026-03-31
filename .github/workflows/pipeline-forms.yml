@@ -60,11 +60,20 @@ jobs:
             python -u main.py --pipeline forms
           }
 
+      - name: Decode shared Drive token
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
+
       - name: Export QA form data
         working-directory: scripts-reference
         run: |
           echo "Forms pipeline succeeded — running export..."
           python -u export_qa_form_excel.py
+
+      - name: Upload QA forms to shared Drive
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u upload_to_shared_drive.py --export qa_form
 
       - name: Upload logs on failure
         if: failure()
