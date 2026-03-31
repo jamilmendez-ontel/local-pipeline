@@ -2,15 +2,17 @@
 Upload latest export files to a shared Google Drive folder.
 
 Finds the most recent exports and uploads them to subfolders:
-  Asset Tasks/ — CSV chunk files (50K rows each, extracted from ZIP)
-  Timer Data/  — per-project Excel files + duplicates
-  QA Forms/    — per-project CSVs (converted from XLSX)
+  Ontel Snapshot/    — Asset task CSV chunks (50K rows each, extracted from ZIP)
+  Timer Data/        — per-project Excel files (TimeData only)
+  QA Forms/          — per-project CSVs (converted from XLSX)
+  Home Screen Data/  — User priorities Excel (My Tasks)
 
 Usage:
     python upload_to_shared_drive.py                       # all exports
-    python upload_to_shared_drive.py --export asset_tasks   # asset tasks only
-    python upload_to_shared_drive.py --export timer         # timer only
-    python upload_to_shared_drive.py --export qa_form       # QA forms only
+    python upload_to_shared_drive.py --export asset_tasks       # asset tasks only
+    python upload_to_shared_drive.py --export timer             # timer only
+    python upload_to_shared_drive.py --export qa_form           # QA forms only
+    python upload_to_shared_drive.py --export user_priorities   # user priorities only
 """
 
 import argparse
@@ -70,8 +72,9 @@ def authenticate_shared_drive():
     return build("drive", "v3", credentials=creds)
 
 # Export output directories
-TIMER_DIR       = SCRIPT_DIR / "data_sample" / "timer_exports"
-QA_FORM_DIR     = SCRIPT_DIR / "data_sample" / "qa_form_exports"
+TIMER_DIR            = SCRIPT_DIR / "data_sample" / "timer_exports"
+QA_FORM_DIR          = SCRIPT_DIR / "data_sample" / "qa_form_exports"
+USER_PRIORITIES_DIR  = SCRIPT_DIR / "data_sample" / "user_priorities_exports"
 
 
 def find_latest_asset_tasks():
@@ -153,6 +156,18 @@ def find_latest_qa_form():
     return converted
 
 
+def find_latest_user_priorities():
+    """Find the latest My Tasks export file."""
+    if not USER_PRIORITIES_DIR.exists():
+        return []
+    pattern = re.compile(r"^My Tasks \d{2}-\d{2}-\d{4}\.xlsx$")
+    candidates = [f for f in USER_PRIORITIES_DIR.iterdir() if pattern.match(f.name)]
+    if not candidates:
+        return []
+    latest = max(candidates, key=lambda f: f.stat().st_mtime)
+    return [latest]
+
+
 def get_or_create_subfolder(drive_service, parent_id, folder_name):
     """Find or create a subfolder inside the parent folder."""
     result = drive_service.files().list(
@@ -223,7 +238,7 @@ def main():
     )
     parser.add_argument(
         "--export",
-        choices=["asset_tasks", "timer", "qa_form"],
+        choices=["asset_tasks", "timer", "qa_form", "user_priorities"],
         help="Upload only a specific export (default: all)",
     )
     args = parser.parse_args()
@@ -245,6 +260,10 @@ def main():
     if choice in (None, "qa_form"):
         files = find_latest_qa_form()
         total += upload_export(drive_service, "QA Forms", files)
+
+    if choice in (None, "user_priorities"):
+        files = find_latest_user_priorities()
+        total += upload_export(drive_service, "Home Screen Data", files)
 
     print(f"\nDone: {total} file(s) uploaded in {time.time() - t0:.1f}s")
 

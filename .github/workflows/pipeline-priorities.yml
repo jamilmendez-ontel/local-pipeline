@@ -51,6 +51,10 @@ jobs:
           echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
 
+      - name: Decode shared Drive token
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
+
       - name: Run user_priorities pipeline (with retry)
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
@@ -59,6 +63,17 @@ jobs:
             sleep 120
             python -u main.py --pipeline user_priorities
           }
+
+      - name: Export user priorities
+        working-directory: scripts-reference
+        run: |
+          echo "User priorities pipeline succeeded — running export..."
+          python -u export_user_priorities_excel.py --no-upload
+
+      - name: Upload user priorities to shared Drive
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u upload_to_shared_drive.py --export user_priorities
 
       - name: Upload logs on failure
         if: failure()
