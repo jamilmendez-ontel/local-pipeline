@@ -219,13 +219,37 @@ def upload_file(drive_service, folder_id, file_path):
     print(f"  {action}: {filename} ({size_mb:.1f} MB)")
 
 
-def upload_export(drive_service, subfolder_name, files):
+def clear_folder(drive_service, folder_id):
+    """Delete all files inside a Drive folder (skips files we don't own)."""
+    from googleapiclient.errors import HttpError
+
+    result = drive_service.files().list(
+        q=f"'{folder_id}' in parents and trashed = false",
+        fields="files(id, name)",
+        pageSize=1000,
+    ).execute()
+    files = result.get("files", [])
+    if not files:
+        return
+    deleted = 0
+    for f in files:
+        try:
+            drive_service.files().delete(fileId=f["id"]).execute()
+            deleted += 1
+        except HttpError:
+            pass  # skip files we don't have permission to delete
+    print(f"  Cleared {deleted} old file(s)" + (f" ({len(files) - deleted} skipped)" if deleted < len(files) else ""))
+
+
+def upload_export(drive_service, subfolder_name, files, clear_first=False):
     """Upload a group of files to a subfolder in the shared Drive folder."""
     if not files:
         print(f"\n{subfolder_name}: No files found — skipping")
         return 0
 
     folder_id = get_or_create_subfolder(drive_service, SHARED_FOLDER_ID, subfolder_name)
+    if clear_first:
+        clear_folder(drive_service, folder_id)
     print(f"\n{subfolder_name}: {len(files)} file(s)")
     for f in files:
         upload_file(drive_service, folder_id, f)
@@ -251,19 +275,19 @@ def main():
 
     if choice in (None, "asset_tasks"):
         files = find_latest_asset_tasks()
-        total += upload_export(drive_service, "Ontel Snapshot", files)
+        total += upload_export(drive_service, "Ontel Snapshot", files, clear_first=True)
 
     if choice in (None, "timer"):
         files = find_latest_timer()
-        total += upload_export(drive_service, "Timer Data", files)
+        total += upload_export(drive_service, "Timer Data", files, clear_first=True)
 
     if choice in (None, "qa_form"):
         files = find_latest_qa_form()
-        total += upload_export(drive_service, "QA Forms", files)
+        total += upload_export(drive_service, "QA Forms", files, clear_first=True)
 
     if choice in (None, "user_priorities"):
         files = find_latest_user_priorities()
-        total += upload_export(drive_service, "Home Screen Data", files)
+        total += upload_export(drive_service, "Home Screen Data", files, clear_first=True)
 
     print(f"\nDone: {total} file(s) uploaded in {time.time() - t0:.1f}s")
 
