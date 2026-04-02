@@ -1132,6 +1132,7 @@ def run_remind(test_mode: bool = False):
             f"""SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews
                 WHERE status IN ('pending', 'notified')
                   AND notified_at IS NOT NULL
+                  AND notified_at < NOW() - INTERVAL '{REMINDER_AFTER_DAYS} days'
                   AND (last_reminder_at IS NULL
                        OR last_reminder_at < NOW() - INTERVAL '20 hours')
             """,
