@@ -54,6 +54,26 @@ logger = get_logger("timer_correction")
 TZ_EASTERN = ZoneInfo("America/New_York")
 
 
+def _entries_to_jsonb(entries):
+    """Prepare entries list for asyncpg JSONB column.
+
+    Ensures all values are JSON-serializable (no datetime objects).
+    asyncpg's JSONB codec handles json.dumps internally.
+    """
+    serializable = []
+    for e in entries:
+        item = {}
+        for k, v in e.items():
+            if isinstance(v, datetime):
+                item[k] = v.isoformat()
+            elif v is None:
+                item[k] = None
+            else:
+                item[k] = str(v) if not isinstance(v, str) else v
+        serializable.append(item)
+    return serializable
+
+
 def _first_name(email):
     """Extract first name from email for greeting.
 
@@ -623,7 +643,6 @@ def detect_and_track_duplicates(db, entries: list[dict]):
 
     # Insert new duplicate review records
     now = datetime.now(timezone.utc)
-    from timer_duplicate_review import _entries_to_jsonb
 
     for g in new_groups:
         entries_json = _entries_to_jsonb(g["entries"])
