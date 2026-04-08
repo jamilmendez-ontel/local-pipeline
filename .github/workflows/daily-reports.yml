@@ -1,0 +1,105 @@
+name: "Pipeline: Daily Reports"
+
+on:
+  schedule:
+    # Daily: timers only (last 3 days) — runs at 6 AM UTC (1 AM EST)
+    - cron: "0 6 * * *"
+    # Bi-monthly requirements: 2nd-5th and 17th-20th of each month
+    - cron: "30 6 2-5,17-20 * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - requirements
+          - full
+      days:
+        description: "Days to look back (for daily mode)"
+        required: false
+        default: "3"
+
+concurrency:
+  group: daily-reports
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  daily-reports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          DOTENV
+          echo "SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}" >> .env
+          echo "SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}" >> .env
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Determine run mode
+        id: mode
+        run: |
+          DAY=$(date -u +%d)
+          MODE="${{ github.event.inputs.mode || '' }}"
+          DAYS="${{ github.event.inputs.days || '3' }}"
+
+          if [ -n "$MODE" ]; then
+            # Manual trigger — use specified mode
+            echo "mode=$MODE" >> $GITHUB_OUTPUT
+            echo "days=$DAYS" >> $GITHUB_OUTPUT
+          elif [ "$DAY" -ge 2 ] && [ "$DAY" -le 5 ] || [ "$DAY" -ge 17 ] && [ "$DAY" -le 20 ]; then
+            # Bi-monthly window — run requirements for the period
+            echo "mode=requirements" >> $GITHUB_OUTPUT
+            echo "days=3" >> $GITHUB_OUTPUT
+          else
+            # Regular daily — timers only
+            echo "mode=daily" >> $GITHUB_OUTPUT
+            echo "days=$DAYS" >> $GITHUB_OUTPUT
+          fi
+          echo "Running mode: $(cat $GITHUB_OUTPUT | grep mode)"
+
+      - name: Run daily reports pipeline
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          MODE="${{ steps.mode.outputs.mode }}"
+          DAYS="${{ steps.mode.outputs.days }}"
+
+          if [ "$MODE" = "full" ]; then
+            python -u run_daily_reports.py --full
+          elif [ "$MODE" = "requirements" ]; then
+            python -u run_daily_reports.py --requirements
+          else
+            python -u run_daily_reports.py --daily --days "$DAYS"
+          fi
