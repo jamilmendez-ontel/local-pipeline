@@ -61,7 +61,7 @@ def check_period_complete(period_start, period_end):
             f"  COUNT(*) FILTER (WHERE task_status = 'approved') AS approved, "
             f"  COUNT(*) FILTER (WHERE task_status = 'cancelled') AS cancelled, "
             f"  COUNT(*) FILTER (WHERE task_status NOT IN ('approved', 'cancelled')) AS remaining "
-            f"FROM {SCHEMA_STAGING}.stg_daily_report_tasks "
+            f"FROM {SCHEMA_STAGING}.stg_daily_reports "
             f"WHERE work_date >= $1 AND work_date <= $2",
             period_start, period_end,
         ),

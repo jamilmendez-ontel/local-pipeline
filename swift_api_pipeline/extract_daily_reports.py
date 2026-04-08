@@ -278,7 +278,7 @@ class DailyReportsPipeline:
             chunk = stg_batch[i:i + BATCH_SIZE]
             retry_db(
                 lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_tasks "
+                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_reports "
                     f"(emp_id, asset_name, asset_did, project_did, work_date, task_did, task_status, "
                     f" req_count, milestone, submitted_by, submitted_on, approved_by, approved_on, run_id) "
                     f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid) "
@@ -355,7 +355,7 @@ class DailyReportsPipeline:
             chunk = req_stg_batch[i:i + BATCH_SIZE]
             retry_db(
                 lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_requirements "
+                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_hours "
                     f"(emp_id, work_date, task_did, hours_worked, work_description, "
                     f" req_status, req_id, created_at_api, updated_at_api, run_id) "
                     f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) "
@@ -403,7 +403,7 @@ class DailyReportsPipeline:
             chunk = tmr_stg_batch[i:i + BATCH_SIZE]
             retry_db(
                 lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_timers "
+                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_attendance "
                     f"(emp_id, work_date, task_did, timer_id, timer_start, timer_end, "
                     f" duration_min, user_name, user_auth_id, run_id) "
                     f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) "
