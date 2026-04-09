@@ -135,6 +135,33 @@ WHERE work_date = CURRENT_DATE - 1
 ORDER BY employee_name;
 ```
 
+**"Who was absent yesterday?"** — compare active employees vs who worked, then check leave calendar for reason. Join leave calendar on `nickname` (leave calendar uses first names/nicknames like "Hajie", "Quino", not full names).
+```sql
+WITH worked AS (
+  SELECT DISTINCT emp_id FROM analytics.v_daily_reports
+  WHERE work_date = CURRENT_DATE - 1
+    AND (clock_in_et IS NOT NULL OR hours_worked > 0)
+),
+absent AS (
+  SELECT e.emp_id, e.full_name, e.nickname, e.role2, e.cluster
+  FROM reference.ref_employees e
+  WHERE e.is_active = true
+    AND e.emp_id NOT IN (SELECT emp_id FROM worked)
+    AND e.effective_date = (
+      SELECT MAX(e2.effective_date) FROM reference.ref_employees e2
+      WHERE e2.emp_id = e.emp_id AND e2.effective_date <= CURRENT_DATE - 1
+    )
+)
+SELECT a.full_name, a.role2, a.cluster,
+  COALESCE(l.leave_type, 'Unknown') AS reason, l.person_note
+FROM absent a
+LEFT JOIN analytics.v_calendar_leave_daily l
+  ON l.leave_date = CURRENT_DATE - 1
+  AND (LOWER(l.person) = LOWER(a.nickname)
+       OR LOWER(l.person) = LOWER(split_part(a.full_name, ' ', 1)))
+ORDER BY a.full_name;
+```
+
 **"Show TAS vs TA productivity this month"** (target only meaningful for TA/TAS)
 ```sql
 SELECT role2, COUNT(DISTINCT emp_id) AS employees,
