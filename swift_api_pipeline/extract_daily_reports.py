@@ -122,14 +122,16 @@ class DailyReportsPipeline:
     def fetch_assets(self, project_did):
         """Fetch all assets (employees) for a project."""
         assets = []
-        page = 1
+        page = 0
+        page_size = 1000
         while True:
             data = self._request(
                 f"{self.base}/api/projects/{project_did}/assets",
-                params={"page": page},
+                params={"page": page, "pageSize": page_size},
             )
-            assets.extend(data.get("list", []))
-            if not data.get("hasMore"):
+            rows = data.get("list", [])
+            assets.extend(rows)
+            if not rows or len(rows) < page_size:
                 break
             page += 1
         return assets
@@ -137,14 +139,16 @@ class DailyReportsPipeline:
     def fetch_tasks(self, asset_project_id):
         """Fetch all tasks (dates) for one employee."""
         tasks = []
-        page = 1
+        page = 0
+        page_size = 1000
         while True:
             data = self._request(
                 f"{self.base}/api/asset-projects/{asset_project_id}/asset-tasks",
-                params={"page": page},
+                params={"page": page, "pageSize": page_size},
             )
-            tasks.extend(data.get("list", []))
-            if not data.get("hasMore"):
+            rows = data.get("list", [])
+            tasks.extend(rows)
+            if not rows or len(rows) < page_size:
                 break
             page += 1
         return tasks
@@ -195,13 +199,17 @@ class DailyReportsPipeline:
         def process_employee(asset_info):
             tasks = self.fetch_tasks(asset_info["asset_project_id"])
             parsed = []
+            today = date.today()
             for t in tasks:
                 if t.get("collection") == "milestones":
                     continue
                 work_date = parse_work_date(t.get("name"))
-                # Filter by date range
+                # Skip future dates — they're empty placeholders
+                if work_date and work_date > today:
+                    continue
+                # Filter by date range for daily mode
                 if not full and days and work_date:
-                    cutoff = date.today() - timedelta(days=days)
+                    cutoff = today - timedelta(days=days)
                     if work_date < cutoff:
                         continue
                 parsed.append({
