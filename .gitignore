@@ -53,3 +53,22 @@ scripts-reference/sales_reference/
 pipeline-timing-*.md
 presentation/~$*
 presentation/*.html
+presentation/*.pptx
+presentation/*.py
+
+# Temp/utility scripts (prefixed with _)
+swift_api_pipeline/_*.py
+swift_api_pipeline/gen_test.py
+
+# Schema metadata exports
+swift_api_pipeline/docs/*.xlsx
+
+# Migration helpers
+swift_api_pipeline/migrations/apply_*.py
+swift_api_pipeline/migrations/export_*.py
+
+# Validation scripts
+swift_api_pipeline/db_schema_validation.py
+
+# PowerShell scripts
+*.ps1
