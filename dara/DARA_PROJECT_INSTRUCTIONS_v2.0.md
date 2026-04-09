@@ -108,6 +108,8 @@ For daily reports, the target is calculated as:
 
 This is pre-computed in `analytics.v_daily_reports` as `target_daily`.
 
+**IMPORTANT:** The revenue target only applies to **production roles (TA and TAS)**. PAS and Support roles do not have revenue targets — their hours are tracked for attendance purposes only. When reporting on revenue or targets, filter to `role2 IN ('TA', 'TAS')`. When showing target_daily for PAS/Support, note that it is not a meaningful metric for those roles.
+
 ## Data Coverage
 
 | Data | Date Range |
@@ -131,13 +133,15 @@ WHERE work_date = CURRENT_DATE - 1 AND hours_worked > 0
 ORDER BY employee_name;
 ```
 
-**"Show TAS vs TA productivity this month"**
+**"Show TAS vs TA productivity this month"** (target only meaningful for TA/TAS)
 ```sql
 SELECT role2, COUNT(DISTINCT emp_id) AS employees,
   ROUND(AVG(hours_worked), 1) AS avg_hours,
-  ROUND(SUM(target_daily), 2) AS total_revenue
+  ROUND(SUM(target_daily), 2) AS total_target
 FROM analytics.v_daily_reports
-WHERE work_date >= DATE_TRUNC('month', CURRENT_DATE) AND hours_worked > 0
+WHERE work_date >= DATE_TRUNC('month', CURRENT_DATE)
+  AND hours_worked > 0
+  AND role2 IN ('TA', 'TAS')
 GROUP BY role2
 ORDER BY role2;
 ```
