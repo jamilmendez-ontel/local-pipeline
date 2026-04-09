@@ -222,10 +222,15 @@ class DailyReportsPipeline:
 
         logger.info(f"  Total: {len(all_tasks)} tasks")
 
-        # Filter to tasks with requirements (have data)
+        # Split tasks for Step 4:
+        # - Requirements: only fetch for tasks with req_count > 0
+        # - Timers: fetch for ALL non-pending/cancelled tasks (timer exists even without requirements)
         tasks_with_reqs = [t for t in all_tasks if t["task"].get("metrics", {}).get("reqCount", 0) > 0]
-        tasks_without_reqs = [t for t in all_tasks if t["task"].get("metrics", {}).get("reqCount", 0) == 0]
-        logger.info(f"  With requirements: {len(tasks_with_reqs)}, Without: {len(tasks_without_reqs)}")
+        tasks_for_timers = [t for t in all_tasks
+                           if t["task"].get("status") not in ("pending", "cancelled")
+                           or t["task"].get("metrics", {}).get("reqCount", 0) > 0]
+        logger.info(f"  With requirements: {len(tasks_with_reqs)}")
+        logger.info(f"  For timer fetch: {len(tasks_for_timers)}")
 
         # Step 3: Load tasks to raw + staging (batch)
         logger.info(f"\n=== Step 3: Loading {len(all_tasks)} tasks to Supabase ===")
@@ -295,44 +300,53 @@ class DailyReportsPipeline:
 
         logger.info(f"  Loaded {len(stg_batch)} tasks")
 
-        # Step 4: Fetch requirements + timers (threaded), then batch load
-        if timers_only:
-            logger.info(f"\n=== Step 4: Fetching TIMERS ONLY for {len(tasks_with_reqs)} tasks ===")
-        elif requirements_only:
-            logger.info(f"\n=== Step 4: Fetching REQUIREMENTS ONLY for {len(tasks_with_reqs)} tasks ===")
-        else:
-            logger.info(f"\n=== Step 4: Fetching requirements + timers for {len(tasks_with_reqs)} tasks ===")
-
-        # Fetch all from API first (threaded)
+        # Step 4: Fetch requirements and timers separately
         all_reqs = []
         all_timers = []
-        done = 0
 
-        def fetch_rt(task_info):
-            ai = task_info["asset_info"]
-            task = task_info["task"]
-            wd = task_info["work_date"]
-            task_did = task.get("id", "")
-            reqs, timers = self.fetch_requirement_and_timer(
-                task_did, timers_only=timers_only, requirements_only=requirements_only
-            )
-            return ai, wd, task_did, reqs, timers
+        # 4a: Fetch requirements (if not timers_only)
+        if not timers_only and tasks_with_reqs:
+            logger.info(f"\n=== Step 4a: Fetching REQUIREMENTS for {len(tasks_with_reqs)} tasks ===")
+            done = 0
+            def fetch_reqs(task_info):
+                ai = task_info["asset_info"]
+                wd = task_info["work_date"]
+                task_did = task_info["task"].get("id", "")
+                reqs, _ = self.fetch_requirement_and_timer(task_did, requirements_only=True)
+                return ai, wd, task_did, reqs
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(fetch_reqs, t): t for t in tasks_with_reqs}
+                for future in as_completed(futures, timeout=7200):
+                    ai, wd, task_did, reqs = future.result()
+                    for r in reqs:
+                        all_reqs.append((ai, wd, task_did, r))
+                    done += 1
+                    if done % 500 == 0:
+                        logger.info(f"  Reqs: {done}/{len(tasks_with_reqs)} tasks | {len(all_reqs)} reqs")
+            logger.info(f"  Requirements fetched: {len(all_reqs)}")
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(fetch_rt, t): t for t in tasks_with_reqs}
-            for future in as_completed(futures, timeout=7200):
-                ai, wd, task_did, reqs, timers = future.result()
+        # 4b: Fetch timers (if not requirements_only) — for ALL active tasks
+        if not requirements_only and tasks_for_timers:
+            logger.info(f"\n=== Step 4b: Fetching TIMERS for {len(tasks_for_timers)} tasks ===")
+            done = 0
+            def fetch_tmrs(task_info):
+                ai = task_info["asset_info"]
+                wd = task_info["work_date"]
+                task_did = task_info["task"].get("id", "")
+                _, timers = self.fetch_requirement_and_timer(task_did, timers_only=True)
+                return ai, wd, task_did, timers
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(fetch_tmrs, t): t for t in tasks_for_timers}
+                for future in as_completed(futures, timeout=7200):
+                    ai, wd, task_did, timers = future.result()
+                    for t in timers:
+                        all_timers.append((ai, wd, task_did, t))
+                    done += 1
+                    if done % 500 == 0:
+                        logger.info(f"  Timers: {done}/{len(tasks_for_timers)} tasks | {len(all_timers)} timers")
+            logger.info(f"  Timers fetched: {len(all_timers)}")
 
-                for r in reqs:
-                    all_reqs.append((ai, wd, task_did, r))
-                for t in timers:
-                    all_timers.append((ai, wd, task_did, t))
-
-                done += 1
-                if done % 500 == 0:
-                    logger.info(f"  Fetched {done}/{len(tasks_with_reqs)} tasks | {len(all_reqs)} reqs | {len(all_timers)} timers")
-
-        logger.info(f"  Fetched all: {len(all_reqs)} reqs, {len(all_timers)} timers")
+        logger.info(f"  Total: {len(all_reqs)} reqs, {len(all_timers)} timers")
 
         # Batch load requirements
         logger.info("  Loading requirements...")
