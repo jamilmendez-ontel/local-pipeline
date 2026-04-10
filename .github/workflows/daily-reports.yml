@@ -2,10 +2,10 @@ name: "Pipeline: Daily Reports"
 
 on:
   schedule:
-    # Daily: timers only (last 3 days) — runs at 6 AM UTC (1 AM EST)
-    - cron: "0 6 * * *"
+    # Daily: timers only (last 3 days) — runs at 5:10 AM UTC (12:10 AM EST)
+    - cron: "10 5 * * *"
     # Bi-monthly requirements: 2nd-5th and 17th-20th of each month
-    - cron: "30 6 2-5,17-20 * *"
+    - cron: "40 5 2-5,17-20 * *"
   workflow_dispatch:
     inputs:
       mode:
