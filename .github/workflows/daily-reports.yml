@@ -1,11 +1,8 @@
 name: "Pipeline: Daily Reports"
 
 on:
-  schedule:
-    # Daily: timers only (last 3 days) — runs at 5:10 AM UTC (12:10 AM EST)
-    - cron: "10 5 * * *"
-    # Bi-monthly requirements: 2nd-5th and 17th-20th of each month
-    - cron: "40 5 2-5,17-20 * *"
+  repository_dispatch:
+    types: [daily-reports]
   workflow_dispatch:
     inputs:
       mode:
@@ -72,11 +69,12 @@ jobs:
         id: mode
         run: |
           DAY=$(date -u +%d)
-          MODE="${{ github.event.inputs.mode || '' }}"
-          DAYS="${{ github.event.inputs.days || '3' }}"
+          # repository_dispatch passes mode in client_payload, workflow_dispatch in inputs
+          MODE="${{ github.event.client_payload.mode || github.event.inputs.mode || '' }}"
+          DAYS="${{ github.event.client_payload.days || github.event.inputs.days || '3' }}"
 
           if [ -n "$MODE" ]; then
-            # Manual trigger — use specified mode
+            # Explicit mode from dispatch or manual trigger
             echo "mode=$MODE" >> $GITHUB_OUTPUT
             echo "days=$DAYS" >> $GITHUB_OUTPUT
           elif [ "$DAY" -ge 2 ] && [ "$DAY" -le 5 ] || [ "$DAY" -ge 17 ] && [ "$DAY" -le 20 ]; then
