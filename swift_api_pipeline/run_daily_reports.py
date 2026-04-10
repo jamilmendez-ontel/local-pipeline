@@ -17,6 +17,10 @@ import sys
 from datetime import date, timedelta
 
 from config import SCHEMA_STAGING, get_logger, get_db, close_db, retry_db, setup_logging
+from main import run_pipeline_with_notification
+
+# Unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
 
 setup_logging()
 logger = get_logger("run_daily_reports")
@@ -198,14 +202,36 @@ def main():
     group.add_argument("--requirements", action="store_true", help="Requirements for current bi-monthly period")
     group.add_argument("--full", action="store_true", help="Full extract")
     parser.add_argument("--days", type=int, default=3, help="Days to look back (daily mode)")
+    parser.add_argument("--no-email", action="store_true", help="Suppress email notification")
     args = parser.parse_args()
 
+    send_email = not args.no_email
+    recipients = ["jamil.mendez@ontel.co"]
+
     if args.daily:
-        run_daily(days=args.days)
+        run_pipeline_with_notification(
+            lambda: run_daily(days=args.days),
+            "Daily Reports",
+            send_email=send_email,
+            logger_prefixes=["pipeline.daily_reports", "pipeline.run_daily_reports", "pipeline.base", "pipeline.db"],
+            recipients=recipients,
+        )
     elif args.requirements:
-        run_requirements()
+        run_pipeline_with_notification(
+            run_requirements,
+            "Daily Reports",
+            send_email=send_email,
+            logger_prefixes=["pipeline.daily_reports", "pipeline.run_daily_reports", "pipeline.base", "pipeline.db"],
+            recipients=recipients,
+        )
     elif args.full:
-        run_full()
+        run_pipeline_with_notification(
+            run_full,
+            "Daily Reports",
+            send_email=send_email,
+            logger_prefixes=["pipeline.daily_reports", "pipeline.run_daily_reports", "pipeline.base", "pipeline.db"],
+            recipients=recipients,
+        )
 
 
 if __name__ == "__main__":

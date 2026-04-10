@@ -75,6 +75,12 @@ PIPELINE_TABLES = {
         ("data_raw", "raw_timer_discrepancies"),
         ("data_staging", "stg_timer_discrepancies"),
     ],
+    "Daily Reports": [
+        ("data_raw", "raw_daily_reports"),
+        ("data_staging", "stg_daily_reports"),
+        ("data_staging", "stg_daily_report_hours"),
+        ("data_staging", "stg_daily_report_attendance"),
+    ],
 }
 
 # All unique tables across all pipelines (for --extract / --transform modes)
