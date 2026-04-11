@@ -34,12 +34,13 @@ function triggerOrgs() {
 }
 
 /**
- * Trigger all three light pipelines with staggered timing.
+ * Trigger all light pipelines with staggered timing.
  * Schedule this at 12:09 AM EST daily.
  *
  * 12:09 AM — Timer fires immediately
  * 12:13 AM — User Priorities (4 min delay)
  * 12:17 AM — QA Forms (8 min delay from start)
+ * 12:21 AM — Timer Discrepancies (12 min delay from start)
  *
  * Note: Apps Script time-driven triggers have ±1 min jitter, but the
  * relative spacing between dispatches is exact.
@@ -57,6 +58,19 @@ function triggerLightPipelines() {
   // QA Forms — 4 min after priorities (8 min after timer)
   Utilities.sleep(4 * 60 * 1000);
   fireDispatch_('pipeline-forms');
+  Logger.log('Waiting 4 minutes before triggering timer discrepancies...');
+
+  // Timer Discrepancies — 4 min after forms (12 min after timer)
+  Utilities.sleep(4 * 60 * 1000);
+  fireDispatch_('pipeline-timer-discrepancies');
+}
+
+/**
+ * Trigger calendar leave pipeline.
+ * Schedule this at 12:30 AM EST daily (separate trigger).
+ */
+function triggerCalendarLeave() {
+  fireDispatch_('pipeline-calendar-leave');
 }
 
 /**
@@ -104,5 +118,7 @@ function testAllDispatches() {
   fireDispatch_('pipeline-timer');
   fireDispatch_('pipeline-priorities');
   fireDispatch_('pipeline-forms');
-  Logger.log('All 4 dispatches fired — check GitHub Actions.');
+  fireDispatch_('pipeline-timer-discrepancies');
+  fireDispatch_('pipeline-calendar-leave');
+  Logger.log('All 6 dispatches fired — check GitHub Actions.');
 }

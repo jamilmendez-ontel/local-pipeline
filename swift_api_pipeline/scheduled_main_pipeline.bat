@@ -1,9 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 REM Swift API Pipeline - Nightly Local Run (12:01 AM)
-REM Runs: asset_tasks -> backfill -> analytics -> timer discrepancies -> exports
-REM Light pipelines (orgs, timer, user_priorities, forms) run on GitHub Actions.
+REM Runs: asset_tasks -> backfill -> analytics -> dispatch GHA (export + timer discrepancies)
+REM All other pipelines run on GitHub Actions.
 REM Each step retries once after 5 min on failure.
+REM Requires GITHUB_TOKEN environment variable (fine-grained PAT) for GHA dispatch.
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
@@ -36,7 +37,7 @@ if !EXIT_CODE! NEQ 0 (
 
 if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] asset_tasks FAILED after retry - skipping backfill and analytics >> "%LOGFILE%"
-    goto :timer_discrepancies
+    goto :dispatch
 )
 
 REM === 2. Asset DID Backfill ===
@@ -67,31 +68,11 @@ if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] analytics retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
 )
 
-REM === 4. Timer Discrepancies (independent, always runs) ===
-:timer_discrepancies
-echo [%date% %time%] Starting timer discrepancies extract >> "%LOGFILE%"
-"%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOGFILE%" 2>&1
-set EXIT_CODE=!ERRORLEVEL!
-echo [%date% %time%] Timer discrepancies finished with exit code !EXIT_CODE! >> "%LOGFILE%"
-
-if !EXIT_CODE! NEQ 0 (
-    echo [%date% %time%] Timer discrepancies FAILED - retrying after 5 minutes >> "%LOGFILE%"
-    timeout /t 300 /nobreak > nul
-    "%VENV_PYTHON%" -u extract_timer_discrepancies.py >> "%LOGFILE%" 2>&1
-    echo [%date% %time%] Timer discrepancies retry finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
-)
-
-REM === 5. Asset Tasks Excel Export ===
-set EXPORT_SCRIPT=%SCRIPT_DIR%..\scripts-reference\export_asset_tasks_excel.py
-echo [%date% %time%] Starting asset tasks Excel export >> "%LOGFILE%"
-"%VENV_PYTHON%" -u "%EXPORT_SCRIPT%" >> "%LOGFILE%" 2>&1
-echo [%date% %time%] Excel export finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
-
-REM === 6. Upload Asset Tasks to Shared Drive ===
-set UPLOAD_SCRIPT=%SCRIPT_DIR%..\scripts-reference\upload_to_shared_drive.py
-echo [%date% %time%] Starting shared Drive upload (asset_tasks) >> "%LOGFILE%"
-"%VENV_PYTHON%" -u "%UPLOAD_SCRIPT%" --export asset_tasks >> "%LOGFILE%" 2>&1
-echo [%date% %time%] Shared Drive upload finished with exit code !ERRORLEVEL! >> "%LOGFILE%"
+REM === 4. Dispatch asset tasks export + timer discrepancies to GHA ===
+:dispatch
+echo [%date% %time%] Dispatching asset tasks export to GitHub Actions >> "%LOGFILE%"
+"%VENV_PYTHON%" -u -c "import requests,os; [requests.post('https://api.github.com/repos/jamilmendez-ontel/local-pipeline/dispatches', json={'event_type': t}, headers={'Authorization': f'Bearer {os.environ[\"GITHUB_TOKEN\"]}', 'Accept': 'application/vnd.github+json'}) for t in ['pipeline-asset-tasks-export', 'pipeline-timer-discrepancies']]" >> "%LOGFILE%" 2>&1
+echo [%date% %time%] GHA dispatches sent >> "%LOGFILE%"
 
 echo [%date% %time%] Nightly local pipeline run complete >> "%LOGFILE%"
 
