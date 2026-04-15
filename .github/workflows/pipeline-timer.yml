@@ -84,15 +84,13 @@ jobs:
       - name: Timer corrections - remind duplicates
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
-        # TODO: Remove --test flag once team is ready for production
         # Remind runs BEFORE send so it only covers previous days' duplicates
-        run: python -u timer_correction_review.py --remind --test
+        run: python -u timer_correction_review.py --remind
 
       - name: Timer corrections - send daily entries
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
-        # TODO: Remove --test flag once team is ready for production
-        run: python -u timer_correction_review.py --send --test
+        run: python -u timer_correction_review.py --send
 
       - name: Upload logs on failure
         if: failure()
