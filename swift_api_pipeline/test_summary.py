@@ -117,6 +117,30 @@ def test_groups_flags_duplicates():
     print("PASS test_groups_flags_duplicates")
 
 
+def test_groups_task_clean_absent_falls_back_to_task():
+    """Entries without task_clean key (matches get_previous_day_entries output) use task."""
+    t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
+    entry = {
+        "project": "ProjX",
+        "project_did": "did_1",
+        "user_email": "test@ontel.co",
+        "start_time": t,
+        "end_time": t + timedelta(minutes=60),
+        "duration_min": 60,
+        "site_name": "SITE_A",
+        "site_id": "sidA",
+        "task": "COP Review",
+        # intentionally no "task_clean" key — matches get_previous_day_entries() output shape
+    }
+
+    groups = _compute_summary_groups([entry])
+
+    assert len(groups) == 1
+    assert groups[0]["task"] == "COP Review", "should fall back to raw task"
+    assert groups[0]["total_duration_min"] == 60
+    print("PASS test_groups_task_clean_absent_falls_back_to_task")
+
+
 def test_groups_handles_null_project():
     """None project groups as empty string and still produces a row."""
     t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
@@ -140,5 +164,6 @@ if __name__ == "__main__":
     test_groups_sum_durations_same_task_site_project()
     test_groups_sort_by_duration_desc()
     test_groups_flags_duplicates()
+    test_groups_task_clean_absent_falls_back_to_task()
     test_groups_handles_null_project()
     print("\nAll tests passed.")

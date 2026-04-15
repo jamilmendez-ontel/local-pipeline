@@ -408,7 +408,7 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT DISTINCT project_did, project, user_email, start_time, end_time,
-                   duration_min, site_name, site_id, task
+                   duration_min, site_name, site_id, task, task_clean
             FROM {SCHEMA_STAGING}.stg_timer_activities
             WHERE DATE(start_time AT TIME ZONE 'America/New_York') = $1
             ORDER BY user_email, site_name, task, start_time
