@@ -294,6 +294,62 @@ def _fmt_duration(minutes) -> str:
     return f"{h}h {m}m" if m else f"{h}h"
 
 
+def _compute_summary_groups(entries: list[dict]) -> list[dict]:
+    """Aggregate timer entries by (task_clean, site_name, project).
+
+    Pure function. Takes the same shape of entry dicts that
+    `get_previous_day_entries()` returns. Returns one dict per distinct
+    (task_clean, site_name, project) combination, with per-group totals
+    and a boolean flag indicating whether the group contains any
+    duplicate entries (multiple rows sharing the full duplicate-detection
+    key). Sorted by total_duration_min descending, then task ascending.
+
+    Duplicate-detection key (matches detect_and_create_duplicate_reviews):
+        (project_did, user_email, start_time, site_name, site_id, task)
+    """
+    from collections import defaultdict
+
+    # Group by (task_clean, site_name, project).
+    buckets: dict[tuple, list[dict]] = defaultdict(list)
+    for e in entries:
+        task = e.get("task_clean") or e.get("task") or ""
+        key = (task, e.get("site_name") or "", e.get("project") or "")
+        buckets[key].append(e)
+
+    groups = []
+    for (task, site, project), rows in buckets.items():
+        # A group has duplicates iff any two rows share the full dup key.
+        seen_dup_keys: set[tuple] = set()
+        has_duplicates = False
+        for r in rows:
+            dup_key = (
+                r.get("project_did"),
+                r.get("user_email"),
+                r.get("start_time"),
+                r.get("site_name"),
+                r.get("site_id"),
+                r.get("task"),
+            )
+            if dup_key in seen_dup_keys:
+                has_duplicates = True
+                break
+            seen_dup_keys.add(dup_key)
+
+        total = sum(float(r.get("duration_min") or 0) for r in rows)
+
+        groups.append({
+            "task": task,
+            "site": site,
+            "project": project,
+            "entries": len(rows),
+            "total_duration_min": total,
+            "has_duplicates": has_duplicates,
+        })
+
+    groups.sort(key=lambda g: (-g["total_duration_min"], g["task"]))
+    return groups
+
+
 def _correct_form_url(entry_id: str, details: str) -> str:
     """Build a pre-filled Correction form URL."""
     base = f"https://docs.google.com/forms/d/e/{CORRECT_FORM_ID}/viewform"
