@@ -350,6 +350,75 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
     return groups
 
 
+def _build_summary_html(entries: list[dict]) -> str:
+    """Render the Daily Task Summary table for one tech's entries.
+
+    Returns an empty string when entries is empty so the caller can
+    unconditionally inline the result.
+
+    Styling mirrors the existing detail table (Arial 13px, 1px borders,
+    light header background). Rows flagged as containing duplicates get
+    a subtle yellow-tinted background and a red warning glyph in the
+    rightmost column.
+    """
+    groups = _compute_summary_groups(entries)
+    if not groups:
+        return ""
+
+    header_style = (
+        "padding:6px 10px;border:1px solid #bbb;background:#eef3fa;"
+        "text-align:left;font-size:13px;"
+    )
+    cell_style = "padding:6px 10px;border:1px solid #ccc;font-size:13px;"
+    warn_style = cell_style + "text-align:center;"
+    row_dup_bg = "background:#fffbe6;"  # subtle yellow for duplicate rows
+
+    html = [
+        '<table style="border-collapse:collapse;font-family:Arial,sans-serif;'
+        'margin:8px 0 16px;">',
+        "<tr>",
+        f'<th style="{header_style}">Task</th>',
+        f'<th style="{header_style}">Site</th>',
+        f'<th style="{header_style}">Project</th>',
+        f'<th style="{header_style}text-align:right;">Entries</th>',
+        f'<th style="{header_style}text-align:right;">Total</th>',
+        f'<th style="{header_style}text-align:center;">&#9888;</th>',
+        "</tr>",
+    ]
+
+    for g in groups:
+        row_style = f'style="{row_dup_bg}"' if g["has_duplicates"] else ""
+        dup_cell = (
+            '<span style="color:#c62828;">&#9888;</span>'
+            if g["has_duplicates"] else "&mdash;"
+        )
+        html.append(f"<tr {row_style}>")
+        html.append(f'<td style="{cell_style}">{_escape_html(g["task"])}</td>')
+        html.append(f'<td style="{cell_style}">{_escape_html(g["site"])}</td>')
+        html.append(f'<td style="{cell_style}">{_escape_html(g["project"])}</td>')
+        html.append(f'<td style="{cell_style}text-align:right;">{g["entries"]}</td>')
+        html.append(
+            f'<td style="{cell_style}text-align:right;">'
+            f'{_fmt_duration(g["total_duration_min"])}</td>'
+        )
+        html.append(f'<td style="{warn_style}">{dup_cell}</td>')
+        html.append("</tr>")
+
+    html.append("</table>")
+    return "".join(html)
+
+
+def _escape_html(value) -> str:
+    """Minimal HTML escape for cell values."""
+    if value is None:
+        return ""
+    s = str(value)
+    return (s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace('"', "&quot;"))
+
+
 def _correct_form_url(entry_id: str, details: str) -> str:
     """Build a pre-filled Correction form URL."""
     base = f"https://docs.google.com/forms/d/e/{CORRECT_FORM_ID}/viewform"

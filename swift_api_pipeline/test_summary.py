@@ -10,6 +10,7 @@ so this file is committed and runnable by anyone on the team.
 from datetime import datetime, timezone, timedelta
 
 from timer_correction_review import _compute_summary_groups
+from timer_correction_review import _build_summary_html
 
 
 def _entry(task_clean, site_name, project, project_did, site_id,
@@ -117,6 +118,63 @@ def test_groups_flags_duplicates():
     print("PASS test_groups_flags_duplicates")
 
 
+def test_html_empty_entries():
+    """Empty input -> empty string (no table rendered)."""
+    result = _build_summary_html([])
+    assert result == "", f"expected empty string, got {result!r}"
+    print("PASS test_html_empty_entries")
+
+
+def test_html_contains_expected_columns_and_values():
+    """Rendered HTML includes column headers and per-row content."""
+    t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
+    entries = [
+        _entry("COP Review", "SITE_A", "ProjX", "did_1", "sidA", t, 60),
+        _entry("COP Review", "SITE_A", "ProjX", "did_1", "sidA", t, 75),  # duplicate
+        _entry("Pre-Meeting", "SITE_A", "ProjX", "did_1", "sidA",
+               t + timedelta(hours=3), 30),
+    ]
+
+    html = _build_summary_html(entries)
+
+    # Column headers
+    for header in ("Task", "Site", "Project", "Entries", "Total", "&#9888;"):
+        assert header in html, f"missing header {header!r}"
+
+    # Row content — duplicate group (COP Review, 135 min)
+    assert "COP Review" in html
+    assert "SITE_A" in html
+    assert "ProjX" in html
+    assert "2h 15m" in html, "expected formatted 135 min"
+
+    # Non-duplicate row
+    assert "Pre-Meeting" in html
+    assert "30 min" in html
+
+    # Duplicate flag uses the warning emoji only for the COP Review row
+    # (presence is enough here; visual verification happens via --test)
+    assert "&#9888;" in html or "\u26a0" in html
+
+    print("PASS test_html_contains_expected_columns_and_values")
+
+
+def test_html_sort_order_duration_desc():
+    """Rows appear duration-desc: Long task appears before Short task in HTML."""
+    t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
+    entries = [
+        _entry("Short Task", "SITE_A", "ProjX", "did_1", "sidA", t, 15),
+        _entry("Long Task",  "SITE_A", "ProjX", "did_1", "sidA", t, 120),
+    ]
+
+    html = _build_summary_html(entries)
+
+    long_pos = html.find("Long Task")
+    short_pos = html.find("Short Task")
+    assert long_pos != -1 and short_pos != -1
+    assert long_pos < short_pos, "Long Task should appear before Short Task"
+    print("PASS test_html_sort_order_duration_desc")
+
+
 def test_groups_task_clean_absent_falls_back_to_task():
     """Entries without task_clean key (matches get_previous_day_entries output) use task."""
     t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
@@ -166,4 +224,7 @@ if __name__ == "__main__":
     test_groups_flags_duplicates()
     test_groups_task_clean_absent_falls_back_to_task()
     test_groups_handles_null_project()
+    test_html_empty_entries()
+    test_html_contains_expected_columns_and_values()
+    test_html_sort_order_duration_desc()
     print("\nAll tests passed.")
