@@ -609,6 +609,8 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                 <p>Hi {_first_name(user_email)},</p>
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
                    from <strong>{date_str}</strong>.</p>
+                <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Daily Task Summary</h3>
+                {_build_summary_html(user_entries)}
                 <ul style="font-size:13px;color:#555;margin:8px 0 16px;">
                     <li><strong style="color:#1565c0;">Edit</strong> — fix a wrong duration</li>
                     <li><strong style="color:#c62828;">Remove</strong> — delete a duplicate or incorrect entry</li>
