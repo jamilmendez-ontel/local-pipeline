@@ -42,6 +42,14 @@ logger = get_logger("timer_discrepancies")
 SPREADSHEET_ID = "12dBAGHlk-1qHB1p90bD5vnvQkiwkX2-TYhqwkEfEua4"
 LOAD_BATCH_SIZE = 500
 
+# Temporary email remaps — applied at normalize time so downstream matching
+# (discrepancy -> timer entry) succeeds. These users file discrepancies under
+# one address but have their Swift timer activity recorded under another.
+# Pending a long-term fix that handles alias accounts properly.
+EMAIL_REMAP = {
+    "ton@ontel.co": "ronald@ontel.co",
+}
+
 # Column header mappings (raw header -> staging column)
 _HEADER_MAP = {
     "Timestamp": "submission_timestamp",
@@ -261,10 +269,14 @@ def transform_row(headers: list[str], row: list[str], row_number: int, run_id: s
     for header, col_name in _HEADER_MAP.items():
         mapped[col_name] = raw.get(header, "")
 
+    ontel_email = (mapped.get("ontel_email") or "").lower() or None
+    if ontel_email in EMAIL_REMAP:
+        ontel_email = EMAIL_REMAP[ontel_email]
+
     return {
         "submission_timestamp": _parse_timestamp(mapped.get("submission_timestamp", "")),
         "email_address": mapped.get("email_address") or None,
-        "ontel_email": (mapped.get("ontel_email") or "").lower() or None,
+        "ontel_email": ontel_email,
         "shift_schedule": mapped.get("shift_schedule") or None,
         "discrepancy_date": _parse_date(mapped.get("discrepancy_date", "")),
         "asset_name": mapped.get("asset_name") or None,
