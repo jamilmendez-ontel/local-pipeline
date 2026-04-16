@@ -73,6 +73,7 @@ def authenticate_shared_drive():
 
 # Export output directories
 TIMER_DIR            = SCRIPT_DIR / "data_sample" / "timer_exports"
+TIMER_CLEAN_DIR      = SCRIPT_DIR / "data_sample" / "timer_clean_exports"
 QA_FORM_DIR          = SCRIPT_DIR / "data_sample" / "qa_form_exports"
 USER_PRIORITIES_DIR  = SCRIPT_DIR / "data_sample" / "user_priorities_exports"
 
@@ -111,6 +112,22 @@ def find_latest_timer():
     by_date = {}
     for f in TIMER_DIR.iterdir():
         m = time_pat.match(f.name)
+        if m:
+            by_date.setdefault(m.group(1), []).append(f)
+    if not by_date:
+        return []
+    latest_date = max(by_date.keys())
+    return sorted(by_date[latest_date], key=lambda f: f.name)
+
+
+def find_latest_timer_clean():
+    """Find the latest clean timer export file."""
+    if not TIMER_CLEAN_DIR.exists():
+        return []
+    clean_pat = re.compile(r"^TimerCleanData_\d{6}_(\d{8})\.xlsx$")
+    by_date = {}
+    for f in TIMER_CLEAN_DIR.iterdir():
+        m = clean_pat.match(f.name)
         if m:
             by_date.setdefault(m.group(1), []).append(f)
     if not by_date:
@@ -262,7 +279,7 @@ def main():
     )
     parser.add_argument(
         "--export",
-        choices=["asset_tasks", "timer", "qa_form", "user_priorities"],
+        choices=["asset_tasks", "timer", "timer-clean", "qa_form", "user_priorities"],
         help="Upload only a specific export (default: all)",
     )
     args = parser.parse_args()
@@ -280,6 +297,10 @@ def main():
     if choice in (None, "timer"):
         files = find_latest_timer()
         total += upload_export(drive_service, "Timer Data", files, clear_first=True)
+
+    if choice in (None, "timer-clean"):
+        files = find_latest_timer_clean()
+        total += upload_export(drive_service, "Timer Clean Data", files, clear_first=True)
 
     if choice in (None, "qa_form"):
         files = find_latest_qa_form()

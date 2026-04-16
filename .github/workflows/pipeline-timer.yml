@@ -81,6 +81,16 @@ jobs:
         continue-on-error: true
         run: python -u timer_correction_review.py --apply
 
+      - name: Export clean timer data
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u export_timer_clean_excel.py
+
+      - name: Upload clean timer to shared Drive
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u upload_to_shared_drive.py --export timer-clean
+
       - name: Timer corrections - remind duplicates
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
