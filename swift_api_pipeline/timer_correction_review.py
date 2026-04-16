@@ -346,7 +346,7 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
             "has_duplicates": has_duplicates,
         })
 
-    groups.sort(key=lambda g: (-g["total_duration_min"], g["task"]))
+    groups.sort(key=lambda g: (g["project"], g["site"], g["task"]))
     return groups
 
 
@@ -377,25 +377,27 @@ def _build_summary_html(entries: list[dict]) -> str:
         '<table style="border-collapse:collapse;font-family:Arial,sans-serif;'
         'margin:8px 0 16px;">',
         "<tr>",
-        f'<th style="{header_style}">Task</th>',
-        f'<th style="{header_style}">Site</th>',
         f'<th style="{header_style}">Project</th>',
+        f'<th style="{header_style}">Site</th>',
+        f'<th style="{header_style}">Task</th>',
         f'<th style="{header_style}text-align:right;">Entries</th>',
         f'<th style="{header_style}text-align:right;">Total</th>',
-        f'<th style="{header_style}text-align:center;">&#9888;</th>',
+        f'<th style="{header_style}text-align:center;">Duplicates</th>',
         "</tr>",
     ]
 
     for g in groups:
-        row_style = f'style="{row_dup_bg}"' if g["has_duplicates"] else ""
         dup_cell = (
             '<span style="color:#c62828;">&#9888;</span>'
             if g["has_duplicates"] else "&mdash;"
         )
-        html.append(f"<tr {row_style}>")
-        html.append(f'<td style="{cell_style}">{_escape_html(g["task"])}</td>')
-        html.append(f'<td style="{cell_style}">{_escape_html(g["site"])}</td>')
+        if g["has_duplicates"]:
+            html.append(f'<tr style="{row_dup_bg}">')
+        else:
+            html.append("<tr>")
         html.append(f'<td style="{cell_style}">{_escape_html(g["project"])}</td>')
+        html.append(f'<td style="{cell_style}">{_escape_html(g["site"])}</td>')
+        html.append(f'<td style="{cell_style}">{_escape_html(g["task"])}</td>')
         html.append(f'<td style="{cell_style}text-align:right;">{g["entries"]}</td>')
         html.append(
             f'<td style="{cell_style}text-align:right;">'
@@ -611,11 +613,12 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                    from <strong>{date_str}</strong>.</p>
                 <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Daily Task Summary</h3>
                 {_build_summary_html(user_entries)}
+
+                <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Entry Details</h3>
                 <ul style="font-size:13px;color:#555;margin:8px 0 16px;">
                     <li><strong style="color:#1565c0;">Edit</strong> — fix a wrong duration</li>
                     <li><strong style="color:#c62828;">Remove</strong> — delete a duplicate or incorrect entry</li>
                 </ul>
-
                 <table style="border-collapse:collapse;width:100%;font-size:13px;margin:16px 0;">
                     <thead>
                         <tr style="background:#f5f5f5;">

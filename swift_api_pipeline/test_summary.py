@@ -84,20 +84,24 @@ def test_groups_sum_durations_same_task_site_project():
     print("PASS test_groups_sum_durations_same_task_site_project")
 
 
-def test_groups_sort_by_duration_desc():
-    """Groups should be ordered by total duration descending."""
+def test_groups_sort_by_project_site_task():
+    """Groups should be ordered by project, site, task ascending."""
     t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
     entries = [
-        _entry("Short Task", "SITE_A", "ProjX", "did_1", "sidA", t, 15),
-        _entry("Long Task",  "SITE_A", "ProjX", "did_1", "sidA", t, 120),
-        _entry("Mid Task",   "SITE_A", "ProjX", "did_1", "sidA", t, 60),
+        _entry("Zulu Task",  "SITE_B", "ProjX", "did_1", "sidB", t, 15),
+        _entry("Alpha Task", "SITE_A", "ProjY", "did_2", "sidA", t, 120),
+        _entry("Alpha Task", "SITE_A", "ProjX", "did_1", "sidA", t, 60),
     ]
 
     groups = _compute_summary_groups(entries)
 
-    tasks = [g["task"] for g in groups]
-    assert tasks == ["Long Task", "Mid Task", "Short Task"], f"wrong order: {tasks}"
-    print("PASS test_groups_sort_by_duration_desc")
+    order = [(g["project"], g["site"], g["task"]) for g in groups]
+    assert order == [
+        ("ProjX", "SITE_A", "Alpha Task"),
+        ("ProjX", "SITE_B", "Zulu Task"),
+        ("ProjY", "SITE_A", "Alpha Task"),
+    ], f"wrong order: {order}"
+    print("PASS test_groups_sort_by_project_site_task")
 
 
 def test_groups_flags_duplicates():
@@ -138,7 +142,7 @@ def test_html_contains_expected_columns_and_values():
     html = _build_summary_html(entries)
 
     # Column headers
-    for header in ("Task", "Site", "Project", "Entries", "Total", "&#9888;"):
+    for header in ("Task", "Site", "Project", "Entries", "Total", "Duplicates"):
         assert header in html, f"missing header {header!r}"
 
     # Row content — duplicate group (COP Review, 135 min)
@@ -158,21 +162,21 @@ def test_html_contains_expected_columns_and_values():
     print("PASS test_html_contains_expected_columns_and_values")
 
 
-def test_html_sort_order_duration_desc():
-    """Rows appear duration-desc: Long task appears before Short task in HTML."""
+def test_html_sort_order_project_site_task():
+    """Rows appear sorted by project, site, task ascending in HTML."""
     t = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
     entries = [
-        _entry("Short Task", "SITE_A", "ProjX", "did_1", "sidA", t, 15),
-        _entry("Long Task",  "SITE_A", "ProjX", "did_1", "sidA", t, 120),
+        _entry("Zulu Task",  "SITE_A", "ProjY", "did_2", "sidA", t, 15),
+        _entry("Alpha Task", "SITE_A", "ProjX", "did_1", "sidA", t, 120),
     ]
 
     html = _build_summary_html(entries)
 
-    long_pos = html.find("Long Task")
-    short_pos = html.find("Short Task")
-    assert long_pos != -1 and short_pos != -1
-    assert long_pos < short_pos, "Long Task should appear before Short Task"
-    print("PASS test_html_sort_order_duration_desc")
+    alpha_pos = html.find("Alpha Task")
+    zulu_pos = html.find("Zulu Task")
+    assert alpha_pos != -1 and zulu_pos != -1
+    assert alpha_pos < zulu_pos, "ProjX should appear before ProjY"
+    print("PASS test_html_sort_order_project_site_task")
 
 
 def test_groups_task_clean_absent_falls_back_to_task():
@@ -220,11 +224,11 @@ if __name__ == "__main__":
     test_groups_single_entry()
     test_groups_same_task_different_sites_stay_split()
     test_groups_sum_durations_same_task_site_project()
-    test_groups_sort_by_duration_desc()
+    test_groups_sort_by_project_site_task()
     test_groups_flags_duplicates()
     test_groups_task_clean_absent_falls_back_to_task()
     test_groups_handles_null_project()
     test_html_empty_entries()
     test_html_contains_expected_columns_and_values()
-    test_html_sort_order_duration_desc()
+    test_html_sort_order_project_site_task()
     print("\nAll tests passed.")
