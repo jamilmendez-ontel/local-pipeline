@@ -4,7 +4,7 @@ REM Swift API Pipeline - Nightly Local Run (12:01 AM)
 REM Runs: asset_tasks -> backfill -> analytics -> dispatch GHA (export + timer discrepancies)
 REM All other pipelines run on GitHub Actions.
 REM Each step retries once after 5 min on failure.
-REM Requires GITHUB_TOKEN environment variable (fine-grained PAT) for GHA dispatch.
+REM Reads GitHub PAT from C:\Users\admin\.secrets\github_token for GHA dispatch.
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
@@ -36,8 +36,8 @@ if !EXIT_CODE! NEQ 0 (
 )
 
 if !EXIT_CODE! NEQ 0 (
-    echo [%date% %time%] asset_tasks FAILED after retry - skipping backfill and analytics >> "%LOGFILE%"
-    goto :dispatch
+    echo [%date% %time%] asset_tasks FAILED after retry - skipping backfill, analytics, and GHA dispatch >> "%LOGFILE%"
+    goto :done
 )
 
 REM === 2. Asset DID Backfill ===
@@ -70,10 +70,22 @@ if !EXIT_CODE! NEQ 0 (
 
 REM === 4. Dispatch asset tasks export + timer discrepancies to GHA ===
 :dispatch
-echo [%date% %time%] Dispatching asset tasks export to GitHub Actions >> "%LOGFILE%"
-"%VENV_PYTHON%" -u -c "import requests,os; [requests.post('https://api.github.com/repos/jamilmendez-ontel/local-pipeline/dispatches', json={'event_type': t}, headers={'Authorization': f'Bearer {os.environ[\"GITHUB_TOKEN\"]}', 'Accept': 'application/vnd.github+json'}) for t in ['pipeline-asset-tasks-export', 'pipeline-timer-discrepancies']]" >> "%LOGFILE%" 2>&1
-echo [%date% %time%] GHA dispatches sent >> "%LOGFILE%"
+set TOKEN_FILE=C:\Users\admin\.secrets\github_token
+if not exist "%TOKEN_FILE%" (
+    echo [%date% %time%] ERROR: GitHub token file not found at %TOKEN_FILE% - skipping GHA dispatch >> "%LOGFILE%"
+    goto :done
+)
+set /p GITHUB_TOKEN=<"%TOKEN_FILE%"
+echo [%date% %time%] Dispatching asset tasks export + timer discrepancies to GitHub Actions >> "%LOGFILE%"
+"%VENV_PYTHON%" -u -c "import requests,os,sys; results=[requests.post('https://api.github.com/repos/jamilmendez-ontel/local-pipeline/dispatches', json={'event_type': t}, headers={'Authorization': f'Bearer {os.environ[\"GITHUB_TOKEN\"]}', 'Accept': 'application/vnd.github+json'}) for t in ['pipeline-asset-tasks-export', 'pipeline-timer-discrepancies']]; [print(f'{r.status_code} {r.reason} for {r.request.body}') for r in results]; sys.exit(0 if all(r.status_code in (200,204) for r in results) else 1)" >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] ERROR: GHA dispatch failed - check token validity >> "%LOGFILE%"
+) else (
+    echo [%date% %time%] GHA dispatches sent successfully >> "%LOGFILE%"
+)
 
+:done
 echo [%date% %time%] Nightly local pipeline run complete >> "%LOGFILE%"
 
 endlocal
