@@ -1236,11 +1236,11 @@ def run_apply():
     # 2. Auto-resolve stale duplicate groups
     auto_resolved = auto_resolve_stale(db)
 
-    # 3. Always rebuild (picks up new staging data + any auto-resolves)
-    if not responses:
-        rebuild_clean_table(db)
-    elif auto_resolved:
-        rebuild_clean_table(db)
+    # 3. Always rebuild — picks up new staging data from tonight's timer extract.
+    # apply_responses() already rebuilds when it applies new corrections (applied > 0),
+    # but we rebuild unconditionally here to ensure the clean table always reflects
+    # tonight's fresh extraction data, even when no new corrections were applied.
+    rebuild_clean_table(db)
 
 
 # --------------------------------------------------------------------------
