@@ -352,7 +352,22 @@ def run_all_pipelines(send_email=True):
     logger.info(f"\nCompleted: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}\n")
 
-    return all(r.status == "SUCCESS" for r in pipeline_results)
+    overall_success = all(r.status == "SUCCESS" for r in pipeline_results)
+
+    # Downstream: notify cop-date-validator that fresh asset_tasks data is ready.
+    # Never fail the pipeline on a dispatch error.
+    if overall_success:
+        try:
+            from github_trigger import fire_dispatch
+            fire_dispatch(
+                "jamilmendez-ontel/cop-date-validator",
+                "cop-date-validator-daily",
+                client_payload={"source": "asset_tasks"},
+            )
+        except Exception as e:
+            logger.warning(f"downstream dispatch failed: {type(e).__name__}: {e}")
+
+    return overall_success
 
 
 def run_all_extractions(send_email=True):
