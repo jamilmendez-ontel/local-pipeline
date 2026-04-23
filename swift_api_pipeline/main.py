@@ -39,6 +39,7 @@ PIPELINE_NAMES = {
     "sales": "Sales Detail",
     "backfill": "Asset DID Backfill",
     "analytics": "Analytics MV Refresh",
+    "assets": "Assets Status",
 }
 
 
@@ -146,6 +147,24 @@ def run_backfill():
     logger.info(f"{'#'*60}")
 
     backfill_asset_did()
+    return True
+
+
+def run_assets_pipeline():
+    """Extract assets from Swift + enrich stg_assets.asset_status.
+
+    Runs AFTER Phase 2 so that stg_assets exists (built by asset_tasks transform).
+    ~30-60s end-to-end for the 7 TECH-OPS TS13+ projects.
+    """
+    from extract_assets import run_assets_extract
+    from transform import enrich_stg_assets_with_status
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSETS EXTRACT + STATUS ENRICHMENT")
+    logger.info(f"{'#'*60}")
+
+    run_assets_extract()
+    enrich_stg_assets_with_status()
     return True
 
 
@@ -331,6 +350,11 @@ def run_all_pipelines(send_email=True):
         for future in as_completed(futures):
             result = future.result()
             pipeline_results.append(result)
+
+    # Post-Phase 2: Assets extract + status enrichment (must run AFTER asset_tasks
+    # transform has populated stg_assets -- we UPDATE asset_status on existing rows).
+    result = _run_and_notify(run_assets_pipeline, "Assets Status", send_email=False)
+    pipeline_results.append(result)
 
     # Post-Phase 2: Backfill asset_did on timer + QA form from stg_assets
     from transform import backfill_asset_did, refresh_analytics
@@ -572,7 +596,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer", "aging", "sales", "backfill", "analytics"],
+        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -605,6 +629,7 @@ Examples:
         "sales": run_sales_pipeline_full,
         "backfill": run_backfill,
         "analytics": run_analytics_refresh,
+        "assets": run_assets_pipeline,
     }
 
     try:

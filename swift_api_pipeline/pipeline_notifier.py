@@ -43,6 +43,10 @@ PIPELINE_TABLES = {
         ("data_staging", "stg_assets"),
         ("data_staging", "stg_asset_tasks"),
     ],
+    "Assets Status": [
+        ("data_raw", "raw_assets"),
+        ("data_staging", "stg_assets"),
+    ],
     "User Priorities": [
         ("data_raw", "raw_user_priorities"),
         ("data_staging", "stg_user_priorities"),
