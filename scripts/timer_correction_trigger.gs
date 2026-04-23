@@ -29,7 +29,7 @@
 
 // Shared with timer_removal_trigger.gs — both scripts must use the same ID.
 // Create a new Google Sheet titled "Timer Dispatch Coordination" and paste its ID here.
-var COORDINATION_SHEET_ID = 'PASTE_SHARED_SHEET_ID_HERE';
+var COORDINATION_SHEET_ID = '1l1L8YfZZryRLlaGaQKVU2fLGU5PfOYf6vWHb8ejMkc8';
 
 var DEBOUNCE_MINUTES = 10;
 
