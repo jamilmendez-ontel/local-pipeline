@@ -490,6 +490,22 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
     return [dict(r) for r in rows] if rows else []
 
 
+def _has_duplicate_entries(entries: list[dict]) -> bool:
+    """True if any 2+ entries share the duplicate detection key.
+
+    Matches the key used in `_build_entries_html` for the DUPLICATE badge:
+    (project_did, user_email, start_time, site_name, site_id, task).
+    """
+    seen = set()
+    for e in entries:
+        key = (e["project_did"], e["user_email"], e["start_time"],
+               e.get("site_name"), e.get("site_id"), e.get("task"))
+        if key in seen:
+            return True
+        seen.add(key)
+    return False
+
+
 def _build_entries_html(entries: list[dict]) -> str:
     """Build HTML table rows for a tech's timer entries.
 
@@ -598,8 +614,16 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
     for user_email, user_entries in by_user.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(user_entries)
+        has_duplicates = _has_duplicate_entries(user_entries)
 
         table_rows = _build_entries_html(user_entries)
+
+        duplicate_notes = (
+            "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
+            "<li>The <strong>duplicate icon</strong> highlights entries that share the same start time"
+            " &mdash; these are likely system-generated duplicates.</li>"
+            if has_duplicates else ""
+        )
 
         html_body = f"""
         <html>
@@ -640,9 +664,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                 <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
                     <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
                     <ul style="margin:0;padding-left:20px;line-height:1.8;">
-                        <li>You'll receive daily reminders until all duplicate entries are resolved.</li>
-                        <li>The <strong>duplicate icon</strong> highlights entries that share the same start time
-                            &mdash; these are likely system-generated duplicates.</li>
+                        {duplicate_notes}
                         <li>Entries are <strong>color-coded</strong> by site and task so you can easily
                             spot related groups.</li>
                     </ul>
