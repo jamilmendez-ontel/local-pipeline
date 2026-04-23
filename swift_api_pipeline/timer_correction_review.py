@@ -268,6 +268,15 @@ def _fmt_time_short(dt) -> str:
     return dt.astimezone(TZ_EASTERN).strftime("%m/%d %I:%M %p")
 
 
+def _entry_date_et(dt) -> "date":
+    """Return the calendar date of dt interpreted in Eastern Time."""
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ_EASTERN).date()
+
+
 def _fmt_date(dt) -> str:
     """Format a datetime to Eastern date string."""
     if dt is None:
@@ -1068,20 +1077,32 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
                 f"rejected {len(rejected)} others")
 
 
-def apply_responses(db, responses: list[dict]):
+def apply_responses(db, responses: list[dict]) -> list[dict]:
     """Store corrections in stg_timer_corrections, removals in stg_timer_entry_removals.
 
     Correction overrides removal — if the same entry is later corrected, the
     removal row stays but rebuild_timer_clean() keeps the entry (correction wins).
+
+    Dedup: Google Sheets sometimes duplicates a form submission into multiple rows.
+    We skip a response only when its values match what is already stored
+    (exact-duplicate GSheet row). A genuine re-correction — same entry_id but
+    a different corrected_duration_min, or flipping edit <-> remove — is allowed
+    through to the ON CONFLICT DO UPDATE path so techs can revise their own fix.
+
+    Returns the list of changes actually applied this run, one dict per processed
+    response: {entry_id, action, user_email, entry_date (ET date), entry,
+    original_duration_min, corrected_duration_min}. Empty list when nothing new.
     """
     now = datetime.now(timezone.utc)
     applied = 0
+    applied_changes: list[dict] = []
 
-    # Pre-fetch already-stored entry_ids to skip re-processing (major speedup)
+    # Pre-fetch existing corrections (with values) and removals so we can detect
+    # exact-duplicate GSheet rows vs genuine re-corrections.
     all_ids = [r["entry_id"] for r in responses]
     existing_corrections = retry_db(
         lambda: db.fetch(
-            f"SELECT entry_id FROM {SCHEMA_STAGING}.stg_timer_corrections WHERE entry_id = ANY($1)",
+            f"SELECT entry_id, corrected_duration_min FROM {SCHEMA_STAGING}.stg_timer_corrections WHERE entry_id = ANY($1)",
             all_ids,
         ),
         description="batch check existing corrections",
@@ -1093,13 +1114,29 @@ def apply_responses(db, responses: list[dict]):
         ),
         description="batch check existing removals",
     )
-    already_stored = {r["entry_id"] for r in (existing_corrections or [])} | \
-                     {r["entry_id"] for r in (existing_removals or [])}
+    stored_correction_values = {
+        r["entry_id"]: (float(r["corrected_duration_min"]) if r["corrected_duration_min"] is not None else None)
+        for r in (existing_corrections or [])
+    }
+    stored_removal_ids = {r["entry_id"] for r in (existing_removals or [])}
 
-    new_responses = [r for r in responses if r["entry_id"] not in already_stored]
+    def _is_exact_duplicate(resp: dict) -> bool:
+        eid = resp["entry_id"]
+        act = resp["action"]
+        if act == "remove":
+            return eid in stored_removal_ids
+        if act == "correct":
+            stored = stored_correction_values.get(eid)
+            new_dur = resp.get("corrected_duration_min")
+            if stored is None or new_dur is None:
+                return False
+            return abs(float(new_dur) - stored) < 0.001
+        return False
+
+    new_responses = [r for r in responses if not _is_exact_duplicate(r)]
     if len(responses) > len(new_responses):
-        logger.info(f"Skipping {len(responses) - len(new_responses)} already-processed responses, "
-                     f"{len(new_responses)} new to process")
+        logger.info(f"Skipping {len(responses) - len(new_responses)} exact-duplicate responses "
+                     f"(GSheet duplicate rows), {len(new_responses)} to process")
 
     for resp in new_responses:
         entry_id = resp["entry_id"]
@@ -1146,6 +1183,16 @@ def apply_responses(db, responses: list[dict]):
                         f"{_fmt_duration(entry.get('duration_min'))} -> {_fmt_duration(corrected_duration)} "
                         f"(reason: {reason or 'none'})")
 
+            applied_changes.append({
+                "entry_id": entry_id,
+                "action": "correct",
+                "user_email": entry["user_email"],
+                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry": entry,
+                "original_duration_min": entry.get("duration_min"),
+                "corrected_duration_min": corrected_duration,
+            })
+
         else:
             # Upsert into stg_timer_entry_removals (entry_id is UNIQUE — last wins)
             retry_db(
@@ -1171,6 +1218,16 @@ def apply_responses(db, responses: list[dict]):
                         f"{entry.get('site_name') or '(no site)'} / {entry.get('task') or '(no task)'} "
                         f"(reason: {reason or 'none'})")
 
+            applied_changes.append({
+                "entry_id": entry_id,
+                "action": "remove",
+                "user_email": entry["user_email"],
+                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry": entry,
+                "original_duration_min": entry.get("duration_min"),
+                "corrected_duration_min": None,
+            })
+
         applied += 1
 
         # Auto-resolve any related duplicate group
@@ -1181,6 +1238,8 @@ def apply_responses(db, responses: list[dict]):
         rebuild_clean_table(db)
     else:
         logger.info("No new responses to apply")
+
+    return applied_changes
 
 
 def rebuild_clean_table(db):
@@ -1246,14 +1305,409 @@ def auto_resolve_stale(db):
     return True
 
 
-def run_apply():
-    """Process form responses, auto-resolve stale duplicates, rebuild clean table."""
+# --------------------------------------------------------------------------
+# Correction Confirmation Emails — reply-in-thread after --apply processes changes
+# --------------------------------------------------------------------------
+
+_STATUS_BADGE_HTML = {
+    "unchanged": ('<span style="display:inline-block;background:#9e9e9e;color:white;'
+                  'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">UNCHANGED</span>'),
+    "edited":    ('<span style="display:inline-block;background:#1565c0;color:white;'
+                  'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">EDITED</span>'),
+    "removed":   ('<span style="display:inline-block;background:#c62828;color:white;'
+                  'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">REMOVED</span>'),
+}
+
+
+def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]:
+    """Fetch all timer entries for (user_email, entry_date in ET) and
+    classify each as UNCHANGED / EDITED / REMOVED by joining to corrections
+    and removals. Reuses the same md5 hash formula as lookup_entry_by_id().
+    """
+    hash_expr = (
+        "LEFT(MD5("
+        "a.project_did || '|' || a.user_email || '|' || "
+        "(a.start_time AT TIME ZONE 'UTC')::text || '+00' || '|' || "
+        "COALESCE(a.site_name, 'None') || '|' || "
+        "COALESCE(a.site_id, 'None') || '|' || "
+        "COALESCE(a.task, 'None') || '|' || "
+        "COALESCE((a.end_time AT TIME ZONE 'UTC')::text || '+00', 'None') || '|' || "
+        "COALESCE(a.duration_min::text, 'None')"
+        "), 12)"
+    )
+
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            WITH raw AS (
+                SELECT a.project_did, a.project, a.user_email,
+                       a.start_time, a.end_time, a.duration_min,
+                       a.site_name, a.site_id, a.task, a.task_clean,
+                       {hash_expr} AS entry_id
+                FROM {SCHEMA_STAGING}.stg_timer_activities a
+                WHERE a.user_email = $1
+                  AND DATE(a.start_time AT TIME ZONE 'America/New_York') = $2
+            )
+            SELECT r.*,
+                   c.corrected_duration_min,
+                   c.corrected_end_time,
+                   (rm.entry_id IS NOT NULL) AS is_removed
+            FROM raw r
+            LEFT JOIN {SCHEMA_STAGING}.stg_timer_corrections c ON c.entry_id = r.entry_id
+            LEFT JOIN {SCHEMA_STAGING}.stg_timer_entry_removals rm ON rm.entry_id = r.entry_id
+            ORDER BY r.start_time, r.site_name, r.task
+        """, user_email, entry_date),
+        description=f"classify entries for {user_email} on {entry_date}",
+    )
+
+    classified = []
+    for r in rows:
+        d = dict(r)
+        original_dur = d.get("duration_min")
+        if d.get("is_removed"):
+            status = "removed"
+            effective_duration = 0.0
+            effective_end = d.get("end_time")
+        elif d.get("corrected_duration_min") is not None:
+            status = "edited"
+            effective_duration = float(d["corrected_duration_min"])
+            effective_end = d.get("corrected_end_time") or d.get("end_time")
+        else:
+            status = "unchanged"
+            effective_duration = float(original_dur or 0)
+            effective_end = d.get("end_time")
+        d["original_duration_min"] = original_dur
+        d["status"] = status
+        d["effective_duration_min"] = effective_duration
+        d["effective_end_time"] = effective_end
+        classified.append(d)
+    return classified
+
+
+def _has_edits(classified_entries: list[dict]) -> bool:
+    return any(e["status"] == "edited" for e in classified_entries)
+
+
+def _has_removals(classified_entries: list[dict]) -> bool:
+    return any(e["status"] == "removed" for e in classified_entries)
+
+
+def _build_confirmation_summary_html(classified_entries: list[dict]) -> str:
+    """Daily Task Summary for the confirmation email.
+
+    Excludes removed entries; uses effective (post-correction) durations.
+    No duplicates column — duplicates are strictly a --remind concern.
+    Ends with a bold 'Day Total' row.
+    """
+    from collections import defaultdict
+
+    effective = [e for e in classified_entries if e["status"] != "removed"]
+    if not effective:
+        return ""
+
+    buckets: dict[tuple, list[dict]] = defaultdict(list)
+    for e in effective:
+        task = e.get("task_clean") or e.get("task") or ""
+        key = (task, e.get("site_name") or "", e.get("project") or "")
+        buckets[key].append(e)
+
+    groups = []
+    for (task, site, project), rows in buckets.items():
+        groups.append({
+            "project": project,
+            "site": site,
+            "task": task,
+            "entries": len(rows),
+            "total_duration_min": sum(float(r.get("effective_duration_min") or 0) for r in rows),
+        })
+    groups.sort(key=lambda g: (g["project"], g["site"], g["task"]))
+
+    header_style = ("padding:6px 10px;border:1px solid #bbb;background:#eef3fa;"
+                    "text-align:left;font-size:13px;")
+    cell_style = "padding:6px 10px;border:1px solid #ccc;font-size:13px;"
+
+    total_entries = sum(g["entries"] for g in groups)
+    total_duration = sum(g["total_duration_min"] for g in groups)
+
+    html = [
+        '<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:8px 0 16px;">',
+        '<tr>',
+        f'<th style="{header_style}">Project</th>',
+        f'<th style="{header_style}">Site</th>',
+        f'<th style="{header_style}">Task</th>',
+        f'<th style="{header_style}text-align:right;">Entries</th>',
+        f'<th style="{header_style}text-align:right;">Total</th>',
+        '</tr>',
+    ]
+    for g in groups:
+        html.append(
+            '<tr>'
+            f'<td style="{cell_style}">{_escape_html(g["project"])}</td>'
+            f'<td style="{cell_style}">{_escape_html(g["site"])}</td>'
+            f'<td style="{cell_style}">{_escape_html(g["task"])}</td>'
+            f'<td style="{cell_style}text-align:right;">{g["entries"]}</td>'
+            f'<td style="{cell_style}text-align:right;">{_fmt_duration(g["total_duration_min"])}</td>'
+            '</tr>'
+        )
+    html.append(
+        '<tr style="background:#f0f4f9;">'
+        f'<td colspan="3" style="{cell_style}font-weight:bold;">Day Total</td>'
+        f'<td style="{cell_style}text-align:right;font-weight:bold;">{total_entries}</td>'
+        f'<td style="{cell_style}text-align:right;font-weight:bold;">{_fmt_duration(total_duration)}</td>'
+        '</tr>'
+    )
+    html.append('</table>')
+    return "".join(html)
+
+
+def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
+    """Full entry detail table for the confirmation email.
+
+    Each row shows its status badge and duration. Edited rows show
+    'before -> after' with strikethrough + green after. Removed rows are
+    shown struck through with muted background.
+    """
+    cell = "padding:6px 10px;border:1px solid #ddd;"
+    rows_html = []
+
+    for e in classified_entries:
+        status = e["status"]
+        project = e.get("project") or "(no project)"
+        site = e.get("site_name") or "(no site)"
+        task = e.get("task") or "(no task)"
+        start = _fmt_time_short(e["start_time"])
+        end = _fmt_time_short(e.get("effective_end_time"))
+
+        if status == "removed":
+            row_style = "background:#fdecea;color:#999;"
+            strike_cell = f"{cell}text-decoration:line-through;"
+            rows_html.append(
+                f'<tr style="{row_style}">'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["removed"]}</td>'
+                f'<td style="{strike_cell}">{_escape_html(project)}</td>'
+                f'<td style="{strike_cell}">{_escape_html(site)}</td>'
+                f'<td style="{strike_cell}">{_escape_html(task)}</td>'
+                f'<td style="{strike_cell}">{start}</td>'
+                f'<td style="{strike_cell}">{end}</td>'
+                f'<td style="{strike_cell}">{_fmt_duration(e.get("original_duration_min"))}</td>'
+                f'</tr>'
+            )
+        elif status == "edited":
+            row_style = "background:#e3f2fd;"
+            before = _fmt_duration(e.get("original_duration_min"))
+            after = _fmt_duration(e.get("corrected_duration_min"))
+            duration_cell = (
+                f'<td style="{cell}">'
+                f'<span style="color:#888;text-decoration:line-through;">{before}</span>'
+                f'<span style="color:#555;">&nbsp;&rarr;&nbsp;</span>'
+                f'<span style="font-weight:bold;color:#2e7d32;">{after}</span>'
+                f'</td>'
+            )
+            rows_html.append(
+                f'<tr style="{row_style}">'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["edited"]}</td>'
+                f'<td style="{cell}">{_escape_html(project)}</td>'
+                f'<td style="{cell}">{_escape_html(site)}</td>'
+                f'<td style="{cell}">{_escape_html(task)}</td>'
+                f'<td style="{cell}">{start}</td>'
+                f'<td style="{cell}">{end}</td>'
+                f'{duration_cell}'
+                f'</tr>'
+            )
+        else:  # unchanged
+            rows_html.append(
+                '<tr>'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["unchanged"]}</td>'
+                f'<td style="{cell}">{_escape_html(project)}</td>'
+                f'<td style="{cell}">{_escape_html(site)}</td>'
+                f'<td style="{cell}">{_escape_html(task)}</td>'
+                f'<td style="{cell}">{start}</td>'
+                f'<td style="{cell}">{end}</td>'
+                f'<td style="{cell}font-weight:bold;">{_fmt_duration(e.get("original_duration_min"))}</td>'
+                '</tr>'
+            )
+    return "\n".join(rows_html)
+
+
+def _build_correction_confirmation_html(user_email: str, entry_date,
+                                         classified_entries: list[dict],
+                                         change_count: int,
+                                         edit_count: int,
+                                         removal_count: int) -> str:
+    """Render the confirmation email HTML body for a single (user, date)."""
+    date_str = entry_date.strftime("%B %d, %Y")
+    summary_html = _build_confirmation_summary_html(classified_entries)
+    entries_html = _build_confirmation_entries_html(classified_entries)
+    has_edits = _has_edits(classified_entries)
+    has_removals = _has_removals(classified_entries)
+    has_unchanged = any(e["status"] == "unchanged" for e in classified_entries)
+
+    # Subheader: "N changes applied — X edited, Y removed"
+    sub_parts = []
+    if edit_count:
+        sub_parts.append(f"{edit_count} edited")
+    if removal_count:
+        sub_parts.append(f"{removal_count} removed")
+    detail = " &mdash; " + ", ".join(sub_parts) if sub_parts else ""
+    subheader = f"{change_count} change{'s' if change_count != 1 else ''} applied{detail}"
+
+    # Legend — only include badges that actually appear in this email
+    legend_items = []
+    if has_unchanged:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["unchanged"]} &mdash; no correction submitted</li>')
+    if has_edits:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["edited"]} &mdash; duration corrected (before &rarr; after shown)</li>')
+    if has_removals:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["removed"]} &mdash; entry deleted from your records</li>')
+    legend_html = "\n".join(legend_items)
+
+    # Conditional footer notes (same pattern as the daily email fix)
+    footer_items = []
+    if has_edits:
+        footer_items.append("<li><strong>Edited</strong> rows show the original duration struck through and the new duration in green.</li>")
+    if has_removals:
+        footer_items.append("<li><strong>Removed</strong> rows are shown for context but no longer count toward your daily totals.</li>")
+    footer_items.append("<li>You can still make further corrections from the <strong>original daily entries email</strong> &mdash; the Edit/Remove links remain valid.</li>")
+    footer_html = "\n".join(footer_items)
+
+    return f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
+        <div style="background:#2e7d32;color:white;padding:16px 24px;">
+            <h2 style="margin:0;">Timer Entries Updated - {date_str}</h2>
+            <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{subheader}</p>
+        </div>
+        <div style="padding:24px;">
+
+            <p>Hi {_first_name(user_email)},</p>
+            <p>Your timer entries for <strong>{date_str}</strong> were updated based on the corrections you submitted. Below is the full updated view of your day &mdash; unchanged entries, edits, and removals are all shown for context.</p>
+
+            <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Updated Daily Task Summary</h3>
+            <p style="margin:0 0 6px;font-size:12px;color:#666;">Totals reflect your corrections and removals.</p>
+            {summary_html}
+
+            <h3 style="margin-top:24px;margin-bottom:8px;font-size:15px;">Updated Entry Details</h3>
+            <ul style="font-size:13px;color:#555;margin:8px 0 12px;">
+                {legend_html}
+            </ul>
+            <table style="border-collapse:collapse;width:100%;font-size:13px;margin:8px 0 16px;">
+                <thead>
+                    <tr style="background:#f5f5f5;">
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Status</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Project</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Site</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Task</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Start</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">End</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Duration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {entries_html}
+                </tbody>
+            </table>
+
+            <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
+                <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
+                <ul style="margin:0;padding-left:20px;line-height:1.8;">
+                    {footer_html}
+                </ul>
+            </div>
+
+        </div>
+    </body>
+    </html>
+    """
+
+
+def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bool = False):
+    """Send a reply-in-thread confirmation email per (user, entry_date) for
+    changes applied this run. Threads under the original daily entries email
+    using thread_id/message_id stored in stg_timer_daily_notifications.
+    Falls back to standalone email when no thread record exists.
+    """
+    if not applied_changes:
+        logger.info("No applied changes — skipping correction confirmations")
+        return
+
+    from gmail_client import authenticate
+
+    by_user_date: dict[tuple, list[dict]] = {}
+    for change in applied_changes:
+        key = (change["user_email"], change["entry_date"])
+        by_user_date.setdefault(key, []).append(change)
+
+    service = authenticate()
+    sent = 0
+
+    for (user_email, entry_date), changes in by_user_date.items():
+        recipient = "jamil.mendez@ontel.co" if test_mode else user_email
+        date_str = entry_date.strftime("%B %d, %Y")
+        edit_count = sum(1 for c in changes if c["action"] == "correct")
+        removal_count = sum(1 for c in changes if c["action"] == "remove")
+
+        notif = retry_db(
+            lambda ue=user_email, sd=entry_date: db.fetchrow(
+                f"""SELECT thread_id, message_id
+                    FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    WHERE user_email = $1 AND send_date = $2
+                """, ue, sd,
+            ),
+            description=f"lookup notification thread for {user_email} on {entry_date}",
+        )
+
+        classified = _fetch_classified_day_entries(db, user_email, entry_date)
+        if not classified:
+            logger.warning(f"No entries found for {user_email} on {entry_date} — skipping confirmation")
+            continue
+
+        html_body = _build_correction_confirmation_html(
+            user_email, entry_date, classified,
+            change_count=len(changes),
+            edit_count=edit_count,
+            removal_count=removal_count,
+        )
+
+        subject = f"Re: Timer Activity Entries - {date_str}"
+        msg = MIMEMultipart()
+        msg["To"] = recipient
+        msg["From"] = "me"
+        msg["Subject"] = subject
+        if notif and notif.get("message_id"):
+            msg["In-Reply-To"] = notif["message_id"]
+            msg["References"] = notif["message_id"]
+        msg.attach(MIMEText(html_body, "html"))
+
+        try:
+            raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+            send_body = {"raw": raw}
+            if notif and notif.get("thread_id"):
+                send_body["threadId"] = notif["thread_id"]
+            service.users().messages().send(userId="me", body=send_body).execute()
+            sent += 1
+            logger.info(
+                f"Sent correction confirmation to {recipient} for {entry_date} "
+                f"({edit_count} edited, {removal_count} removed, "
+                f"thread={notif.get('thread_id') if notif else 'none'})"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to send correction confirmation to {user_email} for {entry_date}: {e}"
+            )
+
+    logger.info(f"Correction confirmations complete: sent {sent} emails")
+
+
+def run_apply(test_mode: bool = False):
+    """Process form responses, auto-resolve stale duplicates, rebuild clean table,
+    then send reply-in-thread confirmation emails for any changes just applied.
+    """
     db = get_db()
 
-    # 1. Process form responses
+    # 1. Process form responses (returns list of changes actually applied)
+    applied_changes: list[dict] = []
     responses = read_form_responses()
     if responses:
-        apply_responses(db, responses)
+        applied_changes = apply_responses(db, responses)
 
     # 2. Auto-resolve stale duplicate groups
     auto_resolved = auto_resolve_stale(db)
@@ -1263,6 +1717,10 @@ def run_apply():
     # but we rebuild unconditionally here to ensure the clean table always reflects
     # tonight's fresh extraction data, even when no new corrections were applied.
     rebuild_clean_table(db)
+
+    # 4. Send reply-in-thread confirmation emails for this run's applied changes
+    if applied_changes:
+        send_correction_confirmations(db, applied_changes, test_mode=test_mode)
 
 
 # --------------------------------------------------------------------------
@@ -1476,7 +1934,7 @@ def main():
     try:
         if args.apply:
             logger.info("=== Running --apply ===")
-            run_apply()
+            run_apply(test_mode=args.test)
 
         if args.send:
             logger.info("=== Running --send ===")
