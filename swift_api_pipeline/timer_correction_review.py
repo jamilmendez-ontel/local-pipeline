@@ -1316,6 +1316,8 @@ _STATUS_BADGE_HTML = {
                   'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">EDITED</span>'),
     "removed":   ('<span style="display:inline-block;background:#c62828;color:white;'
                   'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">REMOVED</span>'),
+    "added":     ('<span style="display:inline-block;background:#2e7d32;color:white;'
+                  'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">ADDED</span>'),
 }
 
 
@@ -1347,14 +1349,33 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                 WHERE a.user_email = $1
                   AND DATE(a.start_time AT TIME ZONE 'America/New_York') = $2
             )
-            SELECT r.*,
+            SELECT r.project_did, r.project, r.user_email,
+                   r.start_time, r.end_time, r.duration_min,
+                   r.site_name, r.site_id, r.task, r.task_clean,
+                   r.entry_id,
                    c.corrected_duration_min,
                    c.corrected_end_time,
-                   (rm.entry_id IS NOT NULL) AS is_removed
+                   (rm.entry_id IS NOT NULL) AS is_removed,
+                   FALSE AS is_added
             FROM raw r
             LEFT JOIN {SCHEMA_STAGING}.stg_timer_corrections c ON c.entry_id = r.entry_id
             LEFT JOIN {SCHEMA_STAGING}.stg_timer_entry_removals rm ON rm.entry_id = r.entry_id
-            ORDER BY r.start_time, r.site_name, r.task
+
+            UNION ALL
+
+            SELECT ad.project_did, ad.project, ad.user_email,
+                   ad.start_time, ad.end_time, ad.duration_min,
+                   ad.site_name, ad.site_id, ad.task, ad.task_clean,
+                   NULL::text AS entry_id,
+                   NULL::numeric AS corrected_duration_min,
+                   NULL::timestamptz AS corrected_end_time,
+                   FALSE AS is_removed,
+                   TRUE AS is_added
+            FROM {SCHEMA_STAGING}.stg_timer_entry_additions ad
+            WHERE ad.user_email = $1
+              AND DATE(ad.start_time AT TIME ZONE 'America/New_York') = $2
+
+            ORDER BY start_time, site_name, task
         """, user_email, entry_date),
         description=f"classify entries for {user_email} on {entry_date}",
     )
@@ -1363,7 +1384,11 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
     for r in rows:
         d = dict(r)
         original_dur = d.get("duration_min")
-        if d.get("is_removed"):
+        if d.get("is_added"):
+            status = "added"
+            effective_duration = float(original_dur or 0)
+            effective_end = d.get("end_time")
+        elif d.get("is_removed"):
             status = "removed"
             effective_duration = 0.0
             effective_end = d.get("end_time")
@@ -1389,6 +1414,10 @@ def _has_edits(classified_entries: list[dict]) -> bool:
 
 def _has_removals(classified_entries: list[dict]) -> bool:
     return any(e["status"] == "removed" for e in classified_entries)
+
+
+def _has_additions(classified_entries: list[dict]) -> bool:
+    return any(e["status"] == "added" for e in classified_entries)
 
 
 def _build_confirmation_summary_html(classified_entries: list[dict]) -> str:
@@ -1491,6 +1520,19 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{strike_cell}">{_fmt_duration(e.get("original_duration_min"))}</td>'
                 f'</tr>'
             )
+        elif status == "added":
+            row_style = "background:#e8f5e9;"
+            rows_html.append(
+                f'<tr style="{row_style}">'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["added"]}</td>'
+                f'<td style="{cell}">{_escape_html(project)}</td>'
+                f'<td style="{cell}">{_escape_html(site)}</td>'
+                f'<td style="{cell}">{_escape_html(task)}</td>'
+                f'<td style="{cell}">{start}</td>'
+                f'<td style="{cell}">{end}</td>'
+                f'<td style="{cell}font-weight:bold;color:#2e7d32;">{_fmt_duration(e.get("original_duration_min"))}</td>'
+                f'</tr>'
+            )
         elif status == "edited":
             row_style = "background:#e3f2fd;"
             before = _fmt_duration(e.get("original_duration_min"))
@@ -1532,21 +1574,25 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
                                          classified_entries: list[dict],
                                          change_count: int,
                                          edit_count: int,
-                                         removal_count: int) -> str:
+                                         removal_count: int,
+                                         added_count: int = 0) -> str:
     """Render the confirmation email HTML body for a single (user, date)."""
     date_str = entry_date.strftime("%B %d, %Y")
     summary_html = _build_confirmation_summary_html(classified_entries)
     entries_html = _build_confirmation_entries_html(classified_entries)
     has_edits = _has_edits(classified_entries)
     has_removals = _has_removals(classified_entries)
+    has_additions = _has_additions(classified_entries)
     has_unchanged = any(e["status"] == "unchanged" for e in classified_entries)
 
-    # Subheader: "N changes applied — X edited, Y removed"
+    # Subheader: "N changes applied — X edited, Y removed, Z added"
     sub_parts = []
     if edit_count:
         sub_parts.append(f"{edit_count} edited")
     if removal_count:
         sub_parts.append(f"{removal_count} removed")
+    if added_count:
+        sub_parts.append(f"{added_count} added")
     detail = " &mdash; " + ", ".join(sub_parts) if sub_parts else ""
     subheader = f"{change_count} change{'s' if change_count != 1 else ''} applied{detail}"
 
@@ -1558,6 +1604,8 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["edited"]} &mdash; duration corrected (before &rarr; after shown)</li>')
     if has_removals:
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["removed"]} &mdash; entry deleted from your records</li>')
+    if has_additions:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["added"]} &mdash; entry added manually (e.g., forgot to start the timer)</li>')
     legend_html = "\n".join(legend_items)
 
     # Conditional footer notes (same pattern as the daily email fix)
@@ -1566,6 +1614,8 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         footer_items.append("<li><strong>Edited</strong> rows show the original duration struck through and the new duration in green.</li>")
     if has_removals:
         footer_items.append("<li><strong>Removed</strong> rows are shown for context but no longer count toward your daily totals.</li>")
+    if has_additions:
+        footer_items.append("<li><strong>Added</strong> rows were created manually for entries missing from the timer (e.g., the timer wasn't started). They count toward your daily totals.</li>")
     footer_items.append("<li>You can still make further corrections from the <strong>original daily entries email</strong> &mdash; the Edit/Remove links remain valid.</li>")
     footer_html = "\n".join(footer_items)
 
@@ -1644,6 +1694,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
         date_str = entry_date.strftime("%B %d, %Y")
         edit_count = sum(1 for c in changes if c["action"] == "correct")
         removal_count = sum(1 for c in changes if c["action"] == "remove")
+        added_count = sum(1 for c in changes if c["action"] == "add")
 
         notif = retry_db(
             lambda ue=user_email, sd=entry_date: db.fetchrow(
@@ -1665,6 +1716,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
             change_count=len(changes),
             edit_count=edit_count,
             removal_count=removal_count,
+            added_count=added_count,
         )
 
         subject = f"Re: Timer Activity Entries - {date_str}"
@@ -1686,7 +1738,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
             sent += 1
             logger.info(
                 f"Sent correction confirmation to {recipient} for {entry_date} "
-                f"({edit_count} edited, {removal_count} removed, "
+                f"({edit_count} edited, {removal_count} removed, {added_count} added, "
                 f"thread={notif.get('thread_id') if notif else 'none'})"
             )
         except Exception as e:
