@@ -40,6 +40,23 @@ if !EXIT_CODE! NEQ 0 (
     goto :done
 )
 
+REM === 1b. Assets Status (extract + enrich stg_assets.asset_status) ===
+REM Must run AFTER asset_tasks (which rebuilds stg_assets) so the UPDATE has rows to enrich.
+REM Failure here is non-fatal: downstream consumers handle NULL asset_status gracefully.
+echo [%date% %time%] Starting assets pipeline >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline assets --no-email >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] assets finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] assets FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u main.py --pipeline assets --no-email >> "%LOGFILE%" 2>&1
+    set EXIT_CODE=!ERRORLEVEL!
+    echo [%date% %time%] assets retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+)
+REM Continue regardless — asset_status NULL is degrading-but-acceptable downstream.
+
 REM === 2. Asset DID Backfill ===
 echo [%date% %time%] Starting backfill >> "%LOGFILE%"
 "%VENV_PYTHON%" -u main.py --pipeline backfill --no-email >> "%LOGFILE%" 2>&1
