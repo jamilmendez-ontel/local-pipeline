@@ -378,14 +378,14 @@ def run_all_pipelines(send_email=True):
 
     overall_success = all(r.status == "SUCCESS" for r in pipeline_results)
 
-    # Downstream: notify cop-date-validator that fresh asset_tasks data is ready.
+    # Downstream: notify date-validator that fresh asset_tasks data is ready.
     # Never fail the pipeline on a dispatch error.
     if overall_success:
         try:
             from github_trigger import fire_dispatch
             fire_dispatch(
-                "jamilmendez-ontel/cop-date-validator",
-                "cop-date-validator-daily",
+                "jamilmendez-ontel/date-validator",
+                "date-validator-daily",
                 client_payload={"source": "asset_tasks"},
             )
         except Exception as e:
