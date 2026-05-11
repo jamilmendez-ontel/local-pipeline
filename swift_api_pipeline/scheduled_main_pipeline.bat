@@ -2,9 +2,11 @@
 setlocal enabledelayedexpansion
 REM Swift API Pipeline - Nightly Local Run (12:01 AM)
 REM Runs: asset_tasks -> backfill -> analytics -> dispatch GHA (export + timer discrepancies)
+REM        -> dispatch date-validator-daily (separate narrow PAT from .env).
 REM All other pipelines run on GitHub Actions.
 REM Each step retries once after 5 min on failure.
-REM Reads GitHub PAT from C:\Users\admin\.secrets\github_token for GHA dispatch.
+REM Reads working PAT from C:\Users\admin\.secrets\github_token for local-pipeline GHA dispatch.
+REM Reads narrow PAT from .env (GITHUB_PAT) for the date-validator dispatch.
 
 set SCRIPT_DIR=%~dp0
 set LOG_DIR=%SCRIPT_DIR%pipeline_logs
@@ -21,22 +23,44 @@ set LOGFILE=%LOG_DIR%\main_%TIMESTAMP%.log
 
 echo [%date% %time%] Starting nightly local pipeline run >> "%LOGFILE%"
 
-REM === 1. Asset Tasks (extract + transform) ===
-echo [%date% %time%] Starting asset_tasks pipeline >> "%LOGFILE%"
-"%VENV_PYTHON%" -u main.py --pipeline asset_tasks >> "%LOGFILE%" 2>&1
+REM === 1a. Asset Tasks EXTRACT (Swift API -> raw_asset_tasks) ===
+REM Split from transform so a transform-only failure doesn't waste the 60-min API pull.
+echo [%date% %time%] Starting asset_tasks_extract >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline asset_tasks_extract >> "%LOGFILE%" 2>&1
 set EXIT_CODE=!ERRORLEVEL!
-echo [%date% %time%] asset_tasks finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+echo [%date% %time%] asset_tasks_extract finished with exit code !EXIT_CODE! >> "%LOGFILE%"
 
 if !EXIT_CODE! NEQ 0 (
-    echo [%date% %time%] asset_tasks FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    echo [%date% %time%] asset_tasks_extract FAILED - retrying after 5 minutes >> "%LOGFILE%"
     timeout /t 300 /nobreak > nul
-    "%VENV_PYTHON%" -u main.py --pipeline asset_tasks >> "%LOGFILE%" 2>&1
+    "%VENV_PYTHON%" -u main.py --pipeline asset_tasks_extract >> "%LOGFILE%" 2>&1
     set EXIT_CODE=!ERRORLEVEL!
-    echo [%date% %time%] asset_tasks retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+    echo [%date% %time%] asset_tasks_extract retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
 )
 
 if !EXIT_CODE! NEQ 0 (
-    echo [%date% %time%] asset_tasks FAILED after retry - skipping backfill, analytics, and GHA dispatch >> "%LOGFILE%"
+    echo [%date% %time%] asset_tasks_extract FAILED after retry - skipping transform, backfill, analytics, and GHA dispatch >> "%LOGFILE%"
+    goto :done
+)
+
+REM === 1b. Asset Tasks TRANSFORM (raw -> stg_assets + stg_asset_tasks) ===
+REM Reads the latest successful asset_tasks_extract run_id from pipeline.pipeline_runs
+REM and runs the SQL aggregation RPCs only - ~5-10 min vs the ~60 min extract.
+echo [%date% %time%] Starting asset_tasks_transform >> "%LOGFILE%"
+"%VENV_PYTHON%" -u main.py --pipeline asset_tasks_transform >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+echo [%date% %time%] asset_tasks_transform finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] asset_tasks_transform FAILED - retrying after 5 minutes >> "%LOGFILE%"
+    timeout /t 300 /nobreak > nul
+    "%VENV_PYTHON%" -u main.py --pipeline asset_tasks_transform >> "%LOGFILE%" 2>&1
+    set EXIT_CODE=!ERRORLEVEL!
+    echo [%date% %time%] asset_tasks_transform retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
+)
+
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] asset_tasks_transform FAILED after retry - skipping backfill, analytics, and GHA dispatch >> "%LOGFILE%"
     goto :done
 )
 
@@ -100,6 +124,22 @@ if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] ERROR: GHA dispatch failed - check token validity >> "%LOGFILE%"
 ) else (
     echo [%date% %time%] GHA dispatches sent successfully >> "%LOGFILE%"
+)
+
+REM === 5. Dispatch date-validator-daily ===
+REM Without this, the validator only ever sees gmail-scraper's 00:41 ET trigger,
+REM which fires BEFORE asset_tasks finishes (~00:52 ET), so the preflight gate
+REM trips on UpstreamStale and the day's emails never go out. Firing here, at
+REM the tail of the local batch, guarantees asset_tasks is "today's success" by
+REM the time the validator runs preflight. Uses the narrow GITHUB_PAT from .env
+REM (scoped to date-validator only, kept separate from the working PAT).
+echo [%date% %time%] Dispatching date-validator-daily to GitHub Actions >> "%LOGFILE%"
+"%VENV_PYTHON%" -u -c "from dotenv import load_dotenv; load_dotenv(); from github_trigger import fire_dispatch; import sys; sys.exit(0 if fire_dispatch('jamilmendez-ontel/date-validator', 'date-validator-daily', {'source': 'nightly-batch'}) else 1)" >> "%LOGFILE%" 2>&1
+set EXIT_CODE=!ERRORLEVEL!
+if !EXIT_CODE! NEQ 0 (
+    echo [%date% %time%] WARNING: date-validator dispatch failed - check GITHUB_PAT in .env >> "%LOGFILE%"
+) else (
+    echo [%date% %time%] date-validator dispatch sent successfully >> "%LOGFILE%"
 )
 
 :done
