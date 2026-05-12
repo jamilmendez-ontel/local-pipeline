@@ -47,6 +47,77 @@ def test_intervals_overlap_same_start_different_end():
     assert _intervals_overlap(_ts(9, 30), _ts(11, 30), _ts(9, 30), _ts(11, 0)) is True
 
 
+from timer_correction_review import _build_overlap_clusters
+
+
+def _entry(start_h, start_m, end_h, end_m):
+    """Minimal entry dict with start_time and end_time."""
+    return {
+        "start_time": _ts(start_h, start_m),
+        "end_time":   _ts(end_h,   end_m),
+    }
+
+
+def test_clusters_single_entry_yields_one_singleton():
+    entries = [_entry(9, 30, 11, 30)]
+    clusters = _build_overlap_clusters(entries)
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 1
+
+
+def test_clusters_two_overlapping_entries_merge():
+    a = _entry(9, 30, 11, 30)
+    b = _entry(10, 0, 11, 20)
+    clusters = _build_overlap_clusters([a, b])
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 2
+
+
+def test_clusters_two_disjoint_entries_stay_separate():
+    a = _entry(9, 30, 10, 30)
+    b = _entry(11, 0, 12, 0)
+    clusters = _build_overlap_clusters([a, b])
+    assert len(clusters) == 2
+
+
+def test_clusters_three_way_transitive_merge():
+    # A 9:00-10:30, B 10:00-11:00, C 10:30-12:00
+    # A overlaps B, B overlaps C, A does NOT directly overlap C.
+    # All three must end up in the same cluster.
+    a = _entry(9, 0, 10, 30)
+    b = _entry(10, 0, 11, 0)
+    c = _entry(10, 30, 12, 0)
+    clusters = _build_overlap_clusters([a, b, c])
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 3
+
+
+def test_clusters_same_start_different_end_merge():
+    # Today's classic case still clusters.
+    a = _entry(9, 30, 11, 30)
+    b = _entry(9, 30, 11, 0)
+    clusters = _build_overlap_clusters([a, b])
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 2
+
+
+def test_clusters_preserves_input_order_within_cluster():
+    # Stability: the cluster lists entries in input order.
+    a = _entry(9, 30, 11, 30)
+    b = _entry(10, 0, 11, 20)
+    clusters = _build_overlap_clusters([a, b])
+    assert clusters[0][0] is a
+    assert clusters[0][1] is b
+
+
+def test_clusters_touching_endpoints_stay_separate():
+    # A ends exactly when B starts -> not overlapping, two singletons.
+    a = _entry(9, 30, 10, 30)
+    b = _entry(10, 30, 11, 30)
+    clusters = _build_overlap_clusters([a, b])
+    assert len(clusters) == 2
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     passed = 0

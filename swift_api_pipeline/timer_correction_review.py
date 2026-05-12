@@ -455,6 +455,58 @@ def _intervals_overlap(a_start, a_end, b_start, b_end) -> bool:
     return a_start < b_end and b_start < a_end
 
 
+def _build_overlap_clusters(entries: list[dict]) -> list[list[dict]]:
+    """Group entries into connected components by time overlap.
+
+    Two entries belong to the same cluster if their [start_time, end_time)
+    windows intersect, or if they transitively reach each other through a
+    third overlapping entry.
+
+    Requires each entry dict to have non-None datetime values at
+    ``entry["start_time"]`` and ``entry["end_time"]``. Callers are responsible
+    for filtering NULL end_time before calling this.
+
+    Returns clusters in input-encounter order. Within each cluster, entries
+    preserve their input order.
+
+    Union-Find over O(n^2) pairwise overlap checks. n is small in practice
+    (entries per (user, task, site) per day rarely exceeds a handful).
+    """
+    n = len(entries)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _intervals_overlap(
+                entries[i]["start_time"], entries[i]["end_time"],
+                entries[j]["start_time"], entries[j]["end_time"],
+            ):
+                union(i, j)
+
+    # Bucket entries by their cluster root, preserving input order.
+    bucket_by_root: dict[int, list[dict]] = {}
+    root_order: list[int] = []
+    for i in range(n):
+        root = find(i)
+        if root not in bucket_by_root:
+            bucket_by_root[root] = []
+            root_order.append(root)
+        bucket_by_root[root].append(entries[i])
+
+    return [bucket_by_root[r] for r in root_order]
+
+
 def _parse_duration_response(value: str) -> float | None:
     """Parse duration from Google Forms response.
 
