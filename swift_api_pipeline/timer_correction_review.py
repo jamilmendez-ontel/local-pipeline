@@ -310,15 +310,17 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
     `get_previous_day_entries()` returns. Returns one dict per distinct
     (task_clean, site_name, project) combination, with per-group totals
     and a boolean flag indicating whether the group contains any
-    duplicate entries (multiple rows sharing the full duplicate-detection
-    key). Sorted by total_duration_min descending, then task ascending.
+    duplicate entries.
 
-    Duplicate-detection key (matches detect_and_create_duplicate_reviews):
-        (project_did, user_email, start_time, site_name, site_id, task)
+    Duplicate detection uses the same cluster logic as `_build_entries_html`
+    and `detect_and_track_duplicates`: bucket by
+    (project_did, user_email, site_name, site_id, task), then look for any
+    overlap cluster of size >= 2. NULL end_time entries are excluded from
+    clustering.
     """
     from collections import defaultdict
 
-    # Group by (task_clean, site_name, project).
+    # Display buckets group by (task_clean, site_name, project) for layout.
     buckets: dict[tuple, list[dict]] = defaultdict(list)
     for e in entries:
         task = e.get("task_clean") or e.get("task") or ""
@@ -327,22 +329,30 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
 
     groups = []
     for (task, site, project), rows in buckets.items():
-        # A group has duplicates iff any two rows share the full dup key.
-        seen_dup_keys: set[tuple] = set()
-        has_duplicates = False
+        # Detection bucket key uses raw task + site_id (matches cluster code).
+        detection_buckets: dict[tuple, list[dict]] = defaultdict(list)
         for r in rows:
-            dup_key = (
+            if r.get("end_time") is None:
+                continue
+            dkey = (
                 r.get("project_did"),
                 r.get("user_email"),
-                r.get("start_time"),
                 r.get("site_name"),
                 r.get("site_id"),
                 r.get("task"),
             )
-            if dup_key in seen_dup_keys:
-                has_duplicates = True
+            detection_buckets[dkey].append(r)
+
+        has_duplicates = False
+        for bucket_rows in detection_buckets.values():
+            if len(bucket_rows) < 2:
+                continue
+            for cluster in _build_overlap_clusters(bucket_rows):
+                if len(cluster) >= 2:
+                    has_duplicates = True
+                    break
+            if has_duplicates:
                 break
-            seen_dup_keys.add(dup_key)
 
         total = sum(float(r.get("duration_min") or 0) for r in rows)
 
@@ -447,11 +457,18 @@ def _remove_form_url(entry_id: str, details: str) -> str:
 
 
 def _intervals_overlap(a_start, a_end, b_start, b_end) -> bool:
-    """True if [a_start, a_end) and [b_start, b_end) intersect.
+    """True if [a_start, a_end) and [b_start, b_end) intersect, OR they share
+    a start_time.
 
-    All four arguments must be non-None timezone-aware datetimes.
-    Touching endpoints (a_end == b_start) are NOT considered overlapping.
+    All four arguments must be non-None timezone-aware datetimes. Touching
+    endpoints (a_end == b_start, different starts) are NOT considered
+    overlapping. Same start_time is ALWAYS considered overlap, even when one
+    interval is degenerate (start == end) -- this preserves the legacy
+    same-start duplicate guarantee for techs whose timer mis-fires register
+    as 0-minute entries.
     """
+    if a_start == b_start:
+        return True
     return a_start < b_end and b_start < a_end
 
 

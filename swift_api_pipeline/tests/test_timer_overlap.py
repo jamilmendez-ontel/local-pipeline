@@ -47,6 +47,22 @@ def test_intervals_overlap_same_start_different_end():
     assert _intervals_overlap(_ts(9, 30), _ts(11, 30), _ts(9, 30), _ts(11, 0)) is True
 
 
+def test_intervals_overlap_same_start_zero_duration():
+    # Real-world case: tech's timer mis-fires at 08:54 (0 min) plus a real
+    # entry starting 08:54. Strict half-open math would say "no overlap"
+    # because zero-length window has nothing inside it -- but they share
+    # a start_time, which the spec says always counts as duplicate.
+    assert _intervals_overlap(_ts(8, 54), _ts(8, 54), _ts(8, 54), _ts(9, 9)) is True
+    # Symmetric.
+    assert _intervals_overlap(_ts(8, 54), _ts(9, 9), _ts(8, 54), _ts(8, 54)) is True
+
+
+def test_intervals_overlap_zero_duration_different_starts():
+    # A zero-duration entry at a different instant than B's window:
+    # should NOT overlap (different starts, A's instant is outside B).
+    assert _intervals_overlap(_ts(8, 54), _ts(8, 54), _ts(10, 0), _ts(11, 0)) is False
+
+
 from timer_correction_review import _build_overlap_clusters
 
 
