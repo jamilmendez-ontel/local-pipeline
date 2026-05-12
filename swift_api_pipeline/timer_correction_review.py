@@ -446,6 +446,15 @@ def _remove_form_url(entry_id: str, details: str) -> str:
             f"&{REMOVE_FORM_ENTRY_DETAILS}={quote(details)}")
 
 
+def _intervals_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """True if [a_start, a_end) and [b_start, b_end) intersect.
+
+    All four arguments must be non-None timezone-aware datetimes.
+    Touching endpoints (a_end == b_start) are NOT considered overlapping.
+    """
+    return a_start < b_end and b_start < a_end
+
+
 def _parse_duration_response(value: str) -> float | None:
     """Parse duration from Google Forms response.
 
