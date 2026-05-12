@@ -310,15 +310,17 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
     `get_previous_day_entries()` returns. Returns one dict per distinct
     (task_clean, site_name, project) combination, with per-group totals
     and a boolean flag indicating whether the group contains any
-    duplicate entries (multiple rows sharing the full duplicate-detection
-    key). Sorted by total_duration_min descending, then task ascending.
+    duplicate entries.
 
-    Duplicate-detection key (matches detect_and_create_duplicate_reviews):
-        (project_did, user_email, start_time, site_name, site_id, task)
+    Duplicate detection uses the same cluster logic as `_build_entries_html`
+    and `detect_and_track_duplicates`: bucket by
+    (project_did, user_email, site_name, site_id, task), then look for any
+    overlap cluster of size >= 2. NULL end_time entries are excluded from
+    clustering.
     """
     from collections import defaultdict
 
-    # Group by (task_clean, site_name, project).
+    # Display buckets group by (task_clean, site_name, project) for layout.
     buckets: dict[tuple, list[dict]] = defaultdict(list)
     for e in entries:
         task = e.get("task_clean") or e.get("task") or ""
@@ -327,22 +329,30 @@ def _compute_summary_groups(entries: list[dict]) -> list[dict]:
 
     groups = []
     for (task, site, project), rows in buckets.items():
-        # A group has duplicates iff any two rows share the full dup key.
-        seen_dup_keys: set[tuple] = set()
-        has_duplicates = False
+        # Detection bucket key uses raw task + site_id (matches cluster code).
+        detection_buckets: dict[tuple, list[dict]] = defaultdict(list)
         for r in rows:
-            dup_key = (
+            if r.get("end_time") is None:
+                continue
+            dkey = (
                 r.get("project_did"),
                 r.get("user_email"),
-                r.get("start_time"),
                 r.get("site_name"),
                 r.get("site_id"),
                 r.get("task"),
             )
-            if dup_key in seen_dup_keys:
-                has_duplicates = True
+            detection_buckets[dkey].append(r)
+
+        has_duplicates = False
+        for bucket_rows in detection_buckets.values():
+            if len(bucket_rows) < 2:
+                continue
+            for cluster in _build_overlap_clusters(bucket_rows):
+                if len(cluster) >= 2:
+                    has_duplicates = True
+                    break
+            if has_duplicates:
                 break
-            seen_dup_keys.add(dup_key)
 
         total = sum(float(r.get("duration_min") or 0) for r in rows)
 
@@ -446,6 +456,74 @@ def _remove_form_url(entry_id: str, details: str) -> str:
             f"&{REMOVE_FORM_ENTRY_DETAILS}={quote(details)}")
 
 
+def _intervals_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """True if [a_start, a_end) and [b_start, b_end) intersect, OR they share
+    a start_time.
+
+    All four arguments must be non-None timezone-aware datetimes. Touching
+    endpoints (a_end == b_start, different starts) are NOT considered
+    overlapping. Same start_time is ALWAYS considered overlap, even when one
+    interval is degenerate (start == end) -- this preserves the legacy
+    same-start duplicate guarantee for techs whose timer mis-fires register
+    as 0-minute entries.
+    """
+    if a_start == b_start:
+        return True
+    return a_start < b_end and b_start < a_end
+
+
+def _build_overlap_clusters(entries: list[dict]) -> list[list[dict]]:
+    """Group entries into connected components by time overlap.
+
+    Two entries belong to the same cluster if their [start_time, end_time)
+    windows intersect, or if they transitively reach each other through a
+    third overlapping entry.
+
+    Requires each entry dict to have non-None datetime values at
+    ``entry["start_time"]`` and ``entry["end_time"]``. Callers are responsible
+    for filtering NULL end_time before calling this.
+
+    Returns clusters in input-encounter order. Within each cluster, entries
+    preserve their input order.
+
+    Union-Find over O(n^2) pairwise overlap checks. n is small in practice
+    (entries per (user, task, site) per day rarely exceeds a handful).
+    """
+    n = len(entries)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _intervals_overlap(
+                entries[i]["start_time"], entries[i]["end_time"],
+                entries[j]["start_time"], entries[j]["end_time"],
+            ):
+                union(i, j)
+
+    # Bucket entries by their cluster root, preserving input order.
+    bucket_by_root: dict[int, list[dict]] = {}
+    root_order: list[int] = []
+    for i in range(n):
+        root = find(i)
+        if root not in bucket_by_root:
+            bucket_by_root[root] = []
+            root_order.append(root)
+        bucket_by_root[root].append(entries[i])
+
+    return [bucket_by_root[r] for r in root_order]
+
+
 def _parse_duration_response(value: str) -> float | None:
     """Parse duration from Google Forms response.
 
@@ -500,18 +578,27 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
 
 
 def _has_duplicate_entries(entries: list[dict]) -> bool:
-    """True if any 2+ entries share the duplicate detection key.
+    """True if any cluster of 2+ entries exists by overlap on the same task.
 
-    Matches the key used in `_build_entries_html` for the DUPLICATE badge:
-    (project_did, user_email, start_time, site_name, site_id, task).
+    Matches the cluster logic used in `_build_entries_html` for the DUPLICATE
+    badge: bucket by (project_did, user_email, site_name, site_id, task),
+    then check for any overlap cluster of size >= 2. Entries with NULL
+    end_time are excluded from clustering.
     """
-    seen = set()
-    for e in entries:
-        key = (e["project_did"], e["user_email"], e["start_time"],
-               e.get("site_name"), e.get("site_id"), e.get("task"))
-        if key in seen:
-            return True
-        seen.add(key)
+    bucket_indices: dict[tuple, list[int]] = {}
+    for i, entry in enumerate(entries):
+        if entry.get("end_time") is None:
+            continue
+        key = (entry["project_did"], entry["user_email"],
+               entry.get("site_name"), entry.get("site_id"), entry.get("task"))
+        bucket_indices.setdefault(key, []).append(i)
+    for indices in bucket_indices.values():
+        if len(indices) < 2:
+            continue
+        bucket_entries = [entries[i] for i in indices]
+        for cluster in _build_overlap_clusters(bucket_entries):
+            if len(cluster) >= 2:
+                return True
     return False
 
 
@@ -520,7 +607,7 @@ def _build_entries_html(entries: list[dict]) -> str:
 
     Two levels of highlighting:
     - Same site + task group (2+ entries) → matching background color
-    - Actual duplicates (same start_time too) → matching background color + DUPLICATE badge
+    - Actual duplicates (temporal overlap on the same task) → matching background color + DUPLICATE badge
     """
     # Pastel highlight colors for groups (up to 8 distinct groups)
     GROUP_COLORS = ["#FFF3E0", "#E3F2FD", "#F3E5F5", "#E8F5E9", "#FFF9C4", "#FCE4EC", "#E0F7FA", "#FBE9E7"]
@@ -541,17 +628,31 @@ def _build_entries_html(entries: list[dict]) -> str:
                 row_color[idx] = color
             color_idx += 1
 
-    # Detect actual duplicates (same start_time) for DUPLICATE badge
-    dup_key_map = {}  # key -> list of indices
+    # Detect duplicates via temporal overlap on the same task. Uses the same
+    # cluster logic as detect_and_track_duplicates so the daily email's
+    # DUPLICATE badges match the review records we just wrote.
+    is_duplicate: set[int] = set()
+    bucket_indices: dict[tuple, list[int]] = {}
     for i, entry in enumerate(entries):
-        key = (entry["project_did"], entry["user_email"], entry["start_time"],
+        if entry.get("end_time") is None:
+            continue  # Still-running timers can't be assessed for overlap
+        key = (entry["project_did"], entry["user_email"],
                entry.get("site_name"), entry.get("site_id"), entry.get("task"))
-        dup_key_map.setdefault(key, []).append(i)
+        bucket_indices.setdefault(key, []).append(i)
 
-    is_duplicate = set()
-    for key, indices in dup_key_map.items():
-        if len(indices) >= 2:
-            is_duplicate.update(indices)
+    for indices in bucket_indices.values():
+        if len(indices) < 2:
+            continue
+        bucket_entries = [entries[i] for i in indices]
+        for cluster in _build_overlap_clusters(bucket_entries):
+            if len(cluster) < 2:
+                continue
+            # Map cluster members back to their indices in `entries`.
+            for clustered in cluster:
+                for idx in indices:
+                    if entries[idx] is clustered:
+                        is_duplicate.add(idx)
+                        break
 
     rows_html = []
     for i, entry in enumerate(entries):
@@ -629,7 +730,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
 
         duplicate_notes = (
             "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
-            "<li>The <strong>duplicate icon</strong> highlights entries that share the same start time"
+            "<li>The <strong>duplicate icon</strong> highlights entries that overlap in time on the same task"
             " &mdash; these are likely system-generated duplicates.</li>"
             if has_duplicates else ""
         )
@@ -736,58 +837,85 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
 
 
 def detect_and_track_duplicates(db, entries: list[dict]):
-    """Detect duplicate entries and create/update review records.
+    """Detect overlapping timer entries and create/update review records.
 
-    Duplicates share (project_did, user_email, start_time, site_name, site_id, task)
-    but differ in end_time/duration. Uses the same stg_timer_duplicate_reviews table
-    as the legacy duplicate review system.
+    Entries are duplicates if they share (project_did, user_email, site_name,
+    site_id, task) AND their [start_time, end_time) windows intersect.
+    Transitive overlap counts: A-B-C through B all land in one cluster even
+    if A and C do not directly touch.
+
+    NULL end_time entries (still-running timers) are filtered before clustering.
+
+    group_id is anchored on the cluster's earliest start_time. For clusters
+    where every entry shares the same start_time (today's classic case), this
+    produces the same group_id as the legacy formula -- existing pending
+    reviews keep their IDs and form threads.
+
+    Cluster entries get persisted into stg_timer_duplicate_reviews.entries
+    as a JSONB array. Each element now includes start_time (was implicit in
+    the parent column before; needed explicitly now that cluster members may
+    have different start_times). rebuild_timer_clean() joins on this per-entry
+    start_time.
     """
     import string
     LABELS = list(string.ascii_uppercase)
 
-    # Group entries by duplicate key
-    groups = {}
+    # 1. Bucket by (project, user, site, task) -- start_time deliberately omitted.
+    buckets: dict[tuple, list[dict]] = {}
     for e in entries:
-        key = (e["project_did"], e["user_email"], e["start_time"],
-               e.get("site_name"), e.get("site_id"), e.get("task"))
-        groups.setdefault(key, []).append(e)
+        if e.get("end_time") is None:
+            continue  # Skip still-running timers
+        key = (
+            e["project_did"],
+            e["user_email"],
+            e.get("site_name"),
+            e.get("site_id"),
+            e.get("task"),
+        )
+        buckets.setdefault(key, []).append(e)
 
-    # Filter to groups with 2+ entries (actual duplicates)
-    dup_groups = []
-    for (project_did, user_email, start_time, site_name, site_id, task), raw_entries in groups.items():
-        # Filter out NULL end_time (still-running timers)
-        completed = [r for r in raw_entries if r.get("end_time") is not None]
-        if len(completed) < 2:
+    # 2. Build overlap clusters within each bucket. Cluster of >=2 is a duplicate.
+    dup_groups: list[dict] = []
+    for (project_did, user_email, site_name, site_id, task), bucket in buckets.items():
+        if len(bucket) < 2:
             continue
+        for cluster in _build_overlap_clusters(bucket):
+            if len(cluster) < 2:
+                continue
 
-        sorted_entries = sorted(completed, key=lambda r: float(r.get("duration_min") or 0))
-        group_entries = []
-        for i, e in enumerate(sorted_entries):
-            if i >= len(LABELS):
-                break
-            group_entries.append({
-                "label": LABELS[i],
-                "end_time": e["end_time"],
-                "duration_min": e.get("duration_min"),
+            # Sort cluster by duration_min asc for stable labelling (matches legacy)
+            sorted_entries = sorted(cluster, key=lambda r: float(r.get("duration_min") or 0))
+            group_entries = []
+            for i, e in enumerate(sorted_entries):
+                if i >= len(LABELS):
+                    break
+                group_entries.append({
+                    "label": LABELS[i],
+                    "start_time": e["start_time"],
+                    "end_time": e["end_time"],
+                    "duration_min": e.get("duration_min"),
+                })
+
+            earliest = min(e["start_time"] for e in cluster)
+            group_id = _make_group_id(
+                project_did, user_email, earliest, site_name, site_id, task,
+            )
+            dup_groups.append({
+                "group_id": group_id,
+                "project_did": project_did,
+                "project": cluster[0].get("project"),
+                "user_email": user_email,
+                "start_time": earliest,  # Parent column holds the anchor; per-entry start_time lives in JSONB.
+                "site_name": site_name,
+                "site_id": site_id,
+                "task": task,
+                "entries": group_entries,
             })
-
-        group_id = _make_group_id(project_did, user_email, start_time, site_name, site_id, task)
-        dup_groups.append({
-            "group_id": group_id,
-            "project_did": project_did,
-            "project": completed[0].get("project"),
-            "user_email": user_email,
-            "start_time": start_time,
-            "site_name": site_name,
-            "site_id": site_id,
-            "task": task,
-            "entries": group_entries,
-        })
 
     if not dup_groups:
         return
 
-    # Check which groups are already tracked
+    # 3. Skip groups already tracked.
     group_ids = [g["group_id"] for g in dup_groups]
     existing = retry_db(
         lambda: db.fetch(
@@ -802,9 +930,8 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     if not new_groups:
         return
 
-    # Insert new duplicate review records
+    # 4. Insert new review records.
     now = datetime.now(timezone.utc)
-
     for g in new_groups:
         entries_json = _entries_to_jsonb(g["entries"])
         retry_db(
