@@ -118,6 +118,38 @@ def test_clusters_touching_endpoints_stay_separate():
     assert len(clusters) == 2
 
 
+from timer_correction_review import _make_group_id
+
+
+def test_group_id_same_start_matches_legacy_formula():
+    """Migration property: today's same-start clusters must produce the same
+    group_id under the new earliest-anchor rule, so existing pending reviews
+    keep their IDs and Google Form threads.
+    """
+    project_did = "-OmzvGwfYsSskngv6SEo"
+    user_email = "ryan@ontel.co"
+    start = _ts(12, 2)
+    site_name = "SOUTHLAND HILLS TN - New Build "
+    site_id = "Mid-South Communications/VZW/CGC/NSB/17455477/Apr 2026"
+    task = "3. Live Review Complete 2"
+
+    # Two entries that share start_time (today's classic duplicate)
+    entries = [
+        {"start_time": start, "end_time": _ts(15, 36), "duration_min": 214},
+        {"start_time": start, "end_time": _ts(15, 30), "duration_min": 208},
+    ]
+    earliest = min(e["start_time"] for e in entries)
+    new_gid = _make_group_id(project_did, user_email, earliest, site_name, site_id, task)
+
+    # Legacy formula used start_time of the (only) shared start
+    legacy_gid = _make_group_id(project_did, user_email, start, site_name, site_id, task)
+
+    assert new_gid == legacy_gid, (
+        f"group_id changed for same-start cluster -- would orphan existing reviews. "
+        f"new={new_gid} legacy={legacy_gid}"
+    )
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     passed = 0
