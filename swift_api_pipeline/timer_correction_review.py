@@ -602,17 +602,31 @@ def _build_entries_html(entries: list[dict]) -> str:
                 row_color[idx] = color
             color_idx += 1
 
-    # Detect actual duplicates (same start_time) for DUPLICATE badge
-    dup_key_map = {}  # key -> list of indices
+    # Detect duplicates via temporal overlap on the same task. Uses the same
+    # cluster logic as detect_and_track_duplicates so the daily email's
+    # DUPLICATE badges match the review records we just wrote.
+    is_duplicate: set[int] = set()
+    bucket_indices: dict[tuple, list[int]] = {}
     for i, entry in enumerate(entries):
-        key = (entry["project_did"], entry["user_email"], entry["start_time"],
+        if entry.get("end_time") is None:
+            continue  # Still-running timers can't be assessed for overlap
+        key = (entry["project_did"], entry["user_email"],
                entry.get("site_name"), entry.get("site_id"), entry.get("task"))
-        dup_key_map.setdefault(key, []).append(i)
+        bucket_indices.setdefault(key, []).append(i)
 
-    is_duplicate = set()
-    for key, indices in dup_key_map.items():
-        if len(indices) >= 2:
-            is_duplicate.update(indices)
+    for indices in bucket_indices.values():
+        if len(indices) < 2:
+            continue
+        bucket_entries = [entries[i] for i in indices]
+        for cluster in _build_overlap_clusters(bucket_entries):
+            if len(cluster) < 2:
+                continue
+            # Map cluster members back to their indices in `entries`.
+            for clustered in cluster:
+                for idx in indices:
+                    if entries[idx] is clustered:
+                        is_duplicate.add(idx)
+                        break
 
     rows_html = []
     for i, entry in enumerate(entries):

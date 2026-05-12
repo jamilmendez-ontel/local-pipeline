@@ -167,6 +167,45 @@ def test_group_id_same_start_matches_legacy_formula():
     )
 
 
+def test_email_dup_badge_logic_matches_detection():
+    """The daily-email badge code must use the same cluster logic as
+    detect_and_track_duplicates. Smoke check: a contained overlap pair
+    yields both indices in is_duplicate.
+    """
+    # Mirror the inline logic from _build_entries_html with the same inputs.
+    a = {"project_did": "P", "user_email": "u@x", "site_name": "S",
+         "site_id": "SID", "task": "T",
+         "start_time": _ts(9, 30), "end_time": _ts(11, 30), "duration_min": 120}
+    b = {"project_did": "P", "user_email": "u@x", "site_name": "S",
+         "site_id": "SID", "task": "T",
+         "start_time": _ts(10, 0), "end_time": _ts(11, 20), "duration_min": 80}
+    entries = [a, b]
+
+    is_duplicate: set[int] = set()
+    bucket_indices: dict[tuple, list[int]] = {}
+    for i, entry in enumerate(entries):
+        if entry.get("end_time") is None:
+            continue
+        key = (entry["project_did"], entry["user_email"],
+               entry.get("site_name"), entry.get("site_id"), entry.get("task"))
+        bucket_indices.setdefault(key, []).append(i)
+
+    for indices in bucket_indices.values():
+        if len(indices) < 2:
+            continue
+        bucket_entries = [entries[i] for i in indices]
+        for cluster in _build_overlap_clusters(bucket_entries):
+            if len(cluster) < 2:
+                continue
+            for clustered in cluster:
+                for idx in indices:
+                    if entries[idx] is clustered:
+                        is_duplicate.add(idx)
+                        break
+
+    assert is_duplicate == {0, 1}, f"expected both indices flagged, got {is_duplicate}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     passed = 0
