@@ -561,18 +561,27 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
 
 
 def _has_duplicate_entries(entries: list[dict]) -> bool:
-    """True if any 2+ entries share the duplicate detection key.
+    """True if any cluster of 2+ entries exists by overlap on the same task.
 
-    Matches the key used in `_build_entries_html` for the DUPLICATE badge:
-    (project_did, user_email, start_time, site_name, site_id, task).
+    Matches the cluster logic used in `_build_entries_html` for the DUPLICATE
+    badge: bucket by (project_did, user_email, site_name, site_id, task),
+    then check for any overlap cluster of size >= 2. Entries with NULL
+    end_time are excluded from clustering.
     """
-    seen = set()
-    for e in entries:
-        key = (e["project_did"], e["user_email"], e["start_time"],
-               e.get("site_name"), e.get("site_id"), e.get("task"))
-        if key in seen:
-            return True
-        seen.add(key)
+    bucket_indices: dict[tuple, list[int]] = {}
+    for i, entry in enumerate(entries):
+        if entry.get("end_time") is None:
+            continue
+        key = (entry["project_did"], entry["user_email"],
+               entry.get("site_name"), entry.get("site_id"), entry.get("task"))
+        bucket_indices.setdefault(key, []).append(i)
+    for indices in bucket_indices.values():
+        if len(indices) < 2:
+            continue
+        bucket_entries = [entries[i] for i in indices]
+        for cluster in _build_overlap_clusters(bucket_entries):
+            if len(cluster) >= 2:
+                return True
     return False
 
 
@@ -581,7 +590,7 @@ def _build_entries_html(entries: list[dict]) -> str:
 
     Two levels of highlighting:
     - Same site + task group (2+ entries) → matching background color
-    - Actual duplicates (same start_time too) → matching background color + DUPLICATE badge
+    - Actual duplicates (temporal overlap on the same task) → matching background color + DUPLICATE badge
     """
     # Pastel highlight colors for groups (up to 8 distinct groups)
     GROUP_COLORS = ["#FFF3E0", "#E3F2FD", "#F3E5F5", "#E8F5E9", "#FFF9C4", "#FCE4EC", "#E0F7FA", "#FBE9E7"]
@@ -704,7 +713,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
 
         duplicate_notes = (
             "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
-            "<li>The <strong>duplicate icon</strong> highlights entries that share the same start time"
+            "<li>The <strong>duplicate icon</strong> highlights entries that overlap in time on the same task"
             " &mdash; these are likely system-generated duplicates.</li>"
             if has_duplicates else ""
         )
