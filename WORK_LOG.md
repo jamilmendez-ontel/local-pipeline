@@ -4,9 +4,43 @@ This document tracks all development sessions, changes made, and issues identifi
 
 ---
 
-## Session: 2026-05-12 — Timer Overlap Duplicate Detection: Verification
+## Session: 2026-05-12 — Timer Overlap-Based Duplicate Detection
 
-Ran end-to-end verification (Task 7) for the overlap-based duplicate detection shipped in migration 049. Queried `stg_timer_activities` for the last 14 days and confirmed genuine overlap-only pairs exist in production: the most recent was 2026-05-11, where glaiza@ontel.co had a "General Admin and Support" entry starting at 13:00:59 ET that overlapped a same-task entry starting at 08:54:44 ET (they share the 13:00–16:31 ET window). Ran `timer_correction_review.py --send --test --date 2026-05-11`, which processed 671 entries across 81 techs and called `detect_and_track_duplicates`, producing 30 new review groups in `stg_timer_duplicate_reviews` (all `status=notified`, `created_at ~00:28 ET`). All 30 new groups are same-start clusters; the overlap-only pair for glaiza was not captured as a separate overlap-only group because the nightly pipeline had already created group `095cf9d98d9b` (3-entry same-start cluster) at 00:28 ET before our manual run, so our run correctly skipped it as already tracked — expected deduplication behavior. For the `rebuild_timer_clean()` join test, used group `d2deb38431f9` (ronald.nieva@ontel.co, "6. Final COP Complete", 2 entries, both with `start_time = 2026-05-11 15:58:51+00`): set entry A as `rejected_entries`, ran rebuild, and confirmed `leftover_count = 0` — the rejected entry was absent from `stg_timer_activities_clean`. The migration 049 per-entry JSONB `start_time` field was present and the join worked correctly. Reverted the group to `status=notified, resolved_by=null` and ran a second rebuild to restore the clean table; final sanity check confirmed the revert.
+Extended timer duplicate detection from "same start_time only" to "any temporal overlap on the same task". Old rule caught only entries that shared an exact start_time; new rule also catches the common real-world case where a tech accidentally starts a second timer for the same task while the first is still running (e.g. Timer A 09:30–11:30 + Timer B 10:00–11:20 inside A).
+
+### Brainstorm decisions
+
+Spec at `docs/superpowers/specs/2026-05-12-timer-overlap-duplicate-detection-design.md`. Scope: same task only — group by `(project_did, user_email, site_name, site_id, task)`. Overlap rule: any temporal intersection (widest option; same-start is a special case). Auto-resolve: keep today's "latest end_time wins" rule unchanged. NULL end_time: skip from clustering, same as today. UI: existing DUPLICATE badge, no new visual treatment. Cross-midnight gap (open timers slipping past detection because the daily query only fetches yesterday) noted as out of scope here.
+
+### Implementation
+
+Plan at `docs/superpowers/plans/2026-05-12-timer-overlap-duplicate-detection.md`. Executed via subagent-driven development on branch `feature/timer-overlap-dup`. Seven planned tasks plus one follow-up bug fix uncovered by reviewing a real email:
+
+- `3045a40` Pure `_intervals_overlap` predicate + 6 boundary tests.
+- `778c956` Union-Find `_build_overlap_clusters` for connected components by time overlap (handles transitive A↔B↔C clusters where A and C don't directly touch).
+- `cd98952` Refactored `detect_and_track_duplicates` to bucket without `start_time` and use the cluster logic. `group_id` anchors on the cluster's earliest start_time — for same-start clusters this produces the legacy value, so existing pending reviews keep their Google Form thread IDs.
+- `eea4b75` Strengthened the group_id-stability regression test to walk the actual clustering pipeline (the original draft was tautological — code reviewer caught it).
+- `db28108` `_build_entries_html` DUPLICATE badge now uses the same cluster logic — single source of truth between the email row badges and the persisted review records.
+- `4f14422` Aligned `_has_duplicate_entries` and the email copy ("share the same start time" → "overlap in time on the same task") with the new rule. Code reviewer caught that the badge would fire without the explanatory bullets because the gate that injects them was still on the old key.
+- `e4df11c` Migration 049 SQL: rewrites `data_staging.rebuild_timer_clean()` so the rejected-entry exclusion and the unresolved-keep-latest subquery both join on `(elem->>'start_time')::timestamptz` from JSONB instead of the parent column. Includes an idempotent backfill that injects `start_time` into existing `entries[]` and `rejected_entries[]` arrays.
+- `ae2e755` Applied migration 049 to cloud Supabase via `apply_049.py`. Pre/post counts: 1,490 review rows backfilled, all rows now carry `entries[0].start_time`, parent and JSONB values match on spot-check.
+- `00a770b` First WORK_LOG verification stub (since rewritten — this entry).
+- `551ad92` Bug fix from inspecting the real May 11 email landed in jamil's inbox. Two issues hit at once: (1) `_intervals_overlap` used strict-less-than on both sides, so a 0-minute timer mis-fire at 08:54 plus a real 08:54–09:09 entry was missed because `b_start < a_end` reduced to `08:54 < 08:54` = False — the spec's same-start invariant wasn't enforced when one interval was degenerate. (2) `_compute_summary_groups` still used the old exact-match key, so the Daily Task Summary's ⚠ column and the row badges could disagree. Fixed: same-start always counts as overlap regardless of duration, and the summary now uses the cluster helper too.
+
+### Verification
+
+Ran `python timer_correction_review.py --send --test --date 2026-05-11` after the fix — sent 81 emails to jamil covering 671 entries. Confirmed in the rendered HTML that mila's email shows the DUPLICATE badge on both the REYNOLDSON Data Pre-Fill same-start pair (identical entries) AND the (no site)/Tools and Automation 08:54–08:54 + 08:54–09:09 pair (zero-duration same-start, the fix). glaiza's email shows the new partial-cross-over case — "1. General Admin and Support" entries 08:54–16:31 and 13:00–16:59 (different starts, intersecting windows) flagged across a transitively-merged 4-entry cluster.
+
+Also tested the per-entry JSONB join in `rebuild_timer_clean()` end-to-end: marked a real review's entries[0] as rejected, ran rebuild, confirmed the rejected natural-key was excluded from `stg_timer_activities_clean` (leftover_count = 0), then reverted to the original state and re-ran rebuild to restore the clean table.
+
+### Files touched
+
+- `swift_api_pipeline/timer_correction_review.py` — added `_intervals_overlap` and `_build_overlap_clusters`, refactored `detect_and_track_duplicates` and `_build_entries_html`, aligned `_has_duplicate_entries` and `_compute_summary_groups`, updated email copy.
+- `swift_api_pipeline/tests/test_timer_overlap.py` — new file, 17 tests covering overlap math, cluster building, group_id stability, badge consistency, and zero-duration same-start.
+- `swift_api_pipeline/migrations/049_timer_overlap_dup_detection.sql` — new function body + idempotent JSONB backfill.
+- `swift_api_pipeline/migrations/apply_049.py` — apply script with pre/post backfill verification.
+
+10 commits on `feature/timer-overlap-dup`, ready to merge.
 
 ---
 
