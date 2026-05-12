@@ -122,27 +122,44 @@ from timer_correction_review import _make_group_id
 
 
 def test_group_id_same_start_matches_legacy_formula():
-    """Migration property: today's same-start clusters must produce the same
-    group_id under the new earliest-anchor rule, so existing pending reviews
-    keep their IDs and Google Form threads.
+    """Migration invariant: same-start clusters produce the same group_id
+    under the new earliest-anchor rule as the legacy exact-match formula did.
+    Walks the actual clustering pipeline (bucket -> _build_overlap_clusters
+    -> earliest -> _make_group_id) instead of asserting f(x) == f(x).
+
+    Failure of this test would mean existing pending Google Form threads
+    get orphaned the next time detection runs.
     """
     project_did = "-OmzvGwfYsSskngv6SEo"
     user_email = "ryan@ontel.co"
-    start = _ts(12, 2)
+    shared_start = _ts(12, 2)
     site_name = "SOUTHLAND HILLS TN - New Build "
     site_id = "Mid-South Communications/VZW/CGC/NSB/17455477/Apr 2026"
     task = "3. Live Review Complete 2"
 
-    # Two entries that share start_time (today's classic duplicate)
-    entries = [
-        {"start_time": start, "end_time": _ts(15, 36), "duration_min": 214},
-        {"start_time": start, "end_time": _ts(15, 30), "duration_min": 208},
+    # Bucket of two entries sharing start_time but with different end_time --
+    # the legacy "same-start duplicate" shape.
+    bucket = [
+        {"start_time": shared_start, "end_time": _ts(15, 36), "duration_min": 214},
+        {"start_time": shared_start, "end_time": _ts(15, 30), "duration_min": 208},
     ]
-    earliest = min(e["start_time"] for e in entries)
-    new_gid = _make_group_id(project_did, user_email, earliest, site_name, site_id, task)
 
-    # Legacy formula used start_time of the (only) shared start
-    legacy_gid = _make_group_id(project_did, user_email, start, site_name, site_id, task)
+    clusters = _build_overlap_clusters(bucket)
+    assert len(clusters) == 1, f"expected one cluster, got {len(clusters)}"
+    cluster = clusters[0]
+    assert len(cluster) == 2, f"expected cluster size 2, got {len(cluster)}"
+
+    # The earliest-anchor that the refactored detect_and_track_duplicates uses.
+    earliest = min(e["start_time"] for e in cluster)
+    # Sanity: clustering returned both same-start entries, so earliest must
+    # equal the shared value -- this fact, not a math tautology, is what
+    # carries the migration guarantee for same-start clusters.
+    assert earliest == shared_start
+
+    new_gid = _make_group_id(project_did, user_email, earliest,
+                             site_name, site_id, task)
+    legacy_gid = _make_group_id(project_did, user_email, shared_start,
+                                site_name, site_id, task)
 
     assert new_gid == legacy_gid, (
         f"group_id changed for same-start cluster -- would orphan existing reviews. "
