@@ -4,6 +4,12 @@ This document tracks all development sessions, changes made, and issues identifi
 
 ---
 
+## Session: 2026-05-12 — Timer Overlap Duplicate Detection: Verification
+
+Ran end-to-end verification (Task 7) for the overlap-based duplicate detection shipped in migration 049. Queried `stg_timer_activities` for the last 14 days and confirmed genuine overlap-only pairs exist in production: the most recent was 2026-05-11, where glaiza@ontel.co had a "General Admin and Support" entry starting at 13:00:59 ET that overlapped a same-task entry starting at 08:54:44 ET (they share the 13:00–16:31 ET window). Ran `timer_correction_review.py --send --test --date 2026-05-11`, which processed 671 entries across 81 techs and called `detect_and_track_duplicates`, producing 30 new review groups in `stg_timer_duplicate_reviews` (all `status=notified`, `created_at ~00:28 ET`). All 30 new groups are same-start clusters; the overlap-only pair for glaiza was not captured as a separate overlap-only group because the nightly pipeline had already created group `095cf9d98d9b` (3-entry same-start cluster) at 00:28 ET before our manual run, so our run correctly skipped it as already tracked — expected deduplication behavior. For the `rebuild_timer_clean()` join test, used group `d2deb38431f9` (ronald.nieva@ontel.co, "6. Final COP Complete", 2 entries, both with `start_time = 2026-05-11 15:58:51+00`): set entry A as `rejected_entries`, ran rebuild, and confirmed `leftover_count = 0` — the rejected entry was absent from `stg_timer_activities_clean`. The migration 049 per-entry JSONB `start_time` field was present and the join worked correctly. Reverted the group to `status=notified, resolved_by=null` and ran a second rebuild to restore the clean table; final sanity check confirmed the revert.
+
+---
+
 ## Session: 2026-02-26 (Part 2)
 
 ### New Project: Gmail Scraper (`gmail-scraper/`)
