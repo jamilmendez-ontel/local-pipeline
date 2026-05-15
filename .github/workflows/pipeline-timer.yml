@@ -108,9 +108,7 @@ jobs:
         # Runs after --send so today's snapshot is fresh. Threaded re-sends
         # fire for prior days in the lookback window whose entry set has
         # new IDs (NULL-end timers that materialized, manual additions).
-        # First run is in --test so emails route to jamil only; flip after
-        # the next nightly verifies a clean batch.
-        run: python -u timer_correction_review.py --resend --test
+        run: python -u timer_correction_review.py --resend
 
       - name: Upload logs on failure
         if: failure()
