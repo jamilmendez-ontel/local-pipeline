@@ -661,16 +661,19 @@ def _build_entries_html(entries: list[dict]) -> str:
             entry.get("site_name"), entry.get("site_id"), entry.get("task"),
             entry.get("end_time"), entry.get("duration_min"),
         )
-        project = entry.get("project") or "(no project)"
-        site = entry.get("site_name") or "(no site)"
-        task = entry.get("task") or "(no task)"
-        date = _fmt_date(entry["start_time"])
-        start = _fmt_time_short(entry["start_time"])
-        end = _fmt_time_short(entry.get("end_time"))
-        duration = _fmt_duration(entry.get("duration_min"))
+        project_raw = entry.get("project") or "(no project)"
+        site_raw = entry.get("site_name") or "(no site)"
+        task_raw = entry.get("task") or "(no task)"
+        project = _escape_html(project_raw)
+        site = _escape_html(site_raw)
+        task = _escape_html(task_raw)
+        date = _escape_html(_fmt_date(entry["start_time"]))
+        start = _escape_html(_fmt_time_short(entry["start_time"]))
+        end = _escape_html(_fmt_time_short(entry.get("end_time")))
+        duration = _escape_html(_fmt_duration(entry.get("duration_min")))
 
-        # Details string for pre-fill (visible context in form)
-        details = f"{project} | {site} | {task} | {date} | {duration}"
+        # Form pre-fill uses raw values (URL-encoded inside the form helpers).
+        details = f"{project_raw} | {site_raw} | {task_raw} | {_fmt_date(entry['start_time'])} | {_fmt_duration(entry.get('duration_min'))}"
         correct_link = _correct_form_url(entry_id, details)
         remove_link = _remove_form_url(entry_id, details)
 
@@ -814,16 +817,21 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                         break
 
             if thread_id:
+                entry_ids_snapshot = json.dumps(_collect_entry_ids(user_entries))
                 retry_db(
-                    lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id: db.execute(
+                    lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
+                           eids=entry_ids_snapshot: db.execute(
                         f"""INSERT INTO {SCHEMA_STAGING}.stg_timer_daily_notifications
-                            (user_email, send_date, thread_id, message_id)
-                            VALUES ($1, $2, $3, $4)
+                            (user_email, send_date, thread_id, message_id,
+                             last_sent_at, last_sent_entry_ids)
+                            VALUES ($1, $2, $3, $4, NOW(), $5::jsonb)
                             ON CONFLICT (user_email, send_date) DO UPDATE SET
                                 thread_id = EXCLUDED.thread_id,
-                                message_id = EXCLUDED.message_id
+                                message_id = EXCLUDED.message_id,
+                                last_sent_at = EXCLUDED.last_sent_at,
+                                last_sent_entry_ids = EXCLUDED.last_sent_entry_ids
                         """,
-                        ue, sd, tid, mid,
+                        ue, sd, tid, mid, eids,
                     ),
                     description=f"store notification thread for {user_email}",
                 )
@@ -2086,6 +2094,337 @@ def run_remind(test_mode: bool = False):
 
 
 # --------------------------------------------------------------------------
+# --resend: Re-send daily email when entries materialize or get added
+# --------------------------------------------------------------------------
+
+def _collect_entry_ids(entries: list[dict]) -> list[str]:
+    """Return the list of 12-char entry_ids for the given entry dicts,
+    using the same hash formula as _build_entries_html / lookup_entry_by_id.
+    """
+    return [
+        _make_entry_id(
+            e["project_did"], e["user_email"], e["start_time"],
+            e.get("site_name"), e.get("site_id"), e.get("task"),
+            e.get("end_time"), e.get("duration_min"),
+        )
+        for e in entries
+    ]
+
+
+def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
+    """Fetch the canonical view of (user, date) entries for re-send: raw
+    stg_timer_activities (DISTINCT-deduped on natural keys) UNION manual
+    additions. Mirrors the shape returned by get_previous_day_entries so
+    _build_entries_html can render it unchanged.
+
+    Removed entries (stg_timer_entry_removals) are intentionally NOT
+    filtered out here. The re-send gating rule fires only when NEW
+    entry_ids appear vs the snapshot; a removal leaves the same entry_id
+    set as before, so the absence of a removal filter is what keeps
+    pure-removal days from generating a spurious re-send (the
+    confirmation email already covered that path). Do not add a removal
+    JOIN without also flipping the gating rule to symmetric-diff.
+    """
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            SELECT DISTINCT project_did, project, user_email, start_time, end_time,
+                   duration_min, site_name, site_id, task, task_clean
+            FROM {SCHEMA_STAGING}.stg_timer_activities
+            WHERE user_email = $1
+              AND DATE(start_time AT TIME ZONE 'America/New_York') = $2
+
+            UNION
+
+            SELECT project_did, project, user_email, start_time, end_time,
+                   duration_min, site_name, site_id, task, task_clean
+            FROM {SCHEMA_STAGING}.stg_timer_entry_additions
+            WHERE user_email = $1
+              AND DATE(start_time AT TIME ZONE 'America/New_York') = $2
+
+            ORDER BY user_email, site_name, task, start_time
+        """, user_email, entry_date),
+        description=f"current-day entries for {user_email} on {entry_date}",
+    )
+    return [dict(r) for r in rows] if rows else []
+
+
+def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
+    """Return (user_email, send_date, thread_id, message_id, last_sent_entry_ids,
+    current_entries) for every (user, date) in the last `lookback_days` days
+    whose current entry-id set differs from the stored snapshot.
+
+    First-time bootstrap: rows with NULL last_sent_entry_ids are populated
+    with the current set silently and NOT returned as resend candidates,
+    so we don't blast a re-send to every tech the day after this migration.
+    """
+    cutoff = (datetime.now(TZ_EASTERN) - timedelta(days=lookback_days)).date()
+    # Surface unexpectedly large batches — a clean steady state is a
+    # handful of candidates per day. A spike usually means an upstream
+    # extractor reloaded a big window or the lookback was widened by
+    # mistake.
+    LARGE_BATCH_THRESHOLD = 30
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            SELECT user_email, send_date, thread_id, message_id,
+                   last_sent_at, last_sent_entry_ids
+            FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+            WHERE send_date >= $1
+              AND thread_id IS NOT NULL
+            ORDER BY send_date DESC, user_email
+        """, cutoff),
+        description="fetch resend candidates",
+    )
+    if not rows:
+        return []
+
+    candidates = []
+    for r in rows:
+        user_email = r["user_email"]
+        send_date = r["send_date"]
+        current = _fetch_current_day_entries(db, user_email, send_date)
+        if not current:
+            continue
+        current_ids = set(_collect_entry_ids(current))
+        snapshot = r["last_sent_entry_ids"]
+
+        if snapshot is None:
+            # Bootstrap: never sent with snapshot before. Populate quietly
+            # so the next change actually triggers a re-send.
+            retry_db(
+                lambda ue=user_email, sd=send_date, ids=json.dumps(sorted(current_ids)): db.execute(
+                    f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
+                        SET last_sent_entry_ids = $1::jsonb
+                        WHERE user_email = $2 AND send_date = $3
+                    """,
+                    ids, ue, sd,
+                ),
+                description=f"bootstrap snapshot for {user_email} on {send_date}",
+            )
+            continue
+
+        # `snapshot` arrives as a Python list (asyncpg decodes JSONB → list).
+        snapshot_ids = set(snapshot) if isinstance(snapshot, (list, set)) else set(json.loads(snapshot))
+
+        # Trigger only when NEW entry_ids appeared. Removed ones don't
+        # warrant a re-send — confirmation emails cover that path.
+        if current_ids - snapshot_ids:
+            candidates.append({
+                "user_email": user_email,
+                "send_date": send_date,
+                "thread_id": r["thread_id"],
+                "message_id": r["message_id"],
+                "snapshot_ids": snapshot_ids,
+                "current_entries": current,
+            })
+
+    if len(candidates) > LARGE_BATCH_THRESHOLD:
+        logger.warning(
+            f"Large re-send batch: {len(candidates)} (user, date) pairs in "
+            f"{lookback_days}-day lookback. Review whether an upstream "
+            f"reload triggered this before sending."
+        )
+
+    return candidates
+
+
+def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> str:
+    """Wrap _build_entries_html, appending a green NEW badge to rows whose
+    entry_id is not present in `snapshot_ids` (i.e., materialized or added
+    since the last sent email).
+    """
+    base_html = _build_entries_html(entries)
+    new_badge = (
+        ' <span style="display:inline-block;background:#2e7d32;color:white;'
+        'font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;'
+        'margin-left:4px;font-weight:bold;">NEW</span>'
+    )
+
+    rows = base_html.split("<tr")
+    out = [rows[0]]
+    new_rows_marked = 0
+    for i, entry in enumerate(entries, start=1):
+        eid = _make_entry_id(
+            entry["project_did"], entry["user_email"], entry["start_time"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+            entry.get("end_time"), entry.get("duration_min"),
+        )
+        row_html = "<tr" + rows[i]
+        if eid not in snapshot_ids:
+            # Append NEW badge inside the Duration cell, right after the
+            # closing of the duration text. The duration cell ends with
+            # the duration value followed by an optional DUPLICATE badge;
+            # we splice NEW immediately before the closing </td> of that
+            # cell, which is the 7th <td> (cells 1-7 then Action 8).
+            tds = row_html.split("</td>")
+            if len(tds) >= 7:
+                tds[6] = tds[6] + new_badge
+                row_html = "</td>".join(tds)
+                new_rows_marked += 1
+        out.append(row_html)
+
+    logger.debug(f"resend HTML: marked {new_rows_marked} rows as NEW")
+    return "".join(out)
+
+
+_RESEND_CALLOUT_HTML = (
+    '<div style="background:#f3e5f5;border-left:4px solid #7b1fa2;'
+    'border-radius:4px;padding:12px 16px;margin:12px 0 18px;font-size:13px;color:#333;">'
+    '<p style="margin:0 0 6px;font-weight:bold;color:#4a148c;">'
+    'Why am I getting this email again?</p>'
+    '<p style="margin:0;line-height:1.5;">'
+    'Some entries on this day have changed since the original email went out. '
+    'Entries that were still running when the first email was sent have now '
+    'completed and appear below with their final durations. Edit and Remove '
+    'buttons reflect the current entries &mdash; please use the links in '
+    '<strong>this</strong> email rather than the original.</p>'
+    '</div>'
+)
+
+_RESEND_UPDATED_BADGE = (
+    ' <span style="display:inline-block;background:#7b1fa2;color:white;'
+    'font-size:11px;padding:3px 8px;border-radius:3px;vertical-align:middle;'
+    'margin-left:6px;letter-spacing:0.5px;">UPDATED</span>'
+)
+
+
+def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
+    """Detect (user, date) pairs whose current entry set has changed since
+    the last sent email and reply on the original thread with an UPDATED
+    view. Threads via stg_timer_daily_notifications.thread_id; updates
+    last_sent_at + last_sent_entry_ids after each send.
+    """
+    from gmail_client import authenticate
+
+    candidates = find_days_needing_resend(db, lookback_days=lookback_days)
+    if not candidates:
+        logger.info("No days need a re-send")
+        return
+
+    logger.info(f"Re-send candidates: {len(candidates)} (user, date) pairs")
+    service = authenticate()
+    sent = 0
+
+    for c in candidates:
+        user_email = c["user_email"]
+        send_date = c["send_date"]
+        thread_id = c["thread_id"]
+        message_id = c["message_id"]
+        entries = c["current_entries"]
+        snapshot_ids = c["snapshot_ids"]
+        recipient = "jamil.mendez@ontel.co" if test_mode else user_email
+        n = len(entries)
+        date_str = send_date.strftime("%B %d, %Y")
+
+        table_rows = _build_resend_entries_html(entries, snapshot_ids)
+        has_duplicates = _has_duplicate_entries(entries)
+        duplicate_notes = (
+            "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
+            "<li>The <strong>DUPLICATE</strong> badge marks entries that overlap in time on the same task &mdash; these are likely system-generated duplicates.</li>"
+            if has_duplicates else ""
+        )
+
+        html_body = f"""
+        <html>
+        <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
+            <div style="background:#1565c0;color:white;padding:16px 24px;">
+                <h2 style="margin:0;">Timer Activity Entries - {date_str}{_RESEND_UPDATED_BADGE}</h2>
+                <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">Your day was updated since the original email. Latest view below.</p>
+            </div>
+            <div style="padding:24px;">
+                <p>Hi {_first_name(user_email)},</p>
+                {_RESEND_CALLOUT_HTML}
+                <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
+                   from <strong>{date_str}</strong>.</p>
+
+                <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Daily Task Summary</h3>
+                {_build_summary_html(entries)}
+
+                <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Entry Details</h3>
+                <ul style="font-size:13px;color:#555;margin:8px 0 16px;">
+                    <li><strong style="color:#1565c0;">Edit</strong> &mdash; fix a wrong duration</li>
+                    <li><strong style="color:#c62828;">Remove</strong> &mdash; delete a duplicate or incorrect entry</li>
+                    <li><span style="display:inline-block;background:#2e7d32;color:white;font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;font-weight:bold;">NEW</span> &mdash; entry materialized since the original email (a running timer that has now completed, or a manual addition)</li>
+                </ul>
+                <table style="border-collapse:collapse;width:100%;font-size:13px;margin:16px 0;">
+                    <thead>
+                        <tr style="background:#f5f5f5;">
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Date</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Project</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Site</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Task</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Start</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">End</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Duration</th>
+                            <th style="padding:8px 10px;border:1px solid #ddd;text-align:center;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {table_rows}
+                    </tbody>
+                </table>
+
+                <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
+                    <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
+                    <ul style="margin:0;padding-left:20px;line-height:1.8;">
+                        <li>Use the Edit and Remove links in <strong>this</strong> email rather than the original &mdash; links in older emails for this day may no longer match the current entries.</li>
+                        {duplicate_notes}
+                        <li>Entries are <strong>color-coded</strong> by site and task so you can easily spot related groups.</li>
+                    </ul>
+                    <p style="margin:8px 0 0;color:#888;font-size:12px;">
+                        Only click a button if something needs to be changed.
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        subject = f"Re: Timer Activity Entries - {date_str}"
+        msg = MIMEMultipart()
+        msg["To"] = recipient
+        msg["From"] = "me"
+        msg["Subject"] = subject
+        if message_id:
+            msg["In-Reply-To"] = message_id
+            msg["References"] = message_id
+        msg.attach(MIMEText(html_body, "html"))
+
+        try:
+            raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+            send_body = {"raw": raw}
+            if thread_id:
+                send_body["threadId"] = thread_id
+            service.users().messages().send(userId="me", body=send_body).execute()
+            sent += 1
+
+            current_ids = sorted(_collect_entry_ids(entries))
+            retry_db(
+                lambda ue=user_email, sd=send_date, ids=json.dumps(current_ids): db.execute(
+                    f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
+                        SET last_sent_at = NOW(),
+                            last_sent_entry_ids = $1::jsonb
+                        WHERE user_email = $2 AND send_date = $3
+                    """,
+                    ids, ue, sd,
+                ),
+                description=f"update last_sent for {user_email} on {send_date}",
+            )
+
+            logger.info(f"Sent resend email to {recipient} for {send_date} "
+                        f"({n} entries, thread={thread_id})")
+        except Exception as e:
+            logger.error(f"Failed to send resend to {recipient} for {send_date}: {e}")
+
+    logger.info(f"Resend complete: {sent} emails sent ({len(candidates)} candidates)")
+
+
+def run_resend(test_mode: bool = False, lookback_days: int = 7):
+    """Run the daily-email re-send pass: detect changed days, send threaded updates."""
+    db = get_db()
+    send_resend_emails(db, test_mode=test_mode, lookback_days=lookback_days)
+
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 
@@ -2095,12 +2434,16 @@ def main():
     parser.add_argument("--send", action="store_true", help="Send daily timer entry emails")
     parser.add_argument("--apply", action="store_true", help="Process form responses + auto-resolve stale")
     parser.add_argument("--remind", action="store_true", help="Send duplicate reminder emails")
+    parser.add_argument("--resend", action="store_true",
+                        help="Re-send daily email (threaded) for days whose entry set changed")
+    parser.add_argument("--resend-lookback-days", type=int, default=7,
+                        help="How many days back to check for resend candidates (default 7)")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
     parser.add_argument("--date", type=str, help="Target date YYYY-MM-DD (default: yesterday). For backfill sends.")
     args = parser.parse_args()
 
-    if not any([args.send, args.apply, args.remind]):
-        parser.error("At least one of --send, --apply, --remind is required")
+    if not any([args.send, args.apply, args.remind, args.resend]):
+        parser.error("At least one of --send, --apply, --remind, --resend is required")
 
     target_date = None
     if args.date:
@@ -2122,6 +2465,10 @@ def main():
         if args.remind:
             logger.info("=== Running --remind ===")
             run_remind(test_mode=args.test)
+
+        if args.resend:
+            logger.info("=== Running --resend ===")
+            run_resend(test_mode=args.test, lookback_days=args.resend_lookback_days)
 
     finally:
         close_db()
