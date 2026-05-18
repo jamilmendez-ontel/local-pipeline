@@ -2238,19 +2238,17 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
 
 
 def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> str:
-    """Wrap _build_entries_html, appending two optional badges in the
-    Duration cell of each row:
+    """Wrap _build_entries_html, appending one optional badge in the
+    Duration cell of each row. EDITED takes precedence over NEW because
+    it's the more specific signal — the tech already knows they made the
+    change, so labeling the row as NEW too would be redundant.
 
-    - NEW (green) when the entry_id is not present in `snapshot_ids` —
-      indicates the row materialized or was added since the last email.
     - EDITED (blue, matches the Edit button color) when the entry's
-      `is_edited` flag is True — indicates this row's duration / end_time
-      reflects a tech-submitted correction rather than the raw Swift
-      value. Set by _fetch_current_day_entries via a LEFT JOIN to
-      stg_timer_corrections on the corrected natural key.
-
-    Both badges can appear on the same row (e.g., a still-running entry
-    that the tech edited — it materialized AND it's edited).
+      `is_edited` flag is True. Set by _fetch_current_day_entries via a
+      LEFT JOIN to stg_timer_corrections on the corrected natural key.
+    - NEW (green) when the entry is not edited AND its entry_id is not
+      present in `snapshot_ids` — indicates the row materialized or was
+      manually added since the last sent email.
     """
     base_html = _build_entries_html(entries)
     new_badge = (
@@ -2275,20 +2273,20 @@ def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> s
             entry.get("end_time"), entry.get("duration_min"),
         )
         row_html = "<tr" + rows[i]
-        badges = ""
-        if eid not in snapshot_ids:
-            badges += new_badge
-            new_rows_marked += 1
+        badge = ""
         if entry.get("is_edited"):
-            badges += edited_badge
+            badge = edited_badge
             edited_rows_marked += 1
-        if badges:
-            # Splice the badges into the 7th </td> (Duration cell). Cells
+        elif eid not in snapshot_ids:
+            badge = new_badge
+            new_rows_marked += 1
+        if badge:
+            # Splice the badge into the 7th </td> (Duration cell). Cells
             # 1-7 are Date / Project / Site / Task / Start / End / Duration;
             # cell 8 is Action. Index tds[6] is the Duration cell.
             tds = row_html.split("</td>")
             if len(tds) >= 7:
-                tds[6] = tds[6] + badges
+                tds[6] = tds[6] + badge
                 row_html = "</td>".join(tds)
         out.append(row_html)
 
