@@ -33,6 +33,8 @@ PIPELINE_NAMES = {
     "orgs": "Organizations & Projects",
     "user_priorities": "User Priorities",
     "asset_tasks": "Asset Tasks",
+    "asset_tasks_extract": "Asset Tasks Extract",
+    "asset_tasks_transform": "Asset Tasks Transform",
     "forms": "QA Forms",
     "timer": "Timer Activities",
     "aging": "AR Aging",
@@ -105,6 +107,38 @@ def run_asset_tasks_pipeline(project_filter: str = None):
         backfill_asset_did()
         refresh_analytics()
 
+    return True
+
+
+def run_asset_tasks_extract_pipeline():
+    """Run asset tasks EXTRACT only (Swift API -> raw_asset_tasks).
+
+    Split from transform so a transform-only failure doesn't waste the ~60-min API pull.
+    Companion: run_asset_tasks_transform_pipeline reads run_id from pipeline.pipeline_runs.
+    """
+    from extract_asset_tasks import run_asset_task_pipeline
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS EXTRACT")
+    logger.info(f"{'#'*60}")
+
+    run_asset_task_pipeline()
+    return True
+
+
+def run_asset_tasks_transform_pipeline():
+    """Run asset tasks TRANSFORM only (raw_asset_tasks -> stg_assets + stg_asset_tasks).
+
+    Looks up the latest successful asset_tasks_extract run_id from pipeline.pipeline_runs.
+    """
+    from transform import run_assets_transform, run_asset_tasks_transform
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS TRANSFORM")
+    logger.info(f"{'#'*60}")
+
+    run_assets_transform()
+    run_asset_tasks_transform()
     return True
 
 
@@ -596,7 +630,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
+        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -623,6 +657,8 @@ Examples:
         "orgs": run_orgs_projects_pipeline,
         "user_priorities": run_user_priorities_pipeline,
         "asset_tasks": run_asset_tasks_pipeline,
+        "asset_tasks_extract": run_asset_tasks_extract_pipeline,
+        "asset_tasks_transform": run_asset_tasks_transform_pipeline,
         "forms": run_forms_pipeline,
         "timer": run_timer_pipeline_full,
         "aging": run_aging_pipeline_full,
