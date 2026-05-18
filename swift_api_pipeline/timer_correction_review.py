@@ -2237,6 +2237,26 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     return candidates
 
 
+def _resend_has_new_rows(entries: list[dict], snapshot_ids: set[str]) -> bool:
+    """True when at least one row in the resend will render a NEW badge —
+    i.e., is not edited and its entry_id is missing from the snapshot.
+    Used to decide whether the 'Why am I getting this email again?'
+    callout applies. Edits alone don't justify the callout because the
+    tech already knows they submitted them.
+    """
+    for entry in entries:
+        if entry.get("is_edited"):
+            continue
+        eid = _make_entry_id(
+            entry["project_did"], entry["user_email"], entry["start_time"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+            entry.get("end_time"), entry.get("duration_min"),
+        )
+        if eid not in snapshot_ids:
+            return True
+    return False
+
+
 def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> str:
     """Wrap _build_entries_html, appending one optional badge in the
     Duration cell of each row. EDITED takes precedence over NEW because
@@ -2346,6 +2366,8 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
 
         table_rows = _build_resend_entries_html(entries, snapshot_ids)
         has_duplicates = _has_duplicate_entries(entries)
+        has_new = _resend_has_new_rows(entries, snapshot_ids)
+        callout_html = _RESEND_CALLOUT_HTML if has_new else ""
         duplicate_notes = (
             "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
             "<li>The <strong>DUPLICATE</strong> badge marks entries that overlap in time on the same task &mdash; these are likely system-generated duplicates.</li>"
@@ -2361,7 +2383,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
-                {_RESEND_CALLOUT_HTML}
+                {callout_html}
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
                    from <strong>{date_str}</strong>.</p>
 
