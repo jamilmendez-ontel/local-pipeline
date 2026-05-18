@@ -817,7 +817,10 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
                         break
 
             if thread_id:
-                entry_ids_snapshot = json.dumps(_collect_entry_ids(user_entries))
+                # asyncpg's JSONB codec json.dumps the value on the way out;
+                # pass the raw Python list so the result is a proper JSONB
+                # array, not a JSONB string containing JSON text.
+                entry_ids_snapshot = _collect_entry_ids(user_entries)
                 retry_db(
                     lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
@@ -2112,36 +2115,42 @@ def _collect_entry_ids(entries: list[dict]) -> list[str]:
 
 
 def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
-    """Fetch the canonical view of (user, date) entries for re-send: raw
-    stg_timer_activities (DISTINCT-deduped on natural keys) UNION manual
-    additions. Mirrors the shape returned by get_previous_day_entries so
-    _build_entries_html can render it unchanged.
+    """Fetch the canonical view of (user, date) entries for re-send from
+    stg_timer_activities_clean. Each row carries an `is_edited` flag set
+    to True when a correction's corrected natural key matches the row —
+    which covers both rows that had a correction applied in-place (Step 2
+    of rebuild_timer_clean) AND orphaned corrections that were injected
+    as virtual rows (Step 4, migration 051). Removed rows are already
+    filtered out by Step 1; manual additions are included by Step 3.
 
-    Removed entries (stg_timer_entry_removals) are intentionally NOT
-    filtered out here. The re-send gating rule fires only when NEW
-    entry_ids appear vs the snapshot; a removal leaves the same entry_id
-    set as before, so the absence of a removal filter is what keeps
-    pure-removal days from generating a spurious re-send (the
-    confirmation email already covered that path). Do not add a removal
-    JOIN without also flipping the gating rule to symmetric-diff.
+    Snapshot-gating note: pulling from clean means a tech-submitted
+    correction WILL trigger a re-send the next nightly because the
+    entry_id hash changes when end_time / duration_min change. That's
+    the desired behavior — the confirmation email shows "what changed",
+    the resend shows the full corrected day with current Edit / Remove
+    buttons. Two emails serve different purposes.
     """
     rows = retry_db(
         lambda: db.fetch(f"""
-            SELECT DISTINCT project_did, project, user_email, start_time, end_time,
-                   duration_min, site_name, site_id, task, task_clean
-            FROM {SCHEMA_STAGING}.stg_timer_activities
-            WHERE user_email = $1
-              AND DATE(start_time AT TIME ZONE 'America/New_York') = $2
-
-            UNION
-
-            SELECT project_did, project, user_email, start_time, end_time,
-                   duration_min, site_name, site_id, task, task_clean
-            FROM {SCHEMA_STAGING}.stg_timer_entry_additions
-            WHERE user_email = $1
-              AND DATE(start_time AT TIME ZONE 'America/New_York') = $2
-
-            ORDER BY user_email, site_name, task, start_time
+            SELECT
+                c.project_did, c.project, c.user_email,
+                c.start_time, c.end_time, c.duration_min,
+                c.site_name, c.site_id, c.task, c.task_clean,
+                (corr.id IS NOT NULL) AS is_edited
+            FROM {SCHEMA_STAGING}.stg_timer_activities_clean c
+            LEFT JOIN {SCHEMA_STAGING}.stg_timer_corrections corr
+                ON corr.status = 'corrected'
+               AND corr.project_did = c.project_did
+               AND corr.user_email  = c.user_email
+               AND corr.start_time  = c.start_time
+               AND corr.site_name IS NOT DISTINCT FROM c.site_name
+               AND corr.site_id   IS NOT DISTINCT FROM c.site_id
+               AND corr.task      IS NOT DISTINCT FROM c.task
+               AND corr.corrected_end_time IS NOT DISTINCT FROM c.end_time
+               AND corr.corrected_duration_min IS NOT DISTINCT FROM c.duration_min
+            WHERE c.user_email = $1
+              AND DATE(c.start_time AT TIME ZONE 'America/New_York') = $2
+            ORDER BY c.start_time, c.site_name, c.task
         """, user_email, entry_date),
         description=f"current-day entries for {user_email} on {entry_date}",
     )
@@ -2189,9 +2198,10 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
 
         if snapshot is None:
             # Bootstrap: never sent with snapshot before. Populate quietly
-            # so the next change actually triggers a re-send.
+            # so the next change actually triggers a re-send. Pass the raw
+            # list — asyncpg's JSONB codec handles serialization.
             retry_db(
-                lambda ue=user_email, sd=send_date, ids=json.dumps(sorted(current_ids)): db.execute(
+                lambda ue=user_email, sd=send_date, ids=sorted(current_ids): db.execute(
                     f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
                         SET last_sent_entry_ids = $1::jsonb
                         WHERE user_email = $2 AND send_date = $3
@@ -2228,9 +2238,19 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
 
 
 def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> str:
-    """Wrap _build_entries_html, appending a green NEW badge to rows whose
-    entry_id is not present in `snapshot_ids` (i.e., materialized or added
-    since the last sent email).
+    """Wrap _build_entries_html, appending two optional badges in the
+    Duration cell of each row:
+
+    - NEW (green) when the entry_id is not present in `snapshot_ids` —
+      indicates the row materialized or was added since the last email.
+    - EDITED (blue, matches the Edit button color) when the entry's
+      `is_edited` flag is True — indicates this row's duration / end_time
+      reflects a tech-submitted correction rather than the raw Swift
+      value. Set by _fetch_current_day_entries via a LEFT JOIN to
+      stg_timer_corrections on the corrected natural key.
+
+    Both badges can appear on the same row (e.g., a still-running entry
+    that the tech edited — it materialized AND it's edited).
     """
     base_html = _build_entries_html(entries)
     new_badge = (
@@ -2238,10 +2258,16 @@ def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> s
         'font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;'
         'margin-left:4px;font-weight:bold;">NEW</span>'
     )
+    edited_badge = (
+        ' <span style="display:inline-block;background:#1565c0;color:white;'
+        'font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;'
+        'margin-left:4px;font-weight:bold;">EDITED</span>'
+    )
 
     rows = base_html.split("<tr")
     out = [rows[0]]
     new_rows_marked = 0
+    edited_rows_marked = 0
     for i, entry in enumerate(entries, start=1):
         eid = _make_entry_id(
             entry["project_did"], entry["user_email"], entry["start_time"],
@@ -2249,20 +2275,25 @@ def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> s
             entry.get("end_time"), entry.get("duration_min"),
         )
         row_html = "<tr" + rows[i]
+        badges = ""
         if eid not in snapshot_ids:
-            # Append NEW badge inside the Duration cell, right after the
-            # closing of the duration text. The duration cell ends with
-            # the duration value followed by an optional DUPLICATE badge;
-            # we splice NEW immediately before the closing </td> of that
-            # cell, which is the 7th <td> (cells 1-7 then Action 8).
+            badges += new_badge
+            new_rows_marked += 1
+        if entry.get("is_edited"):
+            badges += edited_badge
+            edited_rows_marked += 1
+        if badges:
+            # Splice the badges into the 7th </td> (Duration cell). Cells
+            # 1-7 are Date / Project / Site / Task / Start / End / Duration;
+            # cell 8 is Action. Index tds[6] is the Duration cell.
             tds = row_html.split("</td>")
             if len(tds) >= 7:
-                tds[6] = tds[6] + new_badge
+                tds[6] = tds[6] + badges
                 row_html = "</td>".join(tds)
-                new_rows_marked += 1
         out.append(row_html)
 
-    logger.debug(f"resend HTML: marked {new_rows_marked} rows as NEW")
+    logger.debug(f"resend HTML: marked {new_rows_marked} rows as NEW, "
+                 f"{edited_rows_marked} rows as EDITED")
     return "".join(out)
 
 
@@ -2344,6 +2375,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
                     <li><strong style="color:#1565c0;">Edit</strong> &mdash; fix a wrong duration</li>
                     <li><strong style="color:#c62828;">Remove</strong> &mdash; delete a duplicate or incorrect entry</li>
                     <li><span style="display:inline-block;background:#2e7d32;color:white;font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;font-weight:bold;">NEW</span> &mdash; entry materialized since the original email (a running timer that has now completed, or a manual addition)</li>
+                    <li><span style="display:inline-block;background:#1565c0;color:white;font-size:9px;padding:1px 5px;border-radius:3px;vertical-align:middle;font-weight:bold;">EDITED</span> &mdash; duration reflects an edit you submitted via the daily email, not the raw Swift value</li>
                 </ul>
                 <table style="border-collapse:collapse;width:100%;font-size:13px;margin:16px 0;">
                     <thead>
@@ -2397,9 +2429,11 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             service.users().messages().send(userId="me", body=send_body).execute()
             sent += 1
 
+            # Pass the raw list — asyncpg's JSONB codec serializes it as
+            # a proper JSONB array, not a JSONB string containing JSON.
             current_ids = sorted(_collect_entry_ids(entries))
             retry_db(
-                lambda ue=user_email, sd=send_date, ids=json.dumps(current_ids): db.execute(
+                lambda ue=user_email, sd=send_date, ids=current_ids: db.execute(
                     f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
                         SET last_sent_at = NOW(),
                             last_sent_entry_ids = $1::jsonb
