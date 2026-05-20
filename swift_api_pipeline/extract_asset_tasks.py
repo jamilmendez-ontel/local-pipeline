@@ -359,45 +359,86 @@ class AssetTaskExtractor(BaseExtractor):
     # New run must have at least 90% of old run rows to allow cleanup
     CLEANUP_ROW_THRESHOLD = 0.90
 
-    def clear_old_raw_data(self):
-        """Clear old raw data only if the new run has sufficient rows.
+    def clear_old_raw_data(self, projects: List[Dict], project_rows: dict, failed_projects: list):
+        """Clear old raw data per project, only for projects that passed extraction.
 
-        Compares new vs old run row counts before deleting. Refuses to
-        delete if the new run has < 90% of the old run's rows, which
-        indicates data loss during extraction.
+        Each partition (one per project_did) is verified independently against
+        its own 90% threshold. A single project's failure no longer invalidates
+        the other six's fresh data — fixes the baseline-inflation behavior that
+        used to throw away successful projects on a partial failure.
+
+        Args:
+            projects:        full list of projects from get_project_dids() —
+                             provides the project_name -> project_did mapping
+                             without an extra subquery per check.
+            project_rows:    {project_name: new_row_count} from this run.
+            failed_projects: project names that failed even after retry.
+                             Their partitions are left untouched.
         """
-        logger.info(f"Verifying new run data before cleanup (run_id={self.run_id})...")
         run_id_str = str(self.run_id)
+        did_by_name = {p["project_name"]: p["project_did"] for p in projects}
 
-        new_count = self.db.fetchval(
-            f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id = $1',
-            run_id_str
-        ) or 0
+        kept_count = 0
+        cleaned_count = 0
+        skipped = []
 
-        old_count = self.db.fetchval(
-            f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id != $1',
-            run_id_str
-        ) or 0
+        for project_name, new_count in project_rows.items():
+            if project_name in failed_projects:
+                logger.info(f"[{project_name}] Skipped cleanup (extraction failed)")
+                skipped.append((project_name, "extraction failed", new_count))
+                kept_count += 1
+                continue
 
-        if old_count > 0 and new_count < old_count * self.CLEANUP_ROW_THRESHOLD:
-            raise RuntimeError(
-                f"Cleanup aborted: new run has {new_count:,} rows but old run has "
-                f"{old_count:,} rows (threshold: {self.CLEANUP_ROW_THRESHOLD:.0%}). "
-                f"This suggests data loss during extraction."
+            if new_count == 0:
+                logger.warning(f"[{project_name}] Skipped cleanup (0 rows extracted)")
+                skipped.append((project_name, "0 new rows", new_count))
+                kept_count += 1
+                continue
+
+            did = did_by_name.get(project_name)
+            if did is None:
+                logger.warning(
+                    f"[{project_name}] Skipped cleanup (no project_did in lookup) — "
+                    f"this should not happen"
+                )
+                skipped.append((project_name, "no project_did", new_count))
+                kept_count += 1
+                continue
+
+            old_count = self.db.fetchval(
+                f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks '
+                f'WHERE project_did = $1 AND run_id != $2',
+                did, run_id_str
+            ) or 0
+
+            if old_count > 0 and new_count < old_count * self.CLEANUP_ROW_THRESHOLD:
+                logger.warning(
+                    f"[{project_name}] Cleanup skipped: new={new_count:,}, "
+                    f"old={old_count:,} (below {self.CLEANUP_ROW_THRESHOLD:.0%} threshold). "
+                    f"Old data retained."
+                )
+                skipped.append((project_name, f"below threshold ({new_count}/{old_count})", new_count))
+                kept_count += 1
+                continue
+
+            logger.info(
+                f"[{project_name}] Verified: new={new_count:,}, old={old_count:,}. "
+                f"Cleaning up old partition data."
             )
+            retry_db(
+                lambda d=did, rid=run_id_str: self.db.execute(
+                    f'DELETE FROM {SCHEMA_RAW}.raw_asset_tasks '
+                    f'WHERE project_did = $1 AND run_id != $2',
+                    d, rid
+                ),
+                description=f"delete old raw data for {project_name}"
+            )
+            cleaned_count += 1
 
         logger.info(
-            f"Row count verified: new={new_count:,}, old={old_count:,}. "
-            f"Proceeding with cleanup."
+            f"Per-project cleanup complete: {cleaned_count} cleaned, {kept_count} retained"
         )
-        retry_db(
-            lambda: self.db.execute(
-                f'DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id != $1',
-                run_id_str
-            ),
-            description="delete old raw_asset_tasks"
-        )
-        logger.info("Old raw data cleaned up")
+        return skipped  # Caller can decide whether to surface in run summary
 
     # start_pipeline_run() and complete_pipeline_run() inherited from BaseExtractor
 
@@ -630,8 +671,11 @@ def run_asset_task_pipeline(
         # Restore table: recreate indexes
         extractor.restore_table_after_load()
 
-        # Clean up old raw data now that new extraction succeeded
-        extractor.clear_old_raw_data()
+        # Clean up old raw data — per-project verification.
+        # Successful projects get their partitions cleaned; failed projects
+        # keep their old data untouched so downstream transforms don't see
+        # a gap where today's extract was supposed to land.
+        skipped_cleanups = extractor.clear_old_raw_data(projects, project_rows, failed_projects)
 
         # Clean up extraction progress tracking for this run
         retry_db(
@@ -642,24 +686,38 @@ def run_asset_task_pipeline(
             description="clean extraction_progress"
         )
 
-        # Detect partial failures — projects that failed even after retry
+        # Detect partial failures — projects that failed even after retry.
+        # With the per-project safety check (Task 4 of GHA migration),
+        # successful projects keep their fresh data and downstream transforms
+        # should still run. We mark this as 'success' (the only enum value
+        # downstream's `WHERE status='success'` lookup recognizes) and put
+        # the gap detail in error_message, then log loudly without raising.
         if failed_projects:
-            extractor.complete_pipeline_run("failed", total_records,
-                                            error=f"Projects failed: {', '.join(failed_projects)}")
-            logger.error(f"\n{'='*60}")
-            logger.error(f"Pipeline PARTIAL FAILURE")
-            logger.error(f"\nRecords by project:")
-            for name, count in sorted(project_rows.items()):
-                status = " [FAILED]" if name in failed_projects else ""
-                logger.error(f"  {name}: {count:,}{status}")
-            logger.error(f"\nTotal loaded: {total_records:,}")
-            logger.error(f"Failed projects: {', '.join(failed_projects)}")
-            logger.error(f"Run ID: {extractor.run_id}")
-            logger.error(f"{'='*60}\n")
-            raise RuntimeError(
-                f"Asset tasks partial failure: {', '.join(failed_projects)} "
-                f"failed ({total_records:,} of expected rows loaded)"
+            succeeded = len(project_rows) - len(failed_projects)
+            error_detail = (
+                f"Partial extraction: {succeeded}/{len(project_rows)} projects "
+                f"succeeded. Failed (old data retained): {', '.join(failed_projects)}"
             )
+            extractor.complete_pipeline_run("success", total_records, error=error_detail)
+            logger.warning(f"\n{'='*60}")
+            logger.warning(
+                f"Pipeline PARTIAL SUCCESS ({succeeded}/{len(project_rows)} projects)"
+            )
+            logger.warning(f"\nRecords by project:")
+            for name, count in sorted(project_rows.items()):
+                marker = " [FAILED - old data retained]" if name in failed_projects else ""
+                logger.warning(f"  {name}: {count:,}{marker}")
+            logger.warning(f"\nTotal loaded: {total_records:,}")
+            logger.warning(f"Failed projects: {', '.join(failed_projects)}")
+            logger.warning(f"Run ID: {extractor.run_id}")
+            logger.warning(f"{'='*60}\n")
+            # Do NOT raise — let downstream transforms run on the partial data.
+            # The transform's WHERE status='success' lookup will use today's
+            # run_id and produce fresh staging rows for the projects that
+            # extracted successfully. Failed projects keep their partition's
+            # prior data so there's no gap. Return run_id like the
+            # full-success path so callers get consistent semantics.
+            return str(extractor.run_id)
 
         extractor.complete_pipeline_run("success", total_records)
 
