@@ -1,0 +1,178 @@
+name: "Pipeline: Asset Tasks"
+
+# Single orchestrator workflow that replaces the local Windows batch step
+# scheduled_main_pipeline.bat (Task 6 retires that batch after a ~1-week
+# shakedown overlap, during which Apps Script fires this workflow with
+# dispatch_downstream=false so the still-active local batch keeps owning
+# the downstream dispatches).
+#
+# Triggered by:
+#   - repository_dispatch type 'pipeline-asset-tasks' (from scripts/pipeline_trigger.gs
+#     under jamil.mendez@nanoninth.com)
+#   - workflow_dispatch (manual, with optional project recovery)
+#
+# Plan: docs/plans/2026-04-16-asset-tasks-gha-migration.md Task 5
+# Workflow revisions vs plan:
+#   - Apps Script trigger instead of cron (per MEMORY.md: GHA cron unreliable)
+#   - Added `--pipeline assets` step (asset_status enrichment; missed by plan)
+#   - Added date-validator-daily dispatch (validator's reliable trigger path)
+#   - Added dispatch_downstream input to gate the dispatch step during shakedown
+
+on:
+  repository_dispatch:
+    types: [pipeline-asset-tasks]
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Single project recovery (e.g. TS16). Leave empty for full run.'
+        required: false
+        type: string
+      dispatch_downstream:
+        description: 'Fire export + timer-discrepancies + date-validator dispatches at end. Set false during shakedown overlap with local batch.'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: pipeline-asset-tasks
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  asset-tasks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # Normalize inputs: workflow_dispatch uses inputs.*, repository_dispatch
+      # uses github.event.client_payload.*. Combine into job-level env vars so
+      # the rest of the workflow doesn't have to switch on github.event_name.
+      - name: Resolve inputs
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PROJECT="${{ inputs.project }}"
+            DD_RAW="${{ inputs.dispatch_downstream }}"
+          else
+            PROJECT="${{ github.event.client_payload.project }}"
+            DD_RAW="${{ github.event.client_payload.dispatch_downstream }}"
+          fi
+          # dispatch_downstream defaults to true; only an explicit 'false' suppresses
+          if [ "$DD_RAW" = "false" ]; then
+            DD="false"
+          else
+            DD="true"
+          fi
+          echo "project=$PROJECT" >> $GITHUB_OUTPUT
+          echo "dispatch_downstream=$DD" >> $GITHUB_OUTPUT
+          echo "Resolved: project='$PROJECT', dispatch_downstream='$DD'"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          DOTENV
+          echo "SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}" >> .env
+          echo "SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}" >> .env
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Run asset tasks pipeline (extract + transform)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          PROJECT: ${{ steps.resolve.outputs.project }}
+        run: |
+          if [ -n "$PROJECT" ]; then
+            echo "Recovery mode: --project $PROJECT"
+            python -u main.py --pipeline asset_tasks --project "$PROJECT"
+          else
+            python -u main.py --pipeline asset_tasks
+          fi
+
+      - name: Run assets pipeline (asset_status enrichment)
+        if: ${{ steps.resolve.outputs.project == '' }}
+        working-directory: ${{ env.PIPELINE_DIR }}
+        # Failure here is non-fatal in the local batch (asset_status NULL is
+        # degrading-but-acceptable downstream). Mirror that semantics.
+        continue-on-error: true
+        run: python -u main.py --pipeline assets --no-email
+
+      - name: Run backfill (asset_did)
+        if: ${{ steps.resolve.outputs.project == '' }}
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u main.py --pipeline backfill --no-email
+
+      - name: Refresh analytics MVs
+        if: ${{ steps.resolve.outputs.project == '' }}
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u main.py --pipeline analytics --no-email
+
+      - name: Dispatch downstream workflows (asset-tasks-export, timer-discrepancies)
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        run: |
+          for event in pipeline-asset-tasks-export pipeline-timer-discrepancies; do
+            response=$(curl -sw '\n%{http_code}' -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+              -d "{\"event_type\": \"$event\"}")
+            code=$(echo "$response" | tail -n1)
+            echo "Dispatched $event -> HTTP $code"
+            if [ "$code" != "204" ]; then
+              echo "ERROR: dispatch failed for $event"
+              exit 1
+            fi
+          done
+
+      - name: Dispatch date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        # Non-fatal: validator triggering issues should be logged but not crash the run.
+        continue-on-error: true
+        run: |
+          if [ -z "${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" ]; then
+            echo "WARN: DATE_VALIDATOR_DISPATCH_PAT not set — skipping cross-repo dispatch"
+            exit 0
+          fi
+          response=$(curl -sw '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/jamilmendez-ontel/date-validator/dispatches" \
+            -d '{"event_type": "date-validator-daily", "client_payload": {"source": "gha-pipeline-asset-tasks"}}')
+          code=$(echo "$response" | tail -n1)
+          echo "Dispatched date-validator-daily -> HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "WARN: date-validator dispatch failed; check PAT validity"
+          fi
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-tasks-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7

@@ -18,6 +18,9 @@
  *   12:09 AM  — Timer
  *   12:13 AM  — User Priorities
  *   12:17 AM  — QA Forms
+ *   01:30 AM  — Asset Tasks (shakedown phase: dispatch_downstream=false, runs AFTER
+ *               local batch completes ~01:10 ET; Task 6 retires local batch and
+ *               moves this to 12:01 AM with dispatch_downstream=true)
  *
  * Note: triggerLightPipelines() fires timer at :09, priorities at :13, forms at :17
  * by using Utilities.sleep() for staggering. Apps Script has a 6-min execution limit
@@ -71,6 +74,64 @@ function triggerLightPipelines() {
  */
 function triggerCalendarLeave() {
   fireDispatch_('pipeline-calendar-leave');
+}
+
+/**
+ * Trigger asset_tasks pipeline (the big nightly: ~52 min extract + ~15 min downstream).
+ *
+ * SHAKEDOWN PHASE (current):
+ *   Schedule this at 01:30 AM EST daily — runs AFTER the still-active local batch
+ *   completes (local kicks off at 00:01, finishes ~01:10). dispatch_downstream is
+ *   passed false so the local batch keeps owning the end-of-night dispatches for
+ *   pipeline-asset-tasks-export, pipeline-timer-discrepancies, and date-validator-daily.
+ *   This lets us compare GHA's output vs the local batch's for ~1 week before retiring.
+ *
+ * POST-TASK-6 (after local batch retires):
+ *   - Change the time-driven trigger to 12:01 AM EST
+ *   - Edit fireDispatchWithPayload_ call below to pass {dispatch_downstream: true}
+ *     (or just call fireDispatch_('pipeline-asset-tasks') since true is the default).
+ */
+function triggerAssetTasks() {
+  fireDispatchWithPayload_('pipeline-asset-tasks', { dispatch_downstream: false });
+}
+
+/**
+ * Like fireDispatch_ but allows passing a client_payload — required when the
+ * receiving workflow's `on: repository_dispatch` reads inputs via
+ * github.event.client_payload.* (which is how we gate dispatch_downstream).
+ */
+function fireDispatchWithPayload_(eventType, clientPayload) {
+  var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  if (!token) {
+    Logger.log('ERROR: GITHUB_TOKEN not set in Script Properties');
+    return;
+  }
+
+  var url = 'https://api.github.com/repos/' + REPO + '/dispatches';
+
+  var options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
+    },
+    payload: JSON.stringify({
+      event_type: eventType,
+      client_payload: clientPayload || {}
+    }),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+
+  if (code === 204) {
+    Logger.log('Dispatched ' + eventType + ' with payload ' + JSON.stringify(clientPayload) + ' successfully');
+  } else {
+    Logger.log('ERROR dispatching ' + eventType + ': HTTP ' + code + ' — ' + response.getContentText());
+  }
 }
 
 /**
