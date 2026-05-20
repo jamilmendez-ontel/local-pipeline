@@ -32,14 +32,22 @@ PROJECT_TIMEOUT_SECONDS = 3600  # Max 1 hour per project extraction
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
 # (pipeline uses run_id/project_did for lookups; agent queries staging, not raw).
-_INDEXES = [
-    ("idx_raw_asset_tasks_loaded_at", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_loaded_at ON data_raw.raw_asset_tasks USING btree (loaded_at DESC)"),
-    ("idx_raw_asset_tasks_run_id", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_run_id ON data_raw.raw_asset_tasks USING btree (run_id)"),
-    ("idx_raw_asset_tasks_project_did", "CREATE INDEX IF NOT EXISTS idx_raw_asset_tasks_project_did ON data_raw.raw_asset_tasks USING btree (project_did)"),
-]
-# Also drop the GIN index if it still exists (one-time cleanup)
+# Per-partition index suffixes (applied to every partition of raw_asset_tasks).
+# Migration 052 partitioned raw_asset_tasks BY LIST (project_did), so each
+# partition is ~350K rows and indexes drop/recreate in seconds — well within
+# Supabase pooler's connection lifetime. No more global indexes on the parent.
+_PARTITION_INDEX_SUFFIXES = ["loaded_at", "run_id"]
+
+# One-time cleanup: drop any GIN index left over from earlier table shapes.
+# Plus the old GLOBAL btree indexes that pre-052 code may recreate against
+# the now-partitioned parent (those still propagate to children and end up
+# as duplicates of the per-partition indexes; clean them up on every run so
+# the system self-heals if an older deployment touches the table).
 _INDEXES_TO_DROP_ONLY = [
     "idx_raw_asset_tasks_data",
+    "idx_raw_asset_tasks_loaded_at",
+    "idx_raw_asset_tasks_run_id",
+    "idx_raw_asset_tasks_project_did",
 ]
 
 
@@ -294,27 +302,59 @@ class AssetTaskExtractor(BaseExtractor):
         """Drop non-PK indexes for fast bulk loading.
 
         Note: UNLOGGED removed — Supabase's connection proxy kills long-running
-        ALTER TABLE SET LOGGED operations (>5 min for 2.2M rows). Index drop/recreate
-        provides the main speed benefit anyway.
+        ALTER TABLE SET LOGGED operations (>5 min for 2.2M rows). Per-partition
+        index drop/recreate provides the main speed benefit anyway.
+
+        Since migration 052 partitioned raw_asset_tasks, indexes are per
+        partition (~350K rows each — drops/recreates in seconds).
         """
-        logger.info("Preparing raw_asset_tasks for bulk load (drop indexes)...")
-        for idx_name, _ in _INDEXES:
-            self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
+        logger.info("Preparing raw_asset_tasks partitions for bulk load (drop indexes)...")
+        partitions = self._get_partition_names()
+        for part_name in partitions:
+            for suffix in _PARTITION_INDEX_SUFFIXES:
+                idx_name = f"idx_{part_name}_{suffix}"
+                self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
+        # One-time cleanup of stale/legacy global indexes (no-op once gone).
         for idx_name in _INDEXES_TO_DROP_ONLY:
             self.db.execute(f'DROP INDEX IF EXISTS {SCHEMA_RAW}.{idx_name}')
-        logger.info("Indexes dropped")
+        logger.info(f"Indexes dropped on {len(partitions)} partitions")
 
     def restore_table_after_load(self):
-        """Recreate indexes after bulk load.
+        """Recreate per-partition indexes after bulk load.
 
-        Uses 600s timeout for index creation — project_did index on 2.2M rows
-        can take >300s (observed 338s on 2026-02-15).
+        Each partition is ~350K rows — index creation takes seconds, well
+        within the Supabase pooler's ~5-6 min connection limit. No global
+        indexes on the parent (those would propagate to children and
+        duplicate the per-partition ones).
         """
-        logger.info("Restoring raw_asset_tasks indexes...")
-        for idx_name, idx_def in _INDEXES:
-            logger.info(f"  Creating {idx_name}...")
-            self.db.execute(idx_def, statement_timeout=600)
-        logger.info("Indexes restored")
+        logger.info("Restoring raw_asset_tasks partition indexes...")
+        partitions = self._get_partition_names()
+        for part_name in partitions:
+            logger.info(f"  Indexing {part_name}...")
+            self.db.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{part_name}_loaded_at "
+                f"ON {SCHEMA_RAW}.{part_name} (loaded_at DESC)"
+            )
+            self.db.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{part_name}_run_id "
+                f"ON {SCHEMA_RAW}.{part_name} (run_id)"
+            )
+        logger.info(f"Indexes restored on {len(partitions)} partitions")
+
+    def _get_partition_names(self) -> List[str]:
+        """All raw_asset_tasks partition table names (excludes the default)."""
+        rows = self.db.fetch(
+            "SELECT c.relname AS partition_name "
+            "FROM pg_inherits i "
+            "JOIN pg_class p ON i.inhparent = p.oid "
+            "JOIN pg_class c ON i.inhrelid = c.oid "
+            "JOIN pg_namespace n ON p.relnamespace = n.oid "
+            "WHERE n.nspname = $1 AND p.relname = $2 "
+            "AND c.relname != 'raw_asset_tasks_default' "
+            "ORDER BY c.relname",
+            SCHEMA_RAW, "raw_asset_tasks"
+        )
+        return [row["partition_name"] for row in rows]
 
     # New run must have at least 90% of old run rows to allow cleanup
     CLEANUP_ROW_THRESHOLD = 0.90
