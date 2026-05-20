@@ -8,6 +8,7 @@ Before bulk load: table set to UNLOGGED and non-PK indexes dropped.
 After load: indexes recreated and table set back to LOGGED.
 """
 
+import re
 import uuid
 import requests
 import time
@@ -56,6 +57,74 @@ class AssetTaskExtractor(BaseExtractor):
             min_project_number
         )
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _partition_suffix(project_name: str) -> str:
+        """Derive a partition-name suffix from a project_name.
+
+        Convention matches migration 052: 'TECH-OPS: TS19' -> 'ts19'.
+        Falls back to a sanitized full name if no colon is present.
+        """
+        tail = project_name.split(":")[-1].strip().lower()
+        return re.sub(r'[^a-z0-9_]+', '_', tail).strip('_')
+
+    def ensure_partitions_exist(self, projects: List[Dict]):
+        """Auto-create partitions for any project_did that doesn't have one.
+
+        Queries pg_catalog for existing partition bounds of raw_asset_tasks,
+        then creates a partition (and its per-partition indexes) for any
+        project whose project_did isn't already covered. Lets new TS projects
+        be picked up automatically without a manual migration.
+
+        Safe to call on every run — no-op when all partitions already exist.
+        """
+        existing = self.db.fetch(
+            "SELECT pg_get_expr(c.relpartbound, c.oid) AS bound_expr "
+            "FROM pg_inherits i "
+            "JOIN pg_class p ON i.inhparent = p.oid "
+            "JOIN pg_class c ON i.inhrelid = c.oid "
+            "JOIN pg_namespace n ON p.relnamespace = n.oid "
+            "WHERE n.nspname = $1 AND p.relname = $2 "
+            "AND c.relname != 'raw_asset_tasks_default'",
+            SCHEMA_RAW, "raw_asset_tasks"
+        )
+        # Extract project_did from each bound expression: "FOR VALUES IN ('-...')".
+        existing_dids = set()
+        for row in existing:
+            expr = row["bound_expr"] or ""
+            start = expr.find("('") + 2
+            end = expr.find("')", start)
+            if start > 1 and end > start:
+                existing_dids.add(expr[start:end])
+
+        for proj in projects:
+            did = proj["project_did"]
+            if did in existing_dids:
+                continue
+            suffix = self._partition_suffix(proj["project_name"])
+            if not suffix:
+                logger.warning(
+                    f"Skipping auto-partition for {proj['project_name']!r} "
+                    f"({did}): unable to derive a valid partition suffix"
+                )
+                continue
+            partition_name = f"raw_asset_tasks_{suffix}"
+            logger.info(
+                f"Creating partition {partition_name} for {proj['project_name']} ({did})"
+            )
+            self.db.execute(
+                f"CREATE TABLE IF NOT EXISTS {SCHEMA_RAW}.{partition_name} "
+                f"PARTITION OF {SCHEMA_RAW}.raw_asset_tasks "
+                f"FOR VALUES IN ('{did}')"
+            )
+            self.db.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{partition_name}_loaded_at "
+                f"ON {SCHEMA_RAW}.{partition_name} (loaded_at DESC)"
+            )
+            self.db.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{partition_name}_run_id "
+                f"ON {SCHEMA_RAW}.{partition_name} (run_id)"
+            )
 
     def extract_and_load_project(
         self,
@@ -326,6 +395,10 @@ def run_asset_task_pipeline(
         extractor.authenticate()
 
         all_projects = extractor.get_project_dids(min_project_number)
+
+        # Ensure every project has a dedicated partition. No-op when all
+        # partitions already exist — new TS projects are auto-partitioned here.
+        extractor.ensure_partitions_exist(all_projects)
 
         # ── RECOVERY MODE ─────────────────────────────────────────────────────
         if is_recovery:
