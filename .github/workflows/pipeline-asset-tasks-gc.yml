@@ -1,0 +1,81 @@
+name: "Pipeline: Asset Tasks GC"
+
+# Parallel workflow to pipeline-asset-tasks.yml — covers ~294 non-Ontel
+# General Contractor orgs (~1,063 projects, ~2M asset_tasks).
+#
+# Fires nightly at 02:00 ET via Apps Script triggerAssetTasksGC()
+# (well after the Ontel pipeline finishes ~01:00 ET).
+#
+# Spec: docs/superpowers/specs/2026-05-20-asset-tasks-gc-pipeline-design.md
+# Plan: docs/plans/2026-05-20-asset-tasks-gc-pipeline.md (Task 6)
+#
+# v1 scope: extract + transform + analytics MV refresh. NO downstream
+# dispatches — no GC equivalent of pipeline-asset-tasks-export or
+# date-validator-daily.
+
+on:
+  repository_dispatch:
+    types: [pipeline-asset-tasks-gc]
+  workflow_dispatch:
+
+concurrency:
+  group: pipeline-asset-tasks-gc
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  asset-tasks-gc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          DOTENV
+          echo "SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}" >> .env
+          echo "SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}" >> .env
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Run GC asset_tasks pipeline (extract + inline transforms)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u main.py --pipeline asset_tasks_gc
+
+      - name: Refresh GC analytics MVs
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u main.py --pipeline analytics_gc --no-email
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-tasks-gc-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7
