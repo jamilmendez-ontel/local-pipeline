@@ -21,6 +21,8 @@
  *   01:30 AM  — Asset Tasks (shakedown phase: dispatch_downstream=false, runs AFTER
  *               local batch completes ~01:10 ET; Task 6 retires local batch and
  *               moves this to 12:01 AM with dispatch_downstream=true)
+ *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
+ *               fires after the Ontel pipeline completes)
  *
  * Note: triggerLightPipelines() fires timer at :09, priorities at :13, forms at :17
  * by using Utilities.sleep() for staggering. Apps Script has a 6-min execution limit
@@ -93,6 +95,23 @@ function triggerCalendarLeave() {
  */
 function triggerAssetTasks() {
   fireDispatchWithPayload_('pipeline-asset-tasks', { dispatch_downstream: false });
+}
+
+/**
+ * Trigger GC asset_tasks pipeline (the parallel ~294-org pipeline for all
+ * non-Ontel General Contractors).
+ *
+ * Schedule daily at 02:00 AM EST — well after the Ontel pipeline finishes
+ * (~01:00 ET post-Task-6 cutover) so we avoid Swift API rate-limit
+ * collisions and DB pool contention.
+ *
+ * GC pipeline writes to separate _gc tables (raw_asset_tasks_gc,
+ * stg_asset_tasks_gc, stg_assets_gc) and refreshes its own MVs
+ * (mv_project_summary_gc, mv_technician_stats_gc, mv_daily_completion_gc).
+ * No downstream dispatches in v1 — no export or validator emails.
+ */
+function triggerAssetTasksGC() {
+  fireDispatch_('pipeline-asset-tasks-gc');
 }
 
 /**
