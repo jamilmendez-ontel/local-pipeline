@@ -35,6 +35,10 @@ PIPELINE_NAMES = {
     "asset_tasks": "Asset Tasks",
     "asset_tasks_extract": "Asset Tasks Extract",
     "asset_tasks_transform": "Asset Tasks Transform",
+    "asset_tasks_gc": "Asset Tasks GC",
+    "asset_tasks_gc_extract": "Asset Tasks GC Extract",
+    "asset_tasks_gc_transform": "Asset Tasks GC Transform",
+    "analytics_gc": "Analytics GC MV Refresh",
     "forms": "QA Forms",
     "timer": "Timer Activities",
     "aging": "AR Aging",
@@ -139,6 +143,71 @@ def run_asset_tasks_transform_pipeline():
 
     run_assets_transform()
     run_asset_tasks_transform()
+    return True
+
+
+def run_asset_tasks_gc_pipeline():
+    """Run GC asset tasks combined extract + inline transforms.
+
+    Calls extract_asset_tasks_gc.run_asset_task_gc_pipeline which performs
+    extract + inline run_assets_gc_transform + run_asset_tasks_gc_transform.
+    """
+    from extract_asset_tasks_gc import run_asset_task_gc_pipeline
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS GC PIPELINE")
+    logger.info(f"{'#'*60}")
+
+    run_asset_task_gc_pipeline()
+    return True
+
+
+def run_asset_tasks_gc_extract_pipeline():
+    """Run GC asset_tasks EXTRACT only (Swift API -> raw_asset_tasks_gc).
+
+    v1 implementation note: currently aliases the full pipeline (extract +
+    inline transforms). Splitting is YAGNI until a use case for
+    extract-only emerges.
+    """
+    from extract_asset_tasks_gc import run_asset_task_gc_pipeline
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS GC EXTRACT (aliases full GC pipeline)")
+    logger.info(f"{'#'*60}")
+
+    run_asset_task_gc_pipeline()
+    return True
+
+
+def run_asset_tasks_gc_transform_pipeline():
+    """Run GC asset_tasks TRANSFORM only.
+
+    Looks up the latest successful asset_tasks_gc_extract run_id and runs
+    the SQL aggregation + Python-driven INSERT-SELECT pair.
+    """
+    from transform import run_assets_gc_transform, run_asset_tasks_gc_transform
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ASSET TASKS GC TRANSFORM")
+    logger.info(f"{'#'*60}")
+
+    run_assets_gc_transform()
+    run_asset_tasks_gc_transform()
+    return True
+
+
+def run_analytics_gc_refresh():
+    """Refresh the three _gc analytics MVs (mv_project_summary_gc, etc).
+
+    Ontel MVs are untouched by this refresh.
+    """
+    from transform import refresh_analytics_gc
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# ANALYTICS GC MV REFRESH")
+    logger.info(f"{'#'*60}")
+
+    refresh_analytics_gc()
     return True
 
 
@@ -630,7 +699,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
+        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "analytics_gc", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -659,6 +728,10 @@ Examples:
         "asset_tasks": run_asset_tasks_pipeline,
         "asset_tasks_extract": run_asset_tasks_extract_pipeline,
         "asset_tasks_transform": run_asset_tasks_transform_pipeline,
+        "asset_tasks_gc": run_asset_tasks_gc_pipeline,
+        "asset_tasks_gc_extract": run_asset_tasks_gc_extract_pipeline,
+        "asset_tasks_gc_transform": run_asset_tasks_gc_transform_pipeline,
+        "analytics_gc": run_analytics_gc_refresh,
         "forms": run_forms_pipeline,
         "timer": run_timer_pipeline_full,
         "aging": run_aging_pipeline_full,
