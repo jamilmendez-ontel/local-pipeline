@@ -51,12 +51,25 @@ class AssetTaskGCExtractor(BaseExtractor):
         super().__init__(pipeline_name="asset_tasks_gc_extract")
 
     def get_gc_projects(self) -> List[Dict]:
-        """All GC projects from stg_projects (auto-discovered, any status)."""
+        """GC projects from stg_projects, filtered to remove obvious waste.
+
+        Filters applied:
+          - org_name != 'Ontel'             (Ontel has its own pipeline)
+          - org_name NOT LIKE 'Testing%'    (test fixture orgs)
+          - project_name NOT LIKE 'x_Archive:%'  (closed-out historical, ~10-15% of volume)
+          - status != 'pending'             (65 projects with effectively 0 tasks)
+
+        Statuses kept: 'in_progress' (the bulk) + 'complete' (recently done but
+        not yet archived). Archived projects are EXCLUDED by name pattern even
+        though they're nominally 'complete' status.
+        """
         rows = self.db.fetch(
             f"SELECT org_did, org_name, project_did, project_name, status "
             f"FROM {SCHEMA_STAGING}.stg_projects "
             f"WHERE org_name != 'Ontel' "
             f"AND org_name NOT LIKE 'Testing%' "
+            f"AND project_name NOT LIKE 'x_Archive:%' "
+            f"AND status != 'pending' "
             f"ORDER BY org_name, project_name"
         )
         return [dict(r) for r in rows]
