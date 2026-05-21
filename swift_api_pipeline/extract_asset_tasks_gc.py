@@ -222,8 +222,12 @@ class AssetTaskGCExtractor(BaseExtractor):
                         f"{type(e).__name__}: {e} — sleeping {backoff}s"
                     )
                     time.sleep(backoff)
-                    # Re-auth in case it was a token issue
+                    # On 401/403, force re-auth: get_auth_headers() returns the
+                    # CACHED token if self.token is set (it is), so just calling
+                    # it again gives back the same expired token. reauthenticate()
+                    # explicitly clears self.token first, forcing a fresh login.
                     if resp.status_code in (401, 403):
+                        self.reauthenticate()
                         headers = self.get_auth_headers()
             else:
                 raise RuntimeError(
