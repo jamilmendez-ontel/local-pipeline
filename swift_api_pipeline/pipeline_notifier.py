@@ -50,6 +50,19 @@ PIPELINE_TABLES = {
         ("data_staging", "stg_assets"),
         ("data_staging", "stg_asset_tasks"),
     ],
+    "Asset Tasks GC": [
+        ("data_raw", "raw_asset_tasks_gc"),
+        ("data_staging", "stg_assets_gc"),
+        ("data_staging", "stg_asset_tasks_gc"),
+    ],
+    "Asset Tasks GC Extract": [
+        ("data_raw", "raw_asset_tasks_gc"),
+    ],
+    "Asset Tasks GC Transform": [
+        ("data_staging", "stg_assets_gc"),
+        ("data_staging", "stg_asset_tasks_gc"),
+    ],
+    "Analytics GC MV Refresh": [],
     "Assets Status": [
         ("data_raw", "raw_assets"),
         ("data_staging", "stg_assets"),

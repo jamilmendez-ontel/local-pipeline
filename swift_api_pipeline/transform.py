@@ -1219,6 +1219,274 @@ def refresh_analytics():
     print(f"\n{'='*60}\n")
 
 
+# =============================================================================
+# GC PIPELINE TRANSFORMS
+# Clones of the Ontel transforms above with these substitutions:
+#   raw_asset_tasks       -> raw_asset_tasks_gc
+#   stg_asset_tasks       -> stg_asset_tasks_gc
+#   stg_assets            -> stg_assets_gc
+#   aggregate_assets_from_raw -> aggregate_assets_gc
+# Logic is otherwise identical. See spec
+#   docs/superpowers/specs/2026-05-20-asset-tasks-gc-pipeline-design.md
+# =============================================================================
+
+
+def transform_assets_gc(db, run_id: str):
+    """GC assets transform — clone of transform_assets reading raw_asset_tasks_gc
+    and writing stg_assets_gc via the aggregate_assets_gc RPC.
+    """
+    print(f"[{datetime.now():%H:%M:%S}] Transforming GC assets...")
+
+    db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_assets_gc')
+    print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_assets_gc")
+
+    print(f"[{datetime.now():%H:%M:%S}] Running SQL aggregation via aggregate_assets_gc...")
+    assets_list = db.fetch(
+        f'SELECT * FROM {SCHEMA_RAW}.aggregate_assets_gc($1)',
+        run_id,
+        statement_timeout=600,
+    )
+
+    print(f"[{datetime.now():%H:%M:%S}] Found {len(assets_list):,} unique GC assets")
+
+    batch_size = 5000
+    for i in range(0, len(assets_list), batch_size):
+        batch = assets_list[i:i + batch_size]
+        tuples = [
+            (
+                dict(row).get("project_did"),
+                dict(row).get("asset_did"),
+                dict(row).get("asset_id"),
+                dict(row).get("asset_name"),
+                dict(row).get("task_count"),
+                dict(row).get("tasks_pending"),
+                dict(row).get("tasks_in_progress"),
+                dict(row).get("tasks_submitted"),
+                dict(row).get("tasks_approved"),
+                dict(row).get("tasks_rejected"),
+                dict(row).get("tasks_cancelled"),
+                dict(row).get("requirement_count"),
+                run_id
+            )
+            for row in batch
+        ]
+        db.executemany(
+            f'INSERT INTO {SCHEMA_STAGING}.stg_assets_gc '
+            f'(project_did, asset_did, asset_id, asset_name, task_count, tasks_pending, '
+            f'tasks_in_progress, tasks_submitted, tasks_approved, tasks_rejected, tasks_cancelled, '
+            f'requirement_count, run_id) '
+            f'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) '
+            f'ON CONFLICT (project_did, asset_did) DO UPDATE SET '
+            f'asset_id=EXCLUDED.asset_id, asset_name=EXCLUDED.asset_name, '
+            f'task_count=EXCLUDED.task_count, tasks_pending=EXCLUDED.tasks_pending, '
+            f'tasks_in_progress=EXCLUDED.tasks_in_progress, tasks_submitted=EXCLUDED.tasks_submitted, '
+            f'tasks_approved=EXCLUDED.tasks_approved, tasks_rejected=EXCLUDED.tasks_rejected, '
+            f'tasks_cancelled=EXCLUDED.tasks_cancelled, '
+            f'requirement_count=EXCLUDED.requirement_count, run_id=EXCLUDED.run_id',
+            tuples
+        )
+
+    print(f"[{datetime.now():%H:%M:%S}] Inserted {len(assets_list):,} GC assets")
+    return len(assets_list)
+
+
+def run_assets_gc_transform(run_id: str = None):
+    """Run GC assets transformation only.
+
+    Aggregates from raw_asset_tasks_gc into stg_assets_gc via the
+    aggregate_assets_gc RPC. Mirror of run_assets_transform.
+    """
+    print(f"\n{'='*60}")
+    print(f"GC Assets Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    db = get_db()
+
+    if not run_id:
+        row = db.fetchrow(
+            f'SELECT run_id FROM {SCHEMA_PIPELINE}.pipeline_runs '
+            f'WHERE pipeline_name = $1 AND status = $2 '
+            f'ORDER BY started_at DESC LIMIT 1',
+            "asset_tasks_gc_extract", "success"
+        )
+        if row:
+            run_id = str(row["run_id"])
+            print(f"Using latest asset_tasks_gc_extract run_id: {run_id}")
+        else:
+            print("No successful asset_tasks_gc_extract runs found")
+            return
+
+    run_id = str(run_id)
+    asset_count = transform_assets_gc(db, run_id)
+
+    stg_count = db.fetchval(f'SELECT COUNT(*) FROM {SCHEMA_STAGING}.stg_assets_gc')
+    print(f"\nRow Count Validation:")
+    print(f"  [stg_assets_gc]: transformed={asset_count:,} | staging={stg_count:,}")
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  GC Assets: {asset_count:,}")
+    print(f"{'='*60}\n")
+
+
+def transform_asset_tasks_gc(db, run_id: str):
+    """GC asset tasks transform — clone of transform_asset_tasks reading
+    raw_asset_tasks_gc and writing stg_asset_tasks_gc.
+
+    All JSONB field extraction logic (date parsing, task_name cleanup)
+    is identical to the Ontel transform.
+    """
+    print(f"[{datetime.now():%H:%M:%S}] Transforming GC asset tasks...")
+
+    db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_asset_tasks_gc')
+    print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_asset_tasks_gc")
+
+    def _date_expr(field):
+        return (
+            f"CASE "
+            f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
+            f"  AND (r.data->>'{field}')::bigint > 9999999999 "
+            f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint / 1000.0) "
+            f"        AT TIME ZONE 'America/New_York')::date "
+            f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
+            f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint) "
+            f"        AT TIME ZONE 'America/New_York')::date "
+            f"WHEN r.data->>'{field}' IS NOT NULL AND r.data->>'{field}' != '' "
+            f"  THEN LEFT(r.data->>'{field}', 10)::date "
+            f"ELSE NULL END"
+        )
+
+    clean_expr = (
+        "TRIM(REGEXP_REPLACE("
+        "  REGEXP_REPLACE(r.data->>'Task_Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
+        "  '\\s+[0-9]+$', ''))"
+    )
+
+    sql = (
+        f"INSERT INTO {SCHEMA_STAGING}.stg_asset_tasks_gc "
+        f"(project_did, project_status, asset_did, task_did, asset_id, asset_name, "
+        f"asset_requirement_count, task_name, task_name_clean, task_status, task_scheduled, "
+        f"task_assigned_to_did, task_assigned_to_collection, task_assigned_to_name, "
+        f"task_assigned_to_email, task_submitted_on, task_submitted_by_did, "
+        f"task_submitted_by_name, task_submitted_by_email, task_approved_on, "
+        f"task_approved_by_did, task_approved_by_name, task_approved_by_email, "
+        f"task_cancelled_on, task_cancelled_by_did, task_cancelled_by_name, "
+        f"task_cancelled_by_email, run_id) "
+        f"SELECT "
+        f"  r.project_did, "
+        f"  r.data->>'Project_Status', "
+        f"  r.data->>'Asset_DID', "
+        f"  r.data->>'Task_DID', "
+        f"  r.data->>'Asset_ID', "
+        f"  r.data->>'Asset_Name', "
+        f"  (r.data->>'Asset_Requirement_Count')::int, "
+        f"  r.data->>'Task_Name', "
+        f"  {clean_expr}, "
+        f"  r.data->>'Task_Status', "
+        f"  {_date_expr('Task_Scheduled')}, "
+        f"  r.data->>'Task_Assigned_To_DID', "
+        f"  r.data->>'Task_Assigned_To_Collection', "
+        f"  r.data->>'Task_Assigned_To_Name', "
+        f"  r.data->>'Task_Assigned_To_Email', "
+        f"  {_date_expr('Task_Submitted_On')}, "
+        f"  r.data->>'Task_Submitted_By_DID', "
+        f"  r.data->>'Task_Submitted_By_Name', "
+        f"  r.data->>'Task_Submitted_By_Email', "
+        f"  {_date_expr('Task_Approved_On')}, "
+        f"  r.data->>'Task_Approved_By_DID', "
+        f"  r.data->>'Task_Approved_By_Name', "
+        f"  r.data->>'Task_Approved_By_Email', "
+        f"  {_date_expr('Task_Cancelled_On')}, "
+        f"  r.data->>'Task_Cancelled_By_DID', "
+        f"  r.data->>'Task_Cancelled_By_Name', "
+        f"  r.data->>'Task_Cancelled_By_Email', "
+        f"  $1::uuid "
+        f"FROM {SCHEMA_RAW}.raw_asset_tasks_gc r "
+        f"WHERE r.run_id = $1"
+    )
+
+    print(f"[{datetime.now():%H:%M:%S}] Running server-side GC SQL transform...")
+    result = db.execute(sql, run_id, statement_timeout=600)
+    total = int(result.split()[-1]) if result else 0
+
+    print(f"[{datetime.now():%H:%M:%S}] Total GC asset tasks transformed: {total:,}")
+    return total
+
+
+def run_asset_tasks_gc_transform(run_id: str = None):
+    """Run GC asset tasks transformation only.
+
+    Reads raw_asset_tasks_gc and writes stg_asset_tasks_gc via Python+SQL
+    (matching the Ontel pattern; not a SQL RPC). Mirror of
+    run_asset_tasks_transform.
+    """
+    print(f"\n{'='*60}")
+    print(f"GC Asset Tasks Transformation")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    db = get_db()
+
+    if not run_id:
+        row = db.fetchrow(
+            f'SELECT run_id FROM {SCHEMA_PIPELINE}.pipeline_runs '
+            f'WHERE pipeline_name = $1 AND status = $2 '
+            f'ORDER BY started_at DESC LIMIT 1',
+            "asset_tasks_gc_extract", "success"
+        )
+        if row:
+            run_id = str(row["run_id"])
+            print(f"Using latest asset_tasks_gc_extract run_id: {run_id}")
+        else:
+            print("No successful asset_tasks_gc_extract runs found")
+            return
+
+    asset_count = transform_asset_tasks_gc(db, run_id)
+
+    print(f"\nRow Count Validation:")
+    raw_count = db.fetchval(
+        f'SELECT COUNT(*) FROM {SCHEMA_RAW}.raw_asset_tasks_gc WHERE run_id = $1',
+        run_id
+    )
+    stg_count = db.fetchval(f'SELECT COUNT(*) FROM {SCHEMA_STAGING}.stg_asset_tasks_gc')
+    status = "OK" if raw_count == stg_count else "MISMATCH"
+    print(f"  [stg_asset_tasks_gc]: raw={raw_count:,} | transformed={asset_count:,} "
+          f"| staging={stg_count:,} [{status}]")
+
+    print(f"\n{'='*60}")
+    print(f"Transformation Summary:")
+    print(f"  GC Asset Tasks: {asset_count:,}")
+    print(f"{'='*60}\n")
+
+
+def refresh_analytics_gc():
+    """Refresh the three _gc materialized views.
+
+    Calls analytics.refresh_one_mv() on each. Mirror of refresh_analytics()
+    scoped to the _gc set so the Ontel MVs are unaffected.
+    """
+    print(f"\n{'='*60}")
+    print(f"GC Analytics MV Refresh")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    db = get_db()
+
+    mvs = ["mv_project_summary_gc", "mv_technician_stats_gc", "mv_daily_completion_gc"]
+    for mv in mvs:
+        result = db.fetchrow(
+            f'SELECT * FROM analytics.refresh_one_mv($1)',
+            mv
+        )
+        if result:
+            print(f"  {result['view_name']}: {result['refresh_time_ms']:,}ms")
+        else:
+            print(f"  {mv}: no data returned")
+
+    print(f"\n{'='*60}\n")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
