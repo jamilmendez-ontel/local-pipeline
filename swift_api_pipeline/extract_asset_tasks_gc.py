@@ -271,8 +271,14 @@ def run_asset_task_gc_pipeline():
                     # Don't add to org_rows on failure - per-org safety check
                     # will see only the projects that DID succeed for this org.
 
-        total_records = sum(org_rows.values())
-        extractor.total_loaded = total_records
+        # Use extractor.total_loaded (updated by _write_batch on every COPY)
+        # instead of sum(org_rows). org_rows misses rows from projects that
+        # extracted partially before raising TimeoutError - those rows ARE in
+        # the DB but the per-project counter is lost when the exception
+        # propagates. Ontel uses sum(project_rows) because its project-level
+        # retry deletes round-1 rows before retry, which would inflate
+        # total_loaded; GC has no retry, so total_loaded is accurate.
+        total_records = extractor.total_loaded
 
         extractor.restore_table_after_load()
 
