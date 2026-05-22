@@ -103,6 +103,10 @@ jobs:
         run: python -u timer_correction_review.py --send
 
       - name: Timer corrections - resend changed days
+        # DISABLED 2026-05-22 — fired 413 false positives overnight after
+        # the precision-tail fix landed; debugging in progress. The trigger
+        # logic needs more work before we can run this nightly again.
+        if: false
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Runs after --send so today's snapshot is fresh. Threaded re-sends
