@@ -710,6 +710,17 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
 
     Stores thread_id + message_id in stg_timer_daily_notifications for
     reminder threading.
+
+    Snapshot source asymmetry (intentional): the initial snapshot is
+    seeded from `stg_timer_activities` (via get_previous_day_entries),
+    while find_days_needing_resend compares against
+    `stg_timer_activities_clean`. Clean is a subset (removals applied,
+    duplicates collapsed), so a key written to the snapshot at send
+    time may not appear in any future current_ids. That cannot cause
+    a false-positive resend — the trigger checks
+    `current_ids - snapshot_ids` (new keys only), so an over-broad
+    snapshot is harmless. Keeping it this way avoids re-fetching from
+    clean inside send_daily_emails just for snapshot purposes.
     """
     from gmail_client import authenticate
 
@@ -2100,15 +2111,50 @@ def run_remind(test_mode: bool = False):
 # --resend: Re-send daily email when entries materialize or get added
 # --------------------------------------------------------------------------
 
+def _make_resend_stable_key(project_did, user_email, start_time,
+                            site_name=None, site_id=None, task=None,
+                            end_time=None) -> str:
+    """Stable 12-char hash for resend trigger / NEW-badge comparison.
+
+    Why a separate hash from _make_entry_id: NUMERIC duration_min carries
+    a long precision tail (e.g. 19.6000000000000014...) that the timer
+    pipeline can re-emit with a different tail after its monthly
+    DELETE+REINSERT, even when the row didn't semantically change. That
+    flips _make_entry_id's md5, which triggered ~10 false-positive
+    resend emails per night. This key drops duration_min entirely and
+    truncates timestamps to second precision, so resend only fires on
+    real changes: NULL end_time -> set, or a brand-new (start_time,
+    task, site) combination.
+    """
+    def _sec(dt):
+        if dt is None:
+            return "None"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S+00")
+    parts = [
+        str(project_did), str(user_email), _sec(start_time),
+        str(site_name) if site_name is not None else "None",
+        str(site_id) if site_id is not None else "None",
+        str(task) if task is not None else "None",
+        _sec(end_time),
+    ]
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]
+
+
 def _collect_entry_ids(entries: list[dict]) -> list[str]:
-    """Return the list of 12-char entry_ids for the given entry dicts,
-    using the same hash formula as _build_entries_html / lookup_entry_by_id.
+    """Return the list of 12-char STABLE resend keys for the given entry
+    dicts. Used to track which entries were in the last-sent daily email
+    and detect changes for the resend pass. NOTE: these are NOT the same
+    hashes as stg_timer_corrections.entry_id / stg_timer_entry_removals.
+    entry_id — those use _make_entry_id (full natural key). See
+    _make_resend_stable_key for the rationale.
     """
     return [
-        _make_entry_id(
+        _make_resend_stable_key(
             e["project_did"], e["user_email"], e["start_time"],
             e.get("site_name"), e.get("site_id"), e.get("task"),
-            e.get("end_time"), e.get("duration_min"),
+            e.get("end_time"),
         )
         for e in entries
     ]
@@ -2193,15 +2239,31 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
         current = _fetch_current_day_entries(db, user_email, send_date)
         if not current:
             continue
-        current_ids = set(_collect_entry_ids(current))
+        # Pure corrections (is_edited) already trigger a "Timer Entries
+        # Updated" confirmation email — re-sending the whole day would be
+        # a redundant second notification. Drop them from the trigger set
+        # so only truly-new rows (manual additions, NULL-end-time timers
+        # that completed) cause a resend. Edited rows still render with
+        # the EDITED badge in the body when a resend does fire for some
+        # other reason on the same day.
+        non_edited = [e for e in current if not e.get("is_edited")]
+        current_ids = set(_collect_entry_ids(non_edited))
         snapshot = r["last_sent_entry_ids"]
 
         if snapshot is None:
             # Bootstrap: never sent with snapshot before. Populate quietly
-            # so the next change actually triggers a re-send. Pass the raw
-            # list — asyncpg's JSONB codec handles serialization.
+            # so the next change actually triggers a re-send. Store the
+            # FULL unfiltered current set (not current_ids, which is
+            # non-edited only). Snapshot semantics = "every stable key
+            # in the day as of last send"; the non_edited filter is a
+            # trigger-time concern. send_resend_emails uses the same
+            # full-set convention at its post-send snapshot update,
+            # so bootstrap matching it keeps the two writes consistent.
+            # Without this, an edited row whose correction is later
+            # deleted would falsely re-appear as NEW in a future resend.
+            bootstrap_ids = sorted(_collect_entry_ids(current))
             retry_db(
-                lambda ue=user_email, sd=send_date, ids=sorted(current_ids): db.execute(
+                lambda ue=user_email, sd=send_date, ids=bootstrap_ids: db.execute(
                     f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
                         SET last_sent_entry_ids = $1::jsonb
                         WHERE user_email = $2 AND send_date = $3
@@ -2247,10 +2309,10 @@ def _resend_has_new_rows(entries: list[dict], snapshot_ids: set[str]) -> bool:
     for entry in entries:
         if entry.get("is_edited"):
             continue
-        eid = _make_entry_id(
+        eid = _make_resend_stable_key(
             entry["project_did"], entry["user_email"], entry["start_time"],
             entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-            entry.get("end_time"), entry.get("duration_min"),
+            entry.get("end_time"),
         )
         if eid not in snapshot_ids:
             return True
@@ -2287,10 +2349,10 @@ def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> s
     new_rows_marked = 0
     edited_rows_marked = 0
     for i, entry in enumerate(entries, start=1):
-        eid = _make_entry_id(
+        eid = _make_resend_stable_key(
             entry["project_did"], entry["user_email"], entry["start_time"],
             entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-            entry.get("end_time"), entry.get("duration_min"),
+            entry.get("end_time"),
         )
         row_html = "<tr" + rows[i]
         badge = ""
