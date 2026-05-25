@@ -18,6 +18,9 @@ on:
     types: [pipeline-asset-tasks-gc]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: pipeline-asset-tasks-gc
   cancel-in-progress: false
