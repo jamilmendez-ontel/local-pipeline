@@ -1,10 +1,18 @@
 name: "Pipeline: Asset Tasks GC"
 
-# Parallel workflow to pipeline-asset-tasks.yml — covers ~294 non-Ontel
-# General Contractor orgs (~1,063 projects, ~2M asset_tasks).
+# Parallel workflow to pipeline-asset-tasks.yml — covers non-Ontel
+# General Contractor orgs.
 #
-# Fires nightly at 02:00 ET via Apps Script triggerAssetTasksGC()
-# (well after the Ontel pipeline finishes ~01:00 ET).
+# SCOPE CONTROL:
+#   The GC_ASSET_TASKS_ORG_DIDS env var (set in the run step below)
+#   narrows the run to a specific list of org_dids. Currently scoped
+#   to TSC Construction only. To expand:
+#     - add more org_dids (comma-separated) to the env var, OR
+#     - clear the env var entirely to go full-blast (~294 orgs, ~2M rows)
+#   Per-run override available via workflow_dispatch input.
+#
+# Scheduled nightly at 03:00 ET (07:00 UTC), after the Ontel asset_tasks
+# pipeline finishes (~02:30 ET on a heavy night).
 #
 # Spec: docs/superpowers/specs/2026-05-20-asset-tasks-gc-pipeline-design.md
 # Plan: docs/plans/2026-05-20-asset-tasks-gc-pipeline.md (Task 6)
@@ -14,9 +22,16 @@ name: "Pipeline: Asset Tasks GC"
 # date-validator-daily.
 
 on:
+  schedule:
+    - cron: '0 7 * * *'    # 03:00 ET (DST) / 02:00 ET (standard) daily
   repository_dispatch:
     types: [pipeline-asset-tasks-gc]
   workflow_dispatch:
+    inputs:
+      org_dids:
+        description: 'Comma-separated org_dids (overrides default scope). Leave blank to use workflow default.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -27,6 +42,9 @@ concurrency:
 
 env:
   PIPELINE_DIR: swift_api_pipeline
+  # Default scope — TSC Construction only.
+  # Override per run via workflow_dispatch.inputs.org_dids.
+  DEFAULT_GC_ORG_DIDS: '-LSLnbjcxlr7_LrWCzeH'
 
 jobs:
   asset-tasks-gc:
@@ -69,6 +87,9 @@ jobs:
 
       - name: Run GC asset_tasks pipeline (extract + inline transforms)
         working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          # workflow_dispatch override wins; otherwise the workflow default applies.
+          GC_ASSET_TASKS_ORG_DIDS: ${{ github.event.inputs.org_dids != '' && github.event.inputs.org_dids || env.DEFAULT_GC_ORG_DIDS }}
         run: python -u main.py --pipeline asset_tasks_gc
 
       - name: Refresh GC analytics MVs

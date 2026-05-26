@@ -12,6 +12,7 @@ Auto-discovery from data_staging.stg_projects with filter:
 All project statuses included (in_progress, pending, complete).
 """
 
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,25 +54,46 @@ class AssetTaskGCExtractor(BaseExtractor):
     def get_gc_projects(self) -> List[Dict]:
         """GC projects from stg_projects, filtered to remove obvious waste.
 
-        Filters applied:
+        Base filters applied:
           - org_name != 'Ontel'             (Ontel has its own pipeline)
           - org_name NOT LIKE 'Testing%'    (test fixture orgs)
           - project_name NOT LIKE 'x_Archive:%'  (closed-out historical, ~10-15% of volume)
           - status != 'pending'             (65 projects with effectively 0 tasks)
 
+        Optional scope override:
+          - GC_ASSET_TASKS_ORG_DIDS env var — comma-separated list of org_dids.
+            When set, narrows the run to ONLY those orgs (rest of the GC pool
+            is ignored). Unset/empty = full GC sweep (the original behavior).
+            Whitespace-tolerant; empty entries are silently dropped.
+
         Statuses kept: 'in_progress' (the bulk) + 'complete' (recently done but
         not yet archived). Archived projects are EXCLUDED by name pattern even
         though they're nominally 'complete' status.
         """
-        rows = self.db.fetch(
+        raw = os.getenv("GC_ASSET_TASKS_ORG_DIDS", "").strip()
+        scope_dids = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+
+        params: list = []
+        sql = (
             f"SELECT org_did, org_name, project_did, project_name, status "
             f"FROM {SCHEMA_STAGING}.stg_projects "
             f"WHERE org_name != 'Ontel' "
             f"AND org_name NOT LIKE 'Testing%' "
             f"AND project_name NOT LIKE 'x_Archive:%' "
             f"AND status != 'pending' "
-            f"ORDER BY org_name, project_name"
         )
+        if scope_dids:
+            sql += "AND org_did = ANY($1::text[]) "
+            params.append(scope_dids)
+            logger.info(
+                f"Scope restricted to {len(scope_dids)} org_did(s): "
+                f"{', '.join(scope_dids)}"
+            )
+        else:
+            logger.info("Scope: full GC sweep (no GC_ASSET_TASKS_ORG_DIDS set)")
+        sql += "ORDER BY org_name, project_name"
+
+        rows = self.db.fetch(sql, *params)
         return [dict(r) for r in rows]
 
     def prepare_table_for_bulk_load(self):
