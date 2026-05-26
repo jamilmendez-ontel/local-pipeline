@@ -705,8 +705,15 @@ def _build_entries_html(entries: list[dict]) -> str:
     return "\n".join(rows_html)
 
 
-def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
-    """Send one email per tech with their previous day's entries.
+def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
+                      target_date=None):
+    """Send one email per tech with their entries for `target_date`.
+
+    target_date defaults to yesterday (the normal nightly flow). For
+    backfill sends (e.g., after an outage), pass the actual date the
+    entries belong to so the email subject, "Daily Task Summary" date
+    label, and the `send_date` column on stg_timer_daily_notifications
+    all reflect the entries' real date — not today-minus-1.
 
     Stores thread_id + message_id in stg_timer_daily_notifications for
     reminder threading.
@@ -728,8 +735,9 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False):
     for e in entries:
         by_user.setdefault(e["user_email"], []).append(e)
 
-    now_et = datetime.now(TZ_EASTERN)
-    yesterday = (now_et - timedelta(days=1)).date()
+    if target_date is None:
+        target_date = (datetime.now(TZ_EASTERN) - timedelta(days=1)).date()
+    yesterday = target_date  # variable name preserved — used as the entry date below
     date_str = yesterday.strftime("%B %d, %Y")
 
     service = authenticate()
@@ -991,7 +999,7 @@ def run_send(test_mode: bool = False, target_date=None):
     n_techs = len(set(e['user_email'] for e in entries))
     logger.info(f"Found {len(entries)} entries for {n_techs} techs")
 
-    send_daily_emails(db, entries, test_mode=test_mode)
+    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date)
     detect_and_track_duplicates(db, entries)
 
 
