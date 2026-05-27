@@ -1,0 +1,57 @@
+name: "Probe: TSC project sizes"
+
+# One-shot investigative workflow — probes the 53 TSC Construction active
+# projects to count rows per project (no DB writes). Result uploaded as a
+# JSON artifact so we can download it locally without burning Swift API
+# bandwidth on a mobile connection.
+#
+# Trigger: workflow_dispatch only. Not scheduled.
+# Bandwidth lives on GitHub's runner, not the user's machine.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Create .env (Swift creds only)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          DOTENV
+
+      - name: Run TSC size probe
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u probe_tsc_sizes.py
+
+      - name: Upload result JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsc-sizes-${{ github.run_id }}
+          path: '${{ env.PIPELINE_DIR }}/probe_tsc_sizes_results.json'
+          if-no-files-found: warn
+          retention-days: 14
