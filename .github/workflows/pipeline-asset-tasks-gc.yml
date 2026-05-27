@@ -3,13 +3,16 @@ name: "Pipeline: Asset Tasks GC"
 # Parallel workflow to pipeline-asset-tasks.yml — covers non-Ontel
 # General Contractor orgs.
 #
-# SCOPE CONTROL:
-#   The GC_ASSET_TASKS_ORG_DIDS env var (set in the run step below)
-#   narrows the run to a specific list of org_dids. Currently scoped
-#   to TSC Construction only. To expand:
-#     - add more org_dids (comma-separated) to the env var, OR
-#     - clear the env var entirely to go full-blast (~294 orgs, ~2M rows)
-#   Per-run override available via workflow_dispatch input.
+# SCOPE CONTROL (two layered filters, both optional):
+#   GC_ASSET_TASKS_ORG_DIDS    — comma-separated org_dids
+#   GC_ASSET_TASKS_PROJECT_DIDS — comma-separated project_dids (further narrows
+#                                  within the org scope)
+#   Currently scoped to TSC Construction (org) + 11 specific Ericsson projects
+#   (the ones needed for the active report). To change:
+#     - edit DEFAULT_GC_ORG_DIDS / DEFAULT_GC_PROJECT_DIDS in env: below, OR
+#     - override per-run via workflow_dispatch.inputs.{org_dids,project_dids}
+#   Setting either env to empty disables that filter level (e.g. clearing
+#   DEFAULT_GC_PROJECT_DIDS reverts to "all TSC projects").
 #
 # Scheduled nightly at 03:00 ET (07:00 UTC), after the Ontel asset_tasks
 # pipeline finishes (~02:30 ET on a heavy night).
@@ -29,7 +32,11 @@ on:
   workflow_dispatch:
     inputs:
       org_dids:
-        description: 'Comma-separated org_dids (overrides default scope). Leave blank to use workflow default.'
+        description: 'Comma-separated org_dids (overrides default org scope). Leave blank to use workflow default.'
+        required: false
+        default: ''
+      project_dids:
+        description: 'Comma-separated project_dids (overrides default project scope). Leave blank to use workflow default.'
         required: false
         default: ''
 
@@ -42,9 +49,12 @@ concurrency:
 
 env:
   PIPELINE_DIR: swift_api_pipeline
-  # Default scope — TSC Construction only.
-  # Override per run via workflow_dispatch.inputs.org_dids.
+  # Default org scope — TSC Construction.
   DEFAULT_GC_ORG_DIDS: '-LSLnbjcxlr7_LrWCzeH'
+  # Default project scope — 11 Ericsson projects under TSC needed for the
+  # active report. Removing this line / clearing the value reverts to
+  # "all TSC projects". Format: comma-separated project_dids.
+  DEFAULT_GC_PROJECT_DIDS: '-NvX_km-_fOUQJygtfef,-NhlLk4gK9p6Uz7OkJvW,-NhlLptJVkQkfb0ExCYN,-NvX_SINvBufTHiJPWQV,-NhlLrqUtMaR1rVNPRXR,-NOpZnTfRaDb50Lq3dAH,-MbrNUJJ1G_BzHQns1QX,-Ma-9UGPb5w1kHjS91hb,-M7IqzDnXvYtQJ9KRxFI,-NFxsiuiWiNkrq8_HH7O,-MRQQb266CoA7lBL5efy'
 
 jobs:
   asset-tasks-gc:
@@ -88,8 +98,9 @@ jobs:
       - name: Run GC asset_tasks pipeline (extract + inline transforms)
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
-          # workflow_dispatch override wins; otherwise the workflow default applies.
+          # workflow_dispatch overrides win; otherwise the workflow defaults apply.
           GC_ASSET_TASKS_ORG_DIDS: ${{ github.event.inputs.org_dids != '' && github.event.inputs.org_dids || env.DEFAULT_GC_ORG_DIDS }}
+          GC_ASSET_TASKS_PROJECT_DIDS: ${{ github.event.inputs.project_dids != '' && github.event.inputs.project_dids || env.DEFAULT_GC_PROJECT_DIDS }}
         run: python -u main.py --pipeline asset_tasks_gc
 
       - name: Refresh GC analytics MVs

@@ -60,18 +60,24 @@ class AssetTaskGCExtractor(BaseExtractor):
           - project_name NOT LIKE 'x_Archive:%'  (closed-out historical, ~10-15% of volume)
           - status != 'pending'             (65 projects with effectively 0 tasks)
 
-        Optional scope override:
+        Optional scope overrides (stack additively — both can apply):
           - GC_ASSET_TASKS_ORG_DIDS env var — comma-separated list of org_dids.
-            When set, narrows the run to ONLY those orgs (rest of the GC pool
-            is ignored). Unset/empty = full GC sweep (the original behavior).
-            Whitespace-tolerant; empty entries are silently dropped.
+            When set, narrows to ONLY those orgs.
+          - GC_ASSET_TASKS_PROJECT_DIDS env var — comma-separated list of
+            project_dids. When set, narrows to ONLY those projects (within
+            whatever org scope is already applied).
+          Both unset/empty = full GC sweep (the original behavior).
+          Whitespace-tolerant; empty entries are silently dropped.
 
         Statuses kept: 'in_progress' (the bulk) + 'complete' (recently done but
         not yet archived). Archived projects are EXCLUDED by name pattern even
         though they're nominally 'complete' status.
         """
-        raw = os.getenv("GC_ASSET_TASKS_ORG_DIDS", "").strip()
-        scope_dids = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+        org_raw = os.getenv("GC_ASSET_TASKS_ORG_DIDS", "").strip()
+        org_dids = [s.strip() for s in org_raw.split(",") if s.strip()] if org_raw else []
+
+        proj_raw = os.getenv("GC_ASSET_TASKS_PROJECT_DIDS", "").strip()
+        proj_dids = [s.strip() for s in proj_raw.split(",") if s.strip()] if proj_raw else []
 
         params: list = []
         sql = (
@@ -82,15 +88,20 @@ class AssetTaskGCExtractor(BaseExtractor):
             f"AND project_name NOT LIKE 'x_Archive:%' "
             f"AND status != 'pending' "
         )
-        if scope_dids:
-            sql += "AND org_did = ANY($1::text[]) "
-            params.append(scope_dids)
+        if org_dids:
+            params.append(org_dids)
+            sql += f"AND org_did = ANY(${len(params)}::text[]) "
             logger.info(
-                f"Scope restricted to {len(scope_dids)} org_did(s): "
-                f"{', '.join(scope_dids)}"
+                f"Org scope: {len(org_dids)} org_did(s): {', '.join(org_dids)}"
             )
-        else:
-            logger.info("Scope: full GC sweep (no GC_ASSET_TASKS_ORG_DIDS set)")
+        if proj_dids:
+            params.append(proj_dids)
+            sql += f"AND project_did = ANY(${len(params)}::text[]) "
+            logger.info(
+                f"Project scope: {len(proj_dids)} project_did(s)"
+            )
+        if not org_dids and not proj_dids:
+            logger.info("Scope: full GC sweep (no scope env vars set)")
         sql += "ORDER BY org_name, project_name"
 
         rows = self.db.fetch(sql, *params)
