@@ -44,9 +44,9 @@ jobs:
           SUPABASE_PORT=5432
           SUPABASE_DB=postgres
           SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
           DOTENV
-          echo "SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}" >> .env
-          echo "SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}" >> .env
 
       - name: Decode credentials
         working-directory: ${{ env.PIPELINE_DIR }}
