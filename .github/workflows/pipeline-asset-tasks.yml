@@ -172,6 +172,30 @@ jobs:
             echo "WARN: date-validator dispatch failed; check PAT validity"
           fi
 
+      - name: Dispatch weekly-compliance-audit (Fridays only, cross-repo)
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        continue-on-error: true
+        run: |
+          DOW=$(date -u +%u)
+          if [ "$DOW" != "5" ]; then
+            echo "Not Friday (UTC dow=$DOW) — skipping weekly compliance dispatch"
+            exit 0
+          fi
+          if [ -z "${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" ]; then
+            echo "WARN: DATE_VALIDATOR_DISPATCH_PAT not set — skipping cross-repo dispatch"
+            exit 0
+          fi
+          response=$(curl -sw '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/jamilmendez-ontel/report-automation/dispatches" \
+            -d '{"event_type": "weekly-compliance-audit", "client_payload": {"source": "gha-pipeline-asset-tasks"}}')
+          code=$(echo "$response" | tail -n1)
+          echo "Dispatched weekly-compliance-audit -> HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "WARN: weekly-compliance dispatch failed; check PAT has report-automation scope"
+          fi
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

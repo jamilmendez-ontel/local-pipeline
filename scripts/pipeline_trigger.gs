@@ -94,7 +94,7 @@ function triggerCalendarLeave() {
  *     (or just call fireDispatch_('pipeline-asset-tasks') since true is the default).
  */
 function triggerAssetTasks() {
-  fireDispatchWithPayload_('pipeline-asset-tasks', { dispatch_downstream: false });
+  fireDispatch_('pipeline-asset-tasks');
 }
 
 /**
