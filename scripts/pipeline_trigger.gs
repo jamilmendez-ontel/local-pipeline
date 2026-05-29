@@ -18,9 +18,8 @@
  *   12:09 AM  — Timer
  *   12:13 AM  — User Priorities
  *   12:17 AM  — QA Forms
- *   01:30 AM  — Asset Tasks (shakedown phase: dispatch_downstream=false, runs AFTER
- *               local batch completes ~01:10 ET; Task 6 retires local batch and
- *               moves this to 12:01 AM with dispatch_downstream=true)
+ *   12:01 AM  — Asset Tasks (post-local-batch-retirement; fires dispatch_downstream=true
+ *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
  *
@@ -79,19 +78,15 @@ function triggerCalendarLeave() {
 }
 
 /**
- * Trigger asset_tasks pipeline (the big nightly: ~52 min extract + ~15 min downstream).
+ * Trigger asset_tasks pipeline (the big nightly: ~30-40 min on GHA).
  *
- * SHAKEDOWN PHASE (current):
- *   Schedule this at 01:30 AM EST daily — runs AFTER the still-active local batch
- *   completes (local kicks off at 00:01, finishes ~01:10). dispatch_downstream is
- *   passed false so the local batch keeps owning the end-of-night dispatches for
- *   pipeline-asset-tasks-export, pipeline-timer-discrepancies, and date-validator-daily.
- *   This lets us compare GHA's output vs the local batch's for ~1 week before retiring.
+ * Schedule: 12:01 AM EST daily (time-driven trigger in Apps Script editor).
  *
- * POST-TASK-6 (after local batch retires):
- *   - Change the time-driven trigger to 12:01 AM EST
- *   - Edit fireDispatchWithPayload_ call below to pass {dispatch_downstream: true}
- *     (or just call fireDispatch_('pipeline-asset-tasks') since true is the default).
+ * Fires downstream dispatches at end-of-run:
+ *   - pipeline-asset-tasks-export (same-repo)
+ *   - pipeline-timer-discrepancies (same-repo)
+ *   - date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
+ *   - weekly-compliance-audit (cross-repo, Fridays only, same PAT)
  */
 function triggerAssetTasks() {
   fireDispatch_('pipeline-asset-tasks');
