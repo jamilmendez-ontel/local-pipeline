@@ -31,7 +31,7 @@ logger = get_logger("asset_tasks_gc")
 # Tunables
 PAGE_SIZE = 1000
 MAX_WORKERS = 12  # 2x Ontel because GC has ~150x the project count
-PROJECT_TIMEOUT_SECONDS = 600
+PROJECT_TIMEOUT_SECONDS = 3600
 MAX_RETRIES = 10
 
 # Write-path indexes (dropped before bulk load, recreated after).
