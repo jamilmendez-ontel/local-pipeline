@@ -7,7 +7,7 @@ name: "Pipeline: Asset Tasks GC"
 #   GC_ASSET_TASKS_ORG_DIDS    — comma-separated org_dids
 #   GC_ASSET_TASKS_PROJECT_DIDS — comma-separated project_dids (further narrows
 #                                  within the org scope)
-#   Currently scoped to TSC Construction (org) + 11 specific Ericsson projects
+#   Currently scoped to TSC Construction (org) + 17 specific projects
 #   (the ones needed for the active report). To change:
 #     - edit DEFAULT_GC_ORG_DIDS / DEFAULT_GC_PROJECT_DIDS in env: below, OR
 #     - override per-run via workflow_dispatch.inputs.{org_dids,project_dids}
@@ -51,15 +51,15 @@ env:
   PIPELINE_DIR: swift_api_pipeline
   # Default org scope — TSC Construction.
   DEFAULT_GC_ORG_DIDS: '-LSLnbjcxlr7_LrWCzeH'
-  # Default project scope — 11 Ericsson projects under TSC needed for the
+  # Default project scope — 17 projects under TSC needed for the
   # active report. Removing this line / clearing the value reverts to
   # "all TSC projects". Format: comma-separated project_dids.
-  DEFAULT_GC_PROJECT_DIDS: '-NvX_km-_fOUQJygtfef,-NhlLk4gK9p6Uz7OkJvW,-NhlLptJVkQkfb0ExCYN,-NvX_SINvBufTHiJPWQV,-NhlLrqUtMaR1rVNPRXR,-NOpZnTfRaDb50Lq3dAH,-MbrNUJJ1G_BzHQns1QX,-Ma-9UGPb5w1kHjS91hb,-M7IqzDnXvYtQJ9KRxFI,-NFxsiuiWiNkrq8_HH7O,-MRQQb266CoA7lBL5efy'
+  DEFAULT_GC_PROJECT_DIDS: '-NvX_km-_fOUQJygtfef,-OHxB6eI1C9slp-byUX5,-NhlLk4gK9p6Uz7OkJvW,-OD7LFyfnc_Nj8RlsmCb,-NhlLptJVkQkfb0ExCYN,-OIv9eGun8fo1OtF_m_g,-NvX_SINvBufTHiJPWQV,-O7HW82CKkb5pU6SUm8G,-NhlLrqUtMaR1rVNPRXR,-ODHVSi544dz1LOIujMy,-NOpZnTfRaDb50Lq3dAH,-MbrNUJJ1G_BzHQns1QX,-Ma-9UGPb5w1kHjS91hb,-M7IqzDnXvYtQJ9KRxFI,-NFxsiuiWiNkrq8_HH7O,-MRQQb266CoA7lBL5efy,-NSM2Xk7eRj-Ifjzit7U'
 
 jobs:
   asset-tasks-gc:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -80,10 +80,10 @@ jobs:
           cat > .env <<'DOTENV'
           SWIFT_EMAIL=mgmt@ontel.co
           SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
-          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_HOST=db.voqfjfngdpcvevbkikud.supabase.co
           SUPABASE_PORT=5432
           SUPABASE_DB=postgres
-          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SUPABASE_USER=postgres
           SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
           SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
           DOTENV
