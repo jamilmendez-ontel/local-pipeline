@@ -40,6 +40,7 @@ PIPELINE_NAMES = {
     "asset_tasks_gc_extract": "Asset Tasks GC Extract",
     "asset_tasks_gc_transform": "Asset Tasks GC Transform",
     "targeted_asset_tasks": "Targeted Asset Tasks",
+    "targeted_task_requirements": "Targeted Task Requirements",
     "analytics_gc": "Analytics GC MV Refresh",
     "forms": "QA Forms",
     "timer": "Timer Activities",
@@ -217,6 +218,31 @@ def run_targeted_asset_tasks_pipeline_wrapper():
 
     report_name = os.environ.get("REPORT_NAME") or None
     return run_targeted_asset_tasks_pipeline(report_name=report_name)
+
+
+def run_targeted_task_requirements_pipeline_wrapper():
+    """Run the targeted task-requirements pipeline.
+
+    Reads tasks from data_staging.stg_user_priorities filtered by:
+      - org_did/project_did from enabled reference.report_targets rows
+      - task_name ILIKE '%punch%'
+      - status IN ('pending', 'in_progress')
+      - assigned_to IS NOT NULL
+    For each task_did, fetches requirements via /api/asset-tasks/{task_did}/requirements
+    and keeps only requirements with status in (pending, in_progress).
+    Writes to data_staging.stg_targeted_task_requirements with TRUNCATE-and-reload
+    semantics per report_name.
+
+    Optional CLI env `REPORT_NAME=X` filters to that one report.
+    """
+    from extract_targeted_task_requirements import run_targeted_task_requirements_pipeline
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# TARGETED TASK REQUIREMENTS PIPELINE")
+    logger.info(f"{'#'*60}")
+
+    report_name = os.environ.get("REPORT_NAME") or None
+    return run_targeted_task_requirements_pipeline(report_name=report_name)
 
 
 def run_analytics_gc_refresh():
@@ -722,7 +748,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "targeted_asset_tasks", "analytics_gc", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
+        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "targeted_asset_tasks", "targeted_task_requirements", "analytics_gc", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -755,6 +781,7 @@ Examples:
         "asset_tasks_gc_extract": run_asset_tasks_gc_extract_pipeline,
         "asset_tasks_gc_transform": run_asset_tasks_gc_transform_pipeline,
         "targeted_asset_tasks": run_targeted_asset_tasks_pipeline_wrapper,
+        "targeted_task_requirements": run_targeted_task_requirements_pipeline_wrapper,
         "analytics_gc": run_analytics_gc_refresh,
         "forms": run_forms_pipeline,
         "timer": run_timer_pipeline_full,
