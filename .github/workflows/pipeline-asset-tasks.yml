@@ -23,8 +23,17 @@ on:
     types: [pipeline-asset-tasks]
   workflow_dispatch:
     inputs:
+      stage:
+        description: 'Stage: full (extract+transform), extract (Swift API -> raw only), or transform (raw -> staging only, reuses last successful extract). Use transform to recover an empty/failed staging WITHOUT re-pulling the ~26-min API extract.'
+        required: false
+        type: choice
+        options:
+          - full
+          - extract
+          - transform
+        default: full
       project:
-        description: 'Single project recovery (e.g. TS16). Leave empty for full run.'
+        description: 'Single project recovery (e.g. TS16). Leave empty for full run. (full stage only)'
         required: false
         type: string
       dispatch_downstream:
@@ -58,19 +67,24 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PROJECT="${{ inputs.project }}"
             DD_RAW="${{ inputs.dispatch_downstream }}"
+            STAGE="${{ inputs.stage }}"
           else
             PROJECT="${{ github.event.client_payload.project }}"
             DD_RAW="${{ github.event.client_payload.dispatch_downstream }}"
+            STAGE="${{ github.event.client_payload.stage }}"
           fi
+          # stage defaults to 'full' (nightly repository_dispatch path stays extract+transform)
+          if [ -z "$STAGE" ]; then STAGE="full"; fi
           # dispatch_downstream defaults to true; only an explicit 'false' suppresses
           if [ "$DD_RAW" = "false" ]; then
             DD="false"
           else
             DD="true"
           fi
+          echo "stage=$STAGE" >> $GITHUB_OUTPUT
           echo "project=$PROJECT" >> $GITHUB_OUTPUT
           echo "dispatch_downstream=$DD" >> $GITHUB_OUTPUT
-          echo "Resolved: project='$PROJECT', dispatch_downstream='$DD'"
+          echo "Resolved: stage='$STAGE', project='$PROJECT', dispatch_downstream='$DD'"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,20 +119,36 @@ jobs:
           echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
 
-      - name: Run asset tasks pipeline (extract + transform)
+      - name: Run asset tasks pipeline (stage-aware)
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
           PROJECT: ${{ steps.resolve.outputs.project }}
+          STAGE: ${{ steps.resolve.outputs.stage }}
         run: |
-          if [ -n "$PROJECT" ]; then
-            echo "Recovery mode: --project $PROJECT"
-            python -u main.py --pipeline asset_tasks --project "$PROJECT"
-          else
-            python -u main.py --pipeline asset_tasks
-          fi
+          case "$STAGE" in
+            extract)
+              echo "Stage: EXTRACT only (Swift API -> raw_asset_tasks)"
+              python -u main.py --pipeline asset_tasks_extract
+              ;;
+            transform)
+              # Reuses the latest successful asset_tasks_extract run_id. Use this
+              # to recover an empty/failed staging without re-pulling the API.
+              echo "Stage: TRANSFORM only (raw_asset_tasks -> stg_assets + stg_asset_tasks)"
+              python -u main.py --pipeline asset_tasks_transform
+              ;;
+            *)
+              if [ -n "$PROJECT" ]; then
+                echo "Stage: FULL, single-project recovery --project $PROJECT"
+                python -u main.py --pipeline asset_tasks --project "$PROJECT"
+              else
+                echo "Stage: FULL (extract + transform)"
+                python -u main.py --pipeline asset_tasks
+              fi
+              ;;
+          esac
 
       - name: Run assets pipeline (asset_status enrichment)
-        if: ${{ steps.resolve.outputs.project == '' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.stage != 'extract' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         # Failure here is non-fatal in the local batch (asset_status NULL is
         # degrading-but-acceptable downstream). Mirror that semantics.
@@ -126,17 +156,17 @@ jobs:
         run: python -u main.py --pipeline assets --no-email
 
       - name: Run backfill (asset_did)
-        if: ${{ steps.resolve.outputs.project == '' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.stage != 'extract' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         run: python -u main.py --pipeline backfill --no-email
 
       - name: Refresh analytics MVs
-        if: ${{ steps.resolve.outputs.project == '' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.stage != 'extract' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         run: python -u main.py --pipeline analytics --no-email
 
       - name: Dispatch downstream workflows (asset-tasks-export, timer-discrepancies)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
         run: |
           for event in pipeline-asset-tasks-export pipeline-timer-discrepancies; do
             response=$(curl -sw '\n%{http_code}' -X POST \
@@ -153,7 +183,7 @@ jobs:
           done
 
       - name: Dispatch date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
         # Non-fatal: validator triggering issues should be logged but not crash the run.
         continue-on-error: true
         run: |
@@ -173,7 +203,7 @@ jobs:
           fi
 
       - name: Dispatch weekly-compliance-audit (Fridays only, cross-repo)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
         continue-on-error: true
         run: |
           DOW=$(date -u +%u)
