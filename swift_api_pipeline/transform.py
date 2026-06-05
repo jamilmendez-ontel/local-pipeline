@@ -568,9 +568,12 @@ def transform_asset_tasks(db, run_id: str):
     """
     print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks...")
 
-    # Clear ALL existing staging data (full refresh)
-    db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_asset_tasks')
-    print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_asset_tasks")
+    # NOTE: the full-refresh clear is NOT a separate DELETE anymore. It is
+    # folded into the INSERT below as a data-modifying CTE so the clear and
+    # the reload run as ONE atomic statement. Previously the DELETE was its
+    # own auto-committed call; when the big INSERT hit statement_timeout and
+    # rolled back, the table was left EMPTY until the next run (2026-06-05
+    # incident). A single statement can never leave stg_asset_tasks empty.
 
     # SQL helper: parse epoch-ms or ISO date string to date (Eastern Time)
     # Matches Python's parse_task_date() logic
@@ -598,6 +601,8 @@ def transform_asset_tasks(db, run_id: str):
     )
 
     sql = (
+        # Data-modifying CTE: clear the table, then reload — atomically.
+        f"WITH cleared AS (DELETE FROM {SCHEMA_STAGING}.stg_asset_tasks RETURNING 1) "
         f"INSERT INTO {SCHEMA_STAGING}.stg_asset_tasks "
         f"(project_did, project_status, asset_did, task_did, asset_id, asset_name, "
         f"asset_requirement_count, task_name, task_name_clean, task_status, task_scheduled, "
@@ -641,7 +646,10 @@ def transform_asset_tasks(db, run_id: str):
     )
 
     print(f"[{datetime.now():%H:%M:%S}] Running server-side SQL transform...")
-    result = db.execute(sql, run_id)
+    # 900s timeout: stg_asset_tasks reload is now ~2.6M rows and growing; the
+    # default 300s tripped on 2026-06-05. Sibling transforms use 600s; the
+    # atomic clear+reload here warrants the larger ceiling.
+    result = db.execute(sql, run_id, statement_timeout=900)
     # result is like "INSERT 0 2233001"
     total = int(result.split()[-1]) if result else 0
 
