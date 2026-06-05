@@ -7,14 +7,21 @@
  * 2. Paste this code
  * 3. Set GITHUB_TOKEN in Script Properties (same PAT used for other triggers)
  * 4. Create two time-based triggers:
- *    - triggerDaily: runs every day at 12:10 AM EST (midnight)
- *    - triggerRequirements: runs every day at 12:40 AM EST
+ *    - triggerDaily: runs every day in the 3-4 AM EST window
+ *    - triggerRequirements: runs every day in the 3-4 AM EST window
  *      (the function checks if today is 2nd-5th or 17th-20th before firing)
  *
  * Trigger setup:
  *   Edit → Triggers → Add Trigger
- *   - Function: triggerDaily → Time-driven → Day timer → Midnight to 1am
- *   - Function: triggerRequirements → Time-driven → Day timer → Midnight to 1am
+ *   - Function: triggerDaily → Time-driven → Day timer → 3am to 4am
+ *   - Function: triggerRequirements → Time-driven → Day timer → 3am to 4am
+ *
+ * NOTE (2026-06-05): moved from the midnight-1am window to 3-4 AM. The old
+ * window overlapped the nightly pipeline burst (asset-tasks/timer/forms),
+ * which (a) exhausted Supavisor's 15-client session-mode connection cap and
+ * crashed the requirements run with EMAXCONNSESSION, and (b) meant the report
+ * could read stg data before the asset-tasks pipeline finished refreshing it.
+ * 3 AM clears both. See memory "the june 5 incident".
  */
 
 const GITHUB_OWNER = "jamilmendez-ontel";
