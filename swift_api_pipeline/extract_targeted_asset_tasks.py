@@ -163,6 +163,7 @@ class TargetedAssetTasksExtractor(BaseExtractor):
                     "task_description": item.get("description"),
                     "task_url": f"https://swiftprojects.io/#/app/assets/tasks/{task_id}/requirements",
                     "task_approved_on": _epoch_ms_to_date(item.get("approvedOn")),
+                    "task_submitted_on": _epoch_ms_to_date(item.get("submittedOn")),
                 })
             if len(rows) < PAGE_SIZE:
                 break
@@ -222,7 +223,7 @@ class TargetedAssetTasksExtractor(BaseExtractor):
                     "asset_name", "asset_status",
                     "task_did", "task_name", "task_status",
                     "assigned_to", "task_description", "task_url",
-                    "task_approved_on",
+                    "task_approved_on", "task_submitted_on",
                 ],
             ),
             description=f"copy {len(rows)} task rows",
@@ -327,6 +328,7 @@ def run_targeted_asset_tasks_pipeline(report_name: Optional[str] = None) -> bool
                         task["task_description"],
                         task["task_url"],
                         task.get("task_approved_on"),
+                        task.get("task_submitted_on"),
                     ))
 
                 # Periodic progress log every 500 assets
