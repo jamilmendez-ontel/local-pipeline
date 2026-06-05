@@ -29,9 +29,6 @@
  */
 
 var REPO = 'jamilmendez-ontel/local-pipeline';
-// Where the Open Items Report email workflow lives (different repo from
-// the data-pipeline workflows). See open-items-report-email.yml.
-var REPO_REPORT_AUTOMATION = 'jamilmendez-ontel/report-automation';
 
 /**
  * Trigger orgs pipeline — schedule this at 10:13 PM EST daily.
@@ -188,73 +185,6 @@ function fireDispatch_(eventType) {
 }
 
 /**
- * Fire a repository_dispatch with client_payload, targeting an
- * arbitrary repo. Used for the Open Items Report email workflow which
- * lives in report-automation (not local-pipeline).
- */
-function fireDispatchToRepo_(repo, eventType, clientPayload) {
-  var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
-  if (!token) {
-    Logger.log('ERROR: GITHUB_TOKEN not set in Script Properties');
-    return;
-  }
-
-  var url = 'https://api.github.com/repos/' + repo + '/dispatches';
-
-  var options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28'
-    },
-    payload: JSON.stringify({
-      event_type: eventType,
-      client_payload: clientPayload || {}
-    }),
-    muteHttpExceptions: true
-  };
-
-  var response = UrlFetchApp.fetch(url, options);
-  var code = response.getResponseCode();
-
-  if (code === 204) {
-    Logger.log('Dispatched ' + eventType + ' to ' + repo + ' with payload ' + JSON.stringify(clientPayload) + ' successfully');
-  } else {
-    Logger.log('ERROR dispatching ' + eventType + ' to ' + repo + ': HTTP ' + code + ' — ' + response.getContentText());
-  }
-}
-
-/**
- * Trigger the Monday Open Items Report digest email. Schedule this as
- * a weekly time-driven trigger: Monday 07:00 ET. Targets all
- * monday-cadence groups in reference.report_group_meta (11 AT&T + TMO
- * groups as of 2026-06-04).
- */
-function triggerOpenItemsMonday() {
-  fireDispatchToRepo_(
-    REPO_REPORT_AUTOMATION,
-    'open-items-report-monday',
-    { cadence: 'monday' }
-  );
-}
-
-/**
- * Trigger the Friday Open Items Report digest email. Schedule this as
- * a weekly time-driven trigger: Friday 07:00 ET. Targets all
- * friday-cadence groups in reference.report_group_meta (CGC NSB Macro
- * as of 2026-06-04).
- */
-function triggerOpenItemsFriday() {
-  fireDispatchToRepo_(
-    REPO_REPORT_AUTOMATION,
-    'open-items-report-friday',
-    { cadence: 'friday' }
-  );
-}
-
-/**
  * Test function — manually trigger all pipelines to verify setup.
  * Run this once after setup to confirm everything works.
  */
@@ -265,8 +195,5 @@ function testAllDispatches() {
   fireDispatch_('pipeline-forms');
   fireDispatch_('pipeline-timer-discrepancies');
   fireDispatch_('pipeline-calendar-leave');
-  triggerOpenItemsMonday();
-  Utilities.sleep(2000);
-  triggerOpenItemsFriday();
-  Logger.log('All 8 dispatches fired — check GitHub Actions (local-pipeline + report-automation).');
+  Logger.log('All 6 dispatches fired — check GitHub Actions.');
 }

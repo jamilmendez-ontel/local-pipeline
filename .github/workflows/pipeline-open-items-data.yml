@@ -18,11 +18,11 @@ on:
   repository_dispatch:
     types: [pipeline-open-items-data]
   workflow_dispatch:
-  schedule:
-    # Safety-net daily cron: 06:30 UTC = 01:30 AM EST.
-    # The primary trigger is the Apps Script dispatch after priorities;
-    # this catches us up if that chain ever misfires.
-    - cron: '30 6 * * *'
+
+# No GHA cron — the Apps Script triggerOpenItemsData (~02:00 ET) is the
+# sole scheduled trigger. End-of-run, this workflow chains to
+# open-items-report-email in report-automation (Mon/Fri only) so the
+# email fires when the data is fresh, not on an independent schedule.
 
 concurrency:
   group: pipeline-open-items-data
@@ -97,6 +97,45 @@ jobs:
             sleep 120
             python -u main.py --pipeline targeted_task_requirements --no-email
           }
+
+      # ---------- Step 3: Dispatch open-items-report-email (Mon/Fri only) ----------
+      # Event-driven hand-off: when data refresh succeeds, immediately fire
+      # the email workflow in report-automation. DOW gate keeps the email
+      # to its weekly cadence (Mon: AT&T + TMO groups, Fri: NSB Macro).
+      # On Tue/Wed/Thu/Sat/Sun the data still refreshes but no email goes
+      # out. Reuses DATE_VALIDATOR_DISPATCH_PAT (same PAT pipeline-asset-tasks
+      # uses for cross-repo dispatch to report-automation).
+      - name: Dispatch open-items-report-email (Mon/Fri only, cross-repo)
+        continue-on-error: true
+        run: |
+          # Day-of-week in America/New_York (not UTC — boundary matters near midnight).
+          DOW=$(TZ='America/New_York' date +%u)   # 1=Mon ... 7=Sun
+          if [ "$DOW" = "1" ]; then
+            EVENT_TYPE="open-items-report-monday"
+            CADENCE="monday"
+          elif [ "$DOW" = "5" ]; then
+            EVENT_TYPE="open-items-report-friday"
+            CADENCE="friday"
+          else
+            echo "Not Mon/Fri (ET dow=$DOW) — data refreshed, skipping email dispatch."
+            exit 0
+          fi
+
+          if [ -z "${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" ]; then
+            echo "WARN: DATE_VALIDATOR_DISPATCH_PAT not set — skipping cross-repo dispatch"
+            exit 0
+          fi
+
+          response=$(curl -sw '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/jamilmendez-ontel/report-automation/dispatches" \
+            -d "{\"event_type\": \"${EVENT_TYPE}\", \"client_payload\": {\"cadence\": \"${CADENCE}\", \"source\": \"gha-pipeline-open-items-data\"}}")
+          code=$(echo "$response" | tail -n1)
+          echo "Dispatched ${EVENT_TYPE} -> HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "WARN: ${EVENT_TYPE} dispatch failed; check PAT has report-automation scope"
+          fi
 
       - name: Upload logs on failure
         if: failure()
