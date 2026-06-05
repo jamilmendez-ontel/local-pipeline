@@ -29,12 +29,27 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, date
 from typing import Dict, List, Optional, Tuple
 
 import requests
 
 from base_extractor import BaseExtractor
 from db import retry_db
+
+_ET = timezone.utc  # Postgres stores DATE without TZ; we just want the calendar day
+
+
+def _epoch_ms_to_date(epoch_ms) -> Optional[date]:
+    """Convert Swift's `approvedOn` epoch-ms field to a Python date.
+    Returns None for null / non-numeric input.
+    """
+    if epoch_ms in (None, "", 0):
+        return None
+    try:
+        return datetime.fromtimestamp(int(epoch_ms) / 1000, tz=_ET).date()
+    except (TypeError, ValueError):
+        return None
 
 logger = logging.getLogger("pipeline.targeted_asset_tasks")
 
@@ -147,6 +162,7 @@ class TargetedAssetTasksExtractor(BaseExtractor):
                     "assigned_to": assigned.get("name"),
                     "task_description": item.get("description"),
                     "task_url": f"https://swiftprojects.io/#/app/assets/tasks/{task_id}/requirements",
+                    "task_approved_on": _epoch_ms_to_date(item.get("approvedOn")),
                 })
             if len(rows) < PAGE_SIZE:
                 break
@@ -206,6 +222,7 @@ class TargetedAssetTasksExtractor(BaseExtractor):
                     "asset_name", "asset_status",
                     "task_did", "task_name", "task_status",
                     "assigned_to", "task_description", "task_url",
+                    "task_approved_on",
                 ],
             ),
             description=f"copy {len(rows)} task rows",
@@ -309,6 +326,7 @@ def run_targeted_asset_tasks_pipeline(report_name: Optional[str] = None) -> bool
                         task["assigned_to"],
                         task["task_description"],
                         task["task_url"],
+                        task.get("task_approved_on"),
                     ))
 
                 # Periodic progress log every 500 assets
