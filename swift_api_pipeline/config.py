@@ -82,3 +82,35 @@ QA_FORMS = {
         "display_name": "QA Form TS19"
     },
 }
+
+
+# ---- Invoicing Form (Quote Automation) ----------------------------------
+# Swift forms whose requirement-responses feed the quotation pipeline.
+# Add a new DID here to onboard a future invoicing form — no schema change.
+INVOICING_FORMS = [
+    "-NnoFijdV83f4LCm6Ktr",
+    "-OmoXCo93LkiEzTrsVDy",
+    "-O_NzUh9FPjw2Sgr3ztS",
+    "-ONLRetis86GmTN0_TFm",
+]
+
+INVOICING_RAW_TABLE = "raw_invoicing_form"  # in SCHEMA_RAW
+
+# Exact CSV header keys we map to typed staging columns. Everything else a
+# form returns lands in stg_invoicing_form.extra_fields (jsonb).
+INVOICING_KNOWN_FIELDS = [
+    "Project",
+    "Site Name",
+    "Site ID",
+    "Task",
+    "Requirement",
+    "Requirement Status",
+    "Scope of Work (SOW)",
+    "Invoice Category",
+    "Service Rate (Price)",
+    "LL COP to be handled by Ontel?",
+    "Landlord",
+    "Landlord (Others)",
+    "PMI COP to be handled by Ontel?",
+    "RF Mitigation COP to be handled by Ontel?",
+]
