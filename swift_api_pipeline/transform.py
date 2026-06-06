@@ -1495,6 +1495,66 @@ def refresh_analytics_gc():
     print(f"\n{'='*60}\n")
 
 
+def transform_invoicing_form(db, run_id: str) -> int:
+    """raw_invoicing_form (jsonb) -> stg_invoicing_form (flat + extra_fields)."""
+    from config import INVOICING_KNOWN_FIELDS  # noqa: PLC0415
+
+    db.execute(f"DELETE FROM {SCHEMA_STAGING}.stg_invoicing_form")
+
+    # jsonb '-' text[] removes known keys, leaving the overflow.
+    known_array = "ARRAY[" + ",".join(
+        "'" + k.replace("'", "''") + "'" for k in INVOICING_KNOWN_FIELDS
+    ) + "]"
+
+    sql = f"""
+    INSERT INTO {SCHEMA_STAGING}.stg_invoicing_form
+      (form_did, project, site_name, site_id, task, requirement, requirement_status,
+       sow, invoice_category, service_rate, ll_cop, landlord, landlord_others,
+       pmi_cop, rf_mitigation_cop, fa_number, site_name_norm, extra_fields, run_id)
+    SELECT
+      r.form_did,
+      r.data->>'Project',
+      r.data->>'Site Name',
+      r.data->>'Site ID',
+      r.data->>'Task',
+      r.data->>'Requirement',
+      r.data->>'Requirement Status',
+      r.data->>'Scope of Work (SOW)',
+      r.data->>'Invoice Category',
+      r.data->>'Service Rate',
+      r.data->>'LL COP to be handled by Ontel?',
+      r.data->>'Landlord',
+      r.data->>'Landlord (Others)',
+      r.data->>'PMI COP to be handled by Ontel?',
+      COALESCE(r.data->>'RF Mitigation COP to be handled by Ontel?', r.data->>'RF Mitigation COP to be handled by Ontel'),
+      (SELECT mm[1]
+         FROM regexp_matches(COALESCE(r.data->>'Site ID',''), '(\\d{{6,9}})', 'g') AS mm
+        ORDER BY length(mm[1]) DESC, mm[1]
+        LIMIT 1),
+      NULLIF(UPPER(REGEXP_REPLACE(TRIM(COALESCE(r.data->>'Site Name','')), '\\s+', ' ', 'g')), ''),
+      (r.data - {known_array}),
+      r.run_id
+    FROM {SCHEMA_RAW}.raw_invoicing_form r
+    WHERE r.run_id = $1::uuid
+    """
+    db.execute(sql, run_id)
+    return db.fetchval(f"SELECT count(*) FROM {SCHEMA_STAGING}.stg_invoicing_form")
+
+
+def run_invoicing_transform(run_id: str = None):
+    db = get_db()
+    if not run_id:
+        row = db.fetchrow(
+            f"SELECT run_id FROM {SCHEMA_PIPELINE}.pipeline_runs "
+            f"WHERE pipeline_name = $1 AND status = $2 ORDER BY started_at DESC LIMIT 1",
+            "invoicing_extract", "success",
+        )
+        run_id = str(row["run_id"]) if row else None
+    count = transform_invoicing_form(db, run_id)
+    validate_transform_counts(db, ["raw_invoicing_form"], "stg_invoicing_form", run_id, count)
+    return count
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:

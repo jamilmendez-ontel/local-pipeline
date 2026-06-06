@@ -107,10 +107,11 @@ INVOICING_KNOWN_FIELDS = [
     "Requirement Status",
     "Scope of Work (SOW)",
     "Invoice Category",
-    "Service Rate (Price)",
+    "Service Rate",                              # actual key in raw data (not "Service Rate (Price)")
     "LL COP to be handled by Ontel?",
     "Landlord",
     "Landlord (Others)",
     "PMI COP to be handled by Ontel?",
-    "RF Mitigation COP to be handled by Ontel?",
+    "RF Mitigation COP to be handled by Ontel?", # older form_dids use this variant
+    "RF Mitigation COP to be handled by Ontel",  # newer form_dids drop the trailing "?"
 ]
