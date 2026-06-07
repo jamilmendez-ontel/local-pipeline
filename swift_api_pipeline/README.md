@@ -37,7 +37,7 @@ pip install -r requirements.txt
 Create `.env`:
 
 ```env
-SWIFT_EMAIL=mgmt@ontel.co
+SWIFT_EMAIL=<swift-login-email>
 SWIFT_PASSWORD=...
 SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
 SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com

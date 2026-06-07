@@ -25,7 +25,7 @@ Sheets ──────┘
 ## Automation — GitHub Actions only (Windows Task Scheduler retired 2026-05-28)
 
 All nightly pipelines run as GHA workflows in this repo, fired by Apps
-Script time-driven triggers under `jamil.mendez@nanoninth.com`. See
+Script time-driven triggers under the notifier account. See
 `scripts/pipeline_trigger.gs` for the full schedule.
 
 | Workflow | Trigger | What it refreshes |
@@ -150,7 +150,7 @@ pip install -r requirements.txt
 `.env` in `swift_api_pipeline/`:
 
 ```env
-SWIFT_EMAIL=mgmt@ontel.co
+SWIFT_EMAIL=<swift-login-email>
 SWIFT_PASSWORD=...
 SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
 SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
@@ -170,7 +170,7 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 | Secret | Used by |
 |---|---|
 | `SWIFT_PASSWORD`, `SUPABASE_PASSWORD` | All pipelines |
-| `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via jamil.mendez@nanoninth.com) |
+| `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via the notifier account) |
 | `SHEETS_TOKEN_PICKLE` | Timer-discrepancies, timer-correction-apply, timer-duplicate-resolve |
 | `CALENDAR_TOKEN_PICKLE` | Calendar-leave pipeline |
 | `DATE_VALIDATOR_DISPATCH_PAT` | Cross-repo dispatches (date-validator, report-automation) |
