@@ -39,11 +39,11 @@ Create `.env`:
 ```env
 SWIFT_EMAIL=<swift-login-email>
 SWIFT_PASSWORD=...
-SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
-SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+SUPABASE_URL=https://<your-project-ref>.supabase.co
+SUPABASE_HOST=<your-pooler-host>.pooler.supabase.com
 SUPABASE_PORT=5432
 SUPABASE_DB=postgres
-SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+SUPABASE_USER=postgres.<your-project-ref>
 SUPABASE_PASSWORD=...
 ```
 
@@ -127,7 +127,7 @@ migration:
 
 ```bash
 # Either via Supabase MCP apply_migration, or:
-psql "$DATABASE_URL" -f migrations/064_open_items_views_use_submitted_on.sql
+psql "$DATABASE_URL" -f migrations/<migration-file>.sql
 ```
 
 Migrations are append-only; if you need to change something already
@@ -153,12 +153,12 @@ On GHA, logs are uploaded as workflow artifacts on failure.
 
 ## Troubleshooting
 
-- **Asset tasks timeout** — see `project_pipeline_incident_2026_06_05.md`
-  for the atomic-transform + 900s timeout fix landed in `e499d0f`.
+- **Asset tasks timeout** — see internal incident docs for the
+  atomic-transform + extended-timeout fix.
 - **Pool exhaustion (EMAXCONNSESSION)** — caused by overlapping nightly
-  jobs hitting the pooler's 15-client session cap. Stagger schedules
-  out of the 12-1 AM ET busy window.
-- **Token expiry** — Gmail/Drive/Calendar tokens. GCP project published
-  to Production (2026-03-23) prevents Testing-mode 7-day expiry. If a
+  jobs hitting the pooler's session cap. Stagger schedules out of the
+  busiest window.
+- **Token expiry** — Gmail/Drive/Calendar tokens. The GCP project is
+  published to Production to avoid Testing-mode token expiry. If a
   token does expire, re-run the OAuth flow locally and re-base64 the
   pickle into the GHA secret.

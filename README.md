@@ -30,28 +30,26 @@ Script time-driven triggers under the notifier account. See
 
 | Workflow | Trigger | What it refreshes |
 |---|---|---|
-| `pipeline-orgs.yml` | Apps Script 22:13 ET | Orgs + projects (Phase 1, must run first) |
-| `pipeline-timer.yml` | Apps Script 00:09 ET | `stg_timer_activities` + `stg_timer_corrections` apply + clean rebuild |
-| `pipeline-priorities.yml` | Apps Script 00:13 ET | `stg_user_priorities` |
-| `pipeline-forms.yml` | Apps Script 00:17 ET | `stg_qa_form` |
-| `pipeline-timer-discrepancies.yml` | Apps Script 00:21 ET | Google Form → `stg_timer_discrepancies` |
-| `pipeline-calendar-leave.yml` | Apps Script 00:30 ET | Google Calendar → `stg_calendar_leave` (incremental, AI-normalized) |
-| `pipeline-asset-tasks.yml` | Apps Script 00:01 ET | Heavy nightly: 2.5M+ asset_tasks → MVs → fires 4 downstream dispatches |
-| `pipeline-asset-tasks-gc.yml` | Apps Script 02:00 ET | Parallel GC pipeline (~294 non-Ontel orgs) |
-| `pipeline-open-items-data.yml` | Apps Script 02:00–03:00 ET | OIR-scoped Swift snapshots + cross-repo dispatch to report-automation |
-| `gmail-pipeline.yml` | Apps Script gmail_trigger.gs every 5 min | AR aging + sales detail when Daily Revenue Report email arrives |
+| `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
+| `pipeline-timer.yml` | Nightly Apps Script | `stg_timer_activities` + `stg_timer_corrections` apply + clean rebuild |
+| `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
+| `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form` |
+| `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
+| `pipeline-calendar-leave.yml` | Nightly Apps Script | Google Calendar → `stg_calendar_leave` (incremental, AI-normalized) |
+| `pipeline-asset-tasks.yml` | Nightly Apps Script | Heavy nightly: asset_tasks → MVs → fires downstream dispatches |
+| `pipeline-asset-tasks-gc.yml` | Nightly Apps Script | Parallel GC pipeline (non-Ontel orgs) |
+| `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
+| `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
 | `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time |
 | `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 
-The `pipeline-asset-tasks` workflow fires four `repository_dispatch`
-downstream events at end-of-run: `pipeline-asset-tasks-export`,
-`pipeline-timer-discrepancies`, `date-validator-daily` (cross-repo to
-`date-validator`), and `weekly-compliance-audit` (cross-repo to
-`report-automation`, Fridays only). The `pipeline-open-items-data`
-workflow fires `open-items-report-monday` or `open-items-report-friday`
-to `report-automation` based on day-of-week.
+Exact trigger times live in `scripts/pipeline_trigger.gs`. The
+`pipeline-asset-tasks` workflow fires downstream dispatches at end-of-run
+(export, discrepancies, validator, weekly compliance). The
+`pipeline-open-items-data` workflow fires a downstream report email
+dispatch based on day-of-week.
 
-Cross-repo dispatches use the `DATE_VALIDATOR_DISPATCH_PAT` secret.
+Cross-repo dispatches use a dispatch PAT stored in GHA secrets.
 
 ## Pipeline architecture (`swift_api_pipeline/`)
 
@@ -81,11 +79,11 @@ report-automation reports that don't need full-scale extracts.
 
 | Extractor | Output | Used by |
 |---|---|---|
-| `extract_targeted_asset_tasks.py` | `data_staging.stg_targeted_asset_tasks` (~133k OIR scope) | Open Items Report (BetaSites Final COP date) |
-| `extract_targeted_task_requirements.py` | `data_staging.stg_targeted_task_requirements` (~655 OIR scope) | Open Items Report (per-requirement detail) |
+| `extract_targeted_asset_tasks.py` | `data_staging.stg_targeted_asset_tasks` | Open Items Report (Final COP date enrichment) |
+| `extract_targeted_task_requirements.py` | `data_staging.stg_targeted_task_requirements` | Open Items Report (per-requirement detail) |
 
 `stg_targeted_asset_tasks` captures both `task_approved_on` and
-`task_submitted_on` from Swift's `approvedOn`/`submittedOn` epoch fields.
+`task_submitted_on` from the upstream API's epoch fields.
 
 ### Other extractors
 
@@ -152,11 +150,11 @@ pip install -r requirements.txt
 ```env
 SWIFT_EMAIL=<swift-login-email>
 SWIFT_PASSWORD=...
-SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
-SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+SUPABASE_URL=https://<your-project-ref>.supabase.co
+SUPABASE_HOST=<your-pooler-host>.pooler.supabase.com
 SUPABASE_PORT=5432
 SUPABASE_DB=postgres
-SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+SUPABASE_USER=postgres.<your-project-ref>
 SUPABASE_PASSWORD=...
 ```
 
@@ -181,38 +179,15 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
-Recent additions:
-- `059_report_group_meta.sql` — OIR display config
-- `060_targeted_asset_tasks_approved_on.sql` — `task_approved_on` column
-- `061_open_items_views.sql` — `analytics.v_open_items_*` views
-- `062_open_items_carrier_column.sql` — `carrier` (ATT/TMO/VZW) on `report_group_meta`
-- `063_targeted_asset_tasks_submitted_on.sql` — `task_submitted_on` column
-- `064_open_items_views_use_submitted_on.sql` — OIR view keys on `submittedOn`
+See `migrations/` for the full history. Run `git log --oneline
+migrations/` for recent changes.
 
 ## Performance (typical nightly)
 
-| Operation | Duration |
-|-----------|----------|
-| Asset tasks (extract + transform on GHA) | ~25–30 min |
-| QA forms | ~10–15 min |
-| Timer activities | ~30 sec |
-| User priorities | ~2 min |
-| Targeted asset tasks (OIR scope only) | ~3–5 min |
-| Analytics MV refresh | ~1–2 min total |
-| Backfill asset_did (3-pass) | ~30–60 sec |
-
-## Data volumes (approximate)
-
-| Table | Rows |
-|-------|------|
-| stg_asset_tasks | ~2.5M |
-| stg_qa_form | ~383K |
-| stg_timer_activities | ~283K |
-| stg_targeted_asset_tasks | ~133K (OIR scope) |
-| stg_user_priorities | ~12K |
-| stg_assets | ~33K |
-| stg_calendar_leave | ~10K |
-| stg_timer_discrepancies | ~5K |
+The asset_tasks pipeline is the longest-running step (tens of minutes
+on a GHA runner). QA forms and the targeted extractors are an order of
+magnitude faster. Timer, priorities, and analytics MV refresh complete
+in minutes. Backfill steps take well under a minute.
 
 ## Related repos
 
