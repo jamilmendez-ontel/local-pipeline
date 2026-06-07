@@ -1,103 +1,123 @@
-# Swift API Data Pipeline
+# Local Pipeline — Swift API → Supabase ETL
 
-ETL pipeline that extracts data from the Swift Projects API and Gmail, transforms it into clean staging tables, and maintains analytics views in Supabase (PostgreSQL).
-
-## Architecture
+ETL pipeline that extracts data from the Swift Projects API, Gmail, and
+Google Calendar/Sheets, transforms it into clean staging tables, and
+maintains analytics views in Supabase (PostgreSQL).
 
 ```
-Swift API ──┐
-            ├──► data_raw (JSONB) ──► data_staging (normalized) ──► analytics (views/MVs)
-Gmail ──────┘
+Swift API ───┐
+Gmail ───────┼──► data_raw (JSONB) ──► data_staging (normalized) ──► analytics (views/MVs)
+Calendar ────┤
+Sheets ──────┘
 ```
 
-### Database Schemas
+## Database schemas
 
 | Schema | Purpose |
 |--------|---------|
-| `data_raw` | Raw API responses stored as JSONB |
-| `data_staging` | Cleaned, normalized staging tables |
-| `analytics` | Pre-joined views + materialized views for reporting |
-| `pipeline` | Run tracking metadata (pipeline_runs table) |
+| `data_raw` | Raw API responses (JSONB) for the heavy pipelines |
+| `data_staging` | Cleaned, normalized staging tables (asyncpg COPY-loaded) |
+| `analytics` | Pre-joined views + materialized views for downstream reports |
+| `reference` | Manually-maintained lookup tables (`report_targets`, `report_group_meta`, etc.) |
+| `pipeline` | Run-tracking metadata (`pipeline_runs`) |
+| `agent` | DARA assistant's `schema_metadata` table |
 
-### Pipeline Phases
+## Automation — GitHub Actions only (Windows Task Scheduler retired 2026-05-28)
 
-**Phase 1 — Organizations & Projects** (sequential)
-- Extracts org/project data from Swift API
-- Must run first (other pipelines depend on reference data)
+All nightly pipelines run as GHA workflows in this repo, fired by Apps
+Script time-driven triggers under `jamil.mendez@nanoninth.com`. See
+`scripts/pipeline_trigger.gs` for the full schedule.
 
-**Phase 2 — Parallel Extraction** (4 pipelines via ThreadPoolExecutor)
-- **Asset Tasks** — 2.2M+ rows across 6 projects, 6 parallel API workers per project
-- **User Priorities** — User priority assignments
-- **QA Forms** — 348K+ inspection form responses
-- **Timer Activities** — Time tracking entries (append mode)
+| Workflow | Trigger | What it refreshes |
+|---|---|---|
+| `pipeline-orgs.yml` | Apps Script 22:13 ET | Orgs + projects (Phase 1, must run first) |
+| `pipeline-timer.yml` | Apps Script 00:09 ET | `stg_timer_activities` + `stg_timer_corrections` apply + clean rebuild |
+| `pipeline-priorities.yml` | Apps Script 00:13 ET | `stg_user_priorities` |
+| `pipeline-forms.yml` | Apps Script 00:17 ET | `stg_qa_form` |
+| `pipeline-timer-discrepancies.yml` | Apps Script 00:21 ET | Google Form → `stg_timer_discrepancies` |
+| `pipeline-calendar-leave.yml` | Apps Script 00:30 ET | Google Calendar → `stg_calendar_leave` (incremental, AI-normalized) |
+| `pipeline-asset-tasks.yml` | Apps Script 00:01 ET | Heavy nightly: 2.5M+ asset_tasks → MVs → fires 4 downstream dispatches |
+| `pipeline-asset-tasks-gc.yml` | Apps Script 02:00 ET | Parallel GC pipeline (~294 non-Ontel orgs) |
+| `pipeline-open-items-data.yml` | Apps Script 02:00–03:00 ET | OIR-scoped Swift snapshots + cross-repo dispatch to report-automation |
+| `gmail-pipeline.yml` | Apps Script gmail_trigger.gs every 5 min | AR aging + sales detail when Daily Revenue Report email arrives |
+| `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time |
+| `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 
-**Post-Phase 2** (sequential)
-- **Asset DID Backfill** — Links timer/QA form rows to assets via `backfill_asset_did()` RPC
-- **Analytics MV Refresh** — Refreshes 3 materialized views (`mv_project_summary`, `mv_technician_stats`, `mv_daily_completion`)
+The `pipeline-asset-tasks` workflow fires four `repository_dispatch`
+downstream events at end-of-run: `pipeline-asset-tasks-export`,
+`pipeline-timer-discrepancies`, `date-validator-daily` (cross-repo to
+`date-validator`), and `weekly-compliance-audit` (cross-repo to
+`report-automation`, Fridays only). The `pipeline-open-items-data`
+workflow fires `open-items-report-monday` or `open-items-report-friday`
+to `report-automation` based on day-of-week.
 
-**Gmail Pipelines** (separate scheduler, every 30 min)
-- **AR Aging** — Parses aging report from Daily Revenue Report email
-- **Sales Detail** — Parses sales data from same email
+Cross-repo dispatches use the `DATE_VALIDATOR_DISPATCH_PAT` secret.
 
-Each pipeline sends its own email notification with log attachment and relevant row counts.
-
-## Pipeline Flow
+## Pipeline architecture (`swift_api_pipeline/`)
 
 ```
 main.py
 ├── Phase 1: Organizations & Projects
-│   ├── pipeline.py → extract orgs/projects
-│   └── transform.py → stg_organizations, stg_projects
+│   └── pipeline.py + transform.py → stg_organizations, stg_projects
 │
 ├── Phase 2: Parallel (ThreadPoolExecutor)
-│   ├── Asset Tasks
-│   │   ├── extract_asset_tasks.py → raw_asset_tasks (6 workers, COPY protocol)
+│   ├── extract_asset_tasks.py → raw_asset_tasks (6 workers, COPY)
 │   │   └── transform.py → stg_assets (RPC), stg_asset_tasks (server-side SQL)
-│   ├── User Priorities
-│   │   ├── pipeline.py → raw_user_priorities
-│   │   └── transform.py → stg_user_priorities
-│   ├── QA Forms
-│   │   ├── extract_forms.py → raw_form_qa_ts13..ts18
-│   │   └── transform.py → stg_qa_form (server-side SQL)
-│   └── Timer Activities
-│       ├── extract_timer.py → raw_timer_activities
-│       └── transform.py → stg_timer_activities
+│   ├── pipeline.py:user_priorities → raw_user_priorities → stg_user_priorities
+│   ├── extract_forms.py → raw_form_qa_ts13..ts18 → stg_qa_form
+│   └── extract_timer.py → raw_timer_activities → stg_timer_activities
+│       └── data_staging.rebuild_timer_clean() → stg_timer_activities_clean
 │
 └── Post-Phase 2:
-    ├── backfill_asset_did() — 3-pass matching (asset_id → asset_name → FA regex)
-    └── refresh_analytics() — mv_project_summary, mv_technician_stats, mv_daily_completion
+    ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
+    └── analytics.refresh_one_mv() × 3 (mv_project_summary, mv_technician_stats, mv_daily_completion)
 ```
 
-## Key Files
+### Targeted extractors (report-driven)
+
+Lightweight pipelines that snapshot Swift data for specific
+`(org, project)` sets defined in `reference.report_targets`. Used by
+report-automation reports that don't need full-scale extracts.
+
+| Extractor | Output | Used by |
+|---|---|---|
+| `extract_targeted_asset_tasks.py` | `data_staging.stg_targeted_asset_tasks` (~133k OIR scope) | Open Items Report (BetaSites Final COP date) |
+| `extract_targeted_task_requirements.py` | `data_staging.stg_targeted_task_requirements` (~655 OIR scope) | Open Items Report (per-requirement detail) |
+
+`stg_targeted_asset_tasks` captures both `task_approved_on` and
+`task_submitted_on` from Swift's `approvedOn`/`submittedOn` epoch fields.
+
+### Other extractors
+
+| Script | Output |
+|---|---|
+| `extract_aging.py` | Gmail-based AR aging (`stg_ar_aging`) |
+| `extract_sales.py` | Gmail-based sales detail (`stg_sales_detail`) |
+| `extract_calendar_leave.py` | Google Calendar leave events (`stg_calendar_leave`) — incremental, AI-normalized |
+| `extract_daily_reports.py` | Daily reports + per-task work summaries |
+| `extract_revenue_rates.py` | `reference.ref_task_revenue_rates` from a manually-maintained sheet |
+
+## Key files (`swift_api_pipeline/`)
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Entry point — orchestrates all pipelines with CLI options |
-| `config.py` | Configuration loader (API credentials, DB, logging, schema names) |
-| `db.py` | Asyncpg connection pool with sync bridge (background event loop thread) |
-| `base_extractor.py` | Shared base class for extractors (auth, pipeline tracking) |
+| `main.py` | CLI entry point; orchestrates all pipelines |
+| `config.py` | Configuration loader (Swift creds, DB, logging) |
+| `db.py` | asyncpg pool with sync bridge (background event loop thread). Retries 3× on transient DNS blips. |
+| `base_extractor.py` | Shared base for extractors (Swift auth, pipeline_runs tracking) |
 | `transform.py` | All transformation logic (raw → staging), server-side SQL |
-| `pipeline_notifier.py` | Email notifications via Gmail API with log capture |
-| `pipeline.py` | Org/project and user priority extraction |
-| `extract_asset_tasks.py` | Asset task extraction (6 parallel workers, COPY protocol) |
-| `extract_forms.py` | QA form extraction (multi-form support) |
-| `extract_timer.py` | Timer activity extraction (append mode) |
-| `extract_aging.py` | Gmail-based AR aging extraction |
-| `extract_sales.py` | Gmail-based sales detail extraction |
-| `gmail_client.py` | Gmail API authentication and email search |
-| `run_gmail_pipelines.py` | Gmail pipeline scheduler (checks for new emails before running) |
+| `pipeline_notifier.py` | Email notifications via Gmail API |
+| `pipeline.py` | Orgs/projects and user_priorities extraction |
+| `gmail_client.py` | Gmail API authentication |
+| `calendar_client.py` | Google Calendar API authentication |
+| `sheets_client.py` | Drive API authentication (used for Google Forms responses) |
+| `migrations/*.sql` | Numbered SQL migrations (000-064 at time of writing) |
 
-## Usage
+## CLI
 
 ```bash
 # Full pipeline (extract + transform + backfill + MV refresh)
 python main.py
-
-# Extract only
-python main.py --extract
-
-# Transform only (uses latest successful extractions)
-python main.py --transform
 
 # Single pipeline
 python main.py --pipeline asset_tasks
@@ -105,82 +125,101 @@ python main.py --pipeline forms
 python main.py --pipeline timer
 python main.py --pipeline orgs
 python main.py --pipeline user_priorities
+python main.py --pipeline targeted_asset_tasks   # OIR-scoped
+python main.py --pipeline targeted_task_requirements
+python main.py --pipeline calendar_leave
 python main.py --pipeline aging
 python main.py --pipeline sales
+
+# Extract / transform stages only
+python main.py --extract
+python main.py --transform
 
 # Suppress email notifications
 python main.py --no-email
 ```
 
-## Automation (Windows Task Scheduler)
-
-| Task | Schedule | Script | Description |
-|------|----------|--------|-------------|
-| SwiftPipeline-Nightly | Daily 12:01 AM | `scheduled_main_pipeline.bat` | Full pipeline + Excel export |
-| SwiftPipeline-Gmail-Hourly | Every 30 min, 1-10 AM | `scheduled_gmail_pipeline.bat` | Gmail polling (aging + sales) |
-
-Both run as `admin` user in background mode. Logs written to `pipeline_logs/`.
-
 ## Setup
 
 ```bash
-# Create virtual environment
 python -m venv venv
 venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Environment Variables
-
-Create `.env` in `swift_api_pipeline/`:
+`.env` in `swift_api_pipeline/`:
 
 ```env
-SWIFT_EMAIL=your.email@company.com
-SWIFT_PASSWORD=your_password
-SUPABASE_HOST=db.your-project.supabase.co
+SWIFT_EMAIL=mgmt@ontel.co
+SWIFT_PASSWORD=...
+SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
 SUPABASE_PORT=5432
 SUPABASE_DB=postgres
-SUPABASE_USER=postgres
-SUPABASE_PASSWORD=your_password
+SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+SUPABASE_PASSWORD=...
 ```
 
-Gmail API requires `credentials.json` and `token.json` in the pipeline directory (OAuth2 for sending notifications and reading Daily Revenue Report emails).
+Gmail/Drive/Calendar OAuth tokens (`gmail_credentials/token.pickle`,
+`credentials.json`, etc.) are required for the notifier + the
+Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
+(`NOTIFIER_*`, `CALENDAR_TOKEN_PICKLE`, `SHEETS_TOKEN_PICKLE`).
 
-## Database Migrations
+## GHA secrets (in `local-pipeline`)
 
-Migrations are in `migrations/` directory (numbered 001-024). Apply with:
+| Secret | Used by |
+|---|---|
+| `SWIFT_PASSWORD`, `SUPABASE_PASSWORD` | All pipelines |
+| `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via jamil.mendez@nanoninth.com) |
+| `SHEETS_TOKEN_PICKLE` | Timer-discrepancies, timer-correction-apply, timer-duplicate-resolve |
+| `CALENDAR_TOKEN_PICKLE` | Calendar-leave pipeline |
+| `DATE_VALIDATOR_DISPATCH_PAT` | Cross-repo dispatches (date-validator, report-automation) |
 
-```bash
-# Most migrations are SQL files applied via Python helpers
-python migrations/apply_024.py
-```
+## Database migrations
 
-## Email Notifications
+`swift_api_pipeline/migrations/` holds numbered SQL files. Apply via
+Supabase MCP `apply_migration` or `psql`. Migrations are
+versioned 000+ at time of writing.
 
-Each pipeline step sends an individual email with:
-- Status (SUCCESS/FAILED) with duration
-- Before/after row counts for that pipeline's tables only
-- Log file attachment (filtered to only show that pipeline's logs)
+Recent additions:
+- `059_report_group_meta.sql` — OIR display config
+- `060_targeted_asset_tasks_approved_on.sql` — `task_approved_on` column
+- `061_open_items_views.sql` — `analytics.v_open_items_*` views
+- `062_open_items_carrier_column.sql` — `carrier` (ATT/TMO/VZW) on `report_group_meta`
+- `063_targeted_asset_tasks_submitted_on.sql` — `task_submitted_on` column
+- `064_open_items_views_use_submitted_on.sql` — OIR view keys on `submittedOn`
 
-## Performance
+## Performance (typical nightly)
 
 | Operation | Duration |
 |-----------|----------|
-| Full pipeline (overnight) | ~25-35 min |
-| Asset tasks extraction (2.2M rows) | ~40 min |
-| Asset tasks transform (server-side SQL) | ~2 min |
-| QA Forms extraction + transform | ~30 min + 12 min |
-| Timer extraction + transform | ~17 sec |
-| Analytics MV refresh | ~1-2 min total |
+| Asset tasks (extract + transform on GHA) | ~25–30 min |
+| QA forms | ~10–15 min |
+| Timer activities | ~30 sec |
+| User priorities | ~2 min |
+| Targeted asset tasks (OIR scope only) | ~3–5 min |
+| Analytics MV refresh | ~1–2 min total |
+| Backfill asset_did (3-pass) | ~30–60 sec |
 
-## Data Volumes
+## Data volumes (approximate)
 
 | Table | Rows |
 |-------|------|
-| raw_asset_tasks / stg_asset_tasks | ~2.2M |
-| stg_qa_form | ~348K |
+| stg_asset_tasks | ~2.5M |
+| stg_qa_form | ~383K |
 | stg_timer_activities | ~283K |
-| stg_user_priorities | ~104K |
-| stg_assets | ~29K |
+| stg_targeted_asset_tasks | ~133K (OIR scope) |
+| stg_user_priorities | ~12K |
+| stg_assets | ~33K |
+| stg_calendar_leave | ~10K |
+| stg_timer_discrepancies | ~5K |
+
+## Related repos
+
+- `report-automation/` — consumes data from this pipeline to generate
+  weekly reports (daily finance, weekly compliance, open items)
+- `date-validator/` — fired by this pipeline's `pipeline-asset-tasks`
+  end-of-run dispatch; cross-checks Swift task dates against Gmail
+  email dates
+- `gmail-scraper/` — separate ETL that feeds package emails into
+  Supabase; consumed by the date-validator

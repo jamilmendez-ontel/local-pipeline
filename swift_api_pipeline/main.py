@@ -275,6 +275,21 @@ def run_forms_pipeline():
     return True
 
 
+def run_invoicing_pipeline():
+    """Run invoicing form extraction + transformation (Quote Automation)."""
+    from extract_invoicing_form import run_invoicing_extract
+    from transform import run_invoicing_transform
+
+    logger.info(f"\n{'#'*60}")
+    logger.info(f"# INVOICING FORM PIPELINE")
+    logger.info(f"{'#'*60}")
+
+    run_id = run_invoicing_extract()
+    run_invoicing_transform(run_id)
+
+    return True
+
+
 def run_timer_pipeline_full():
     """Run timer extraction + transformation (append mode)"""
     from extract_timer import run_timer_pipeline
@@ -748,7 +763,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "targeted_asset_tasks", "targeted_task_requirements", "analytics_gc", "forms", "timer", "aging", "sales", "backfill", "analytics", "assets"],
+        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "targeted_asset_tasks", "targeted_task_requirements", "analytics_gc", "forms", "invoicing", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -784,6 +799,7 @@ Examples:
         "targeted_task_requirements": run_targeted_task_requirements_pipeline_wrapper,
         "analytics_gc": run_analytics_gc_refresh,
         "forms": run_forms_pipeline,
+        "invoicing": run_invoicing_pipeline,
         "timer": run_timer_pipeline_full,
         "aging": run_aging_pipeline_full,
         "sales": run_sales_pipeline_full,
