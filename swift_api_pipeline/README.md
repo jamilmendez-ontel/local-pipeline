@@ -1,131 +1,164 @@
-# Swift API to Supabase Pipeline
+# Swift API Pipeline
 
-Production ETL pipeline that extracts data from Swift Projects API and loads it into Supabase as raw JSONB.
+Inner directory of the `local-pipeline` repo. Holds the actual ETL code,
+SQL migrations, and per-pipeline orchestration. See the
+[repo root README](../README.md) for the bird's-eye view.
 
-## Architecture
+## What lives here
 
-**Raw JSONB Layer (Medallion Bronze)**
-- Full API response preservation
-- Historical tracking via run_id
-- Full refresh strategy
-- Foundation for downstream transformation
+| Path | What |
+|---|---|
+| `main.py` | CLI entry point — orchestrates all pipelines |
+| `config.py` | Configuration loader |
+| `db.py` | asyncpg pool + sync bridge |
+| `base_extractor.py` | Shared base class for extractors |
+| `transform.py` | Raw → staging transformations |
+| `pipeline_notifier.py` | Email notifications via Gmail API |
+| `pipeline.py` | Orgs/projects + user_priorities extraction |
+| `extract_*.py` | Per-pipeline extractors (asset_tasks, forms, timer, etc.) |
+| `gmail_client.py` / `calendar_client.py` / `sheets_client.py` | Google API auth |
+| `migrations/` | Numbered SQL migrations (000+) |
+| `daily_reports_export/` | Schema metadata exports for DARA |
+| `docs/` | Schema docs, dbml, DARA project prompt |
+| `pipeline_logs/` | Per-run log files (gitignored) |
+| `gmail_credentials/` | OAuth tokens (gitignored; populated from GHA secrets in CI) |
+| `venv/` | Local Python virtualenv (gitignored) |
+| `requirements.txt` | pinned deps |
+| `.env` | Local secrets (gitignored) |
 
 ## Setup
 
-### 1. Prerequisites
-- Python 3.9+
-- Supabase project
-- Swift Projects API credentials
-
-### 2. Installation
-
 ```bash
-# Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
-
-# Install dependencies
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Configuration
+Create `.env`:
+
+```env
+SWIFT_EMAIL=mgmt@ontel.co
+SWIFT_PASSWORD=...
+SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+SUPABASE_PORT=5432
+SUPABASE_DB=postgres
+SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+SUPABASE_PASSWORD=...
+```
+
+For pipelines that need Gmail/Calendar/Drive (notifier, aging, sales,
+calendar_leave, timer-discrepancies), place the corresponding pickle
+files under `gmail_credentials/` (see repo root README for which
+pipelines need which token).
+
+## CLI usage
 
 ```bash
-# Copy environment template
-copy .env.example .env
+# Full pipeline (Phase 1 → Phase 2 parallel → backfill → MV refresh)
+python main.py
 
-# Edit .env with your credentials
+# Single pipeline
+python main.py --pipeline asset_tasks
+python main.py --pipeline forms
+python main.py --pipeline timer
+python main.py --pipeline orgs
+python main.py --pipeline user_priorities
+python main.py --pipeline targeted_asset_tasks
+python main.py --pipeline targeted_task_requirements
+python main.py --pipeline calendar_leave
+python main.py --pipeline aging
+python main.py --pipeline sales
+
+# Extract / transform stages only
+python main.py --extract
+python main.py --transform
+
+# Suppress email notifications
+python main.py --no-email
 ```
 
-Required environment variables:
-- `SWIFT_EMAIL` - Swift Projects login email
-- `SWIFT_PASSWORD` - Swift Projects password
-- `SUPABASE_URL` - Your Supabase project URL
-- `SUPABASE_SERVICE_KEY` - Service role key (not anon key)
+## Architecture (medallion-ish)
 
-### 4. Database Setup
-
-Execute the migration in Supabase SQL Editor:
-```sql
--- Copy and run migrations/001_raw_tables.sql
+```
+data_raw ─► data_staging ─► analytics
+(JSONB)    (normalized)    (views + MVs)
 ```
 
-This creates:
-- `raw_user_priorities` - User priority/task data
-- `raw_organizations` - Organization data
-- `raw_projects` - Project data with metrics
-- `pipeline_runs` - Execution metadata
+The big pipelines (`asset_tasks`, `forms`, `timer`) keep their raw JSONB
+in `data_raw.*` for replay/audit. The lighter targeted pipelines
+(`targeted_asset_tasks`, `targeted_task_requirements`) skip the raw
+layer and write directly to `data_staging.*` — the responses are small
+enough that snapshot-reload is cheap enough to re-fetch on demand.
 
-## Usage
+## Pipeline runs metadata
 
-### Run Pipeline
-
-```bash
-python pipeline.py
-```
-
-### Query Latest Data
-
-```sql
--- Get latest successful run ID
-SELECT run_id
-FROM pipeline_runs
-WHERE status = 'success'
-ORDER BY started_at DESC
-LIMIT 1;
-
--- Query latest user priorities
-SELECT
-    jsonb_array_elements(data) as priority
-FROM raw_user_priorities
-WHERE run_id = 'your-run-id-here'
-ORDER BY page_number, id;
-
--- Query latest organizations
-SELECT
-    jsonb_array_elements(data) as org
-FROM raw_organizations
-WHERE run_id = 'your-run-id-here';
-
--- Query latest projects with organization context
-SELECT
-    jsonb_array_elements(data) as project
-FROM raw_projects
-WHERE run_id = 'your-run-id-here';
-```
-
-## Monitoring
-
-Check pipeline execution status:
+Every pipeline writes to `pipeline.pipeline_runs` with a `run_id`,
+status, start/end times, and row counts. Used by the notifier email
+body and by downstream consumers needing freshness checks.
 
 ```sql
-SELECT
-    run_id,
-    pipeline_name,
-    status,
-    started_at,
-    completed_at,
-    records_extracted,
-    error_message,
-    EXTRACT(EPOCH FROM (completed_at - started_at)) as duration_seconds
-FROM pipeline_runs
+SELECT run_id, pipeline_name, status,
+       EXTRACT(EPOCH FROM (completed_at - started_at)) AS duration_s,
+       records_extracted
+FROM pipeline.pipeline_runs
 ORDER BY started_at DESC
 LIMIT 10;
 ```
 
+## Notable transformation logic
+
+- `data_staging.backfill_asset_did()` — 3-pass matcher (asset_id →
+  asset_name → FA regex) that links timer + QA-form rows to the
+  canonical asset DID. Pass-0 restores from `qa_form_asset_did_lookup`
+  for QA forms (cumulative map; never loses mappings).
+- `data_staging.rebuild_timer_clean()` — TRUNCATE + INSERT excluding
+  rejected entries (from duplicate review) and applying corrections
+  (from `stg_timer_corrections`). Idempotent.
+- `analytics.refresh_one_mv(p_view_name)` — refreshes one MV at a time
+  (~12–34 s each).
+- `analytics.refresh_invoice_audit()` — used by the weekly compliance
+  audit report; auto-syncs new TS<n> projects.
+
+## Migrations
+
+See the repo root README for the recent additions list. To apply a new
+migration:
+
+```bash
+# Either via Supabase MCP apply_migration, or:
+psql "$DATABASE_URL" -f migrations/064_open_items_views_use_submitted_on.sql
+```
+
+Migrations are append-only; if you need to change something already
+shipped, write a new migration that overrides it.
+
+## Testing
+
+```bash
+pytest                              # full suite
+pytest tests/test_specific.py       # one module
+pytest -k "asset_did" -v            # by name pattern
+```
+
+Most tests are integration tests against a dev Supabase project. There
+is no isolated unit-test suite for the extractors — they live or die
+with the live API.
+
+## Logs
+
+Per-run log files in `pipeline_logs/`. Each pipeline gets its own
+timestamped file. The notifier email attaches just that pipeline's log.
+On GHA, logs are uploaded as workflow artifacts on failure.
+
 ## Troubleshooting
 
-### Authentication Failures
-- Verify credentials in .env
-- Check if password contains special characters (may need escaping)
-- Ensure API access is not blocked
-
-### Supabase Connection Issues
-- Verify SUPABASE_SERVICE_KEY (not anon key)
-- Check IP allowlist in Supabase settings
-- Confirm URL format: `https://xxx.supabase.co`
-
-### Rate Limiting
-- Pipeline includes exponential backoff
-- Reduce PAGE_SIZE in config.py if needed
-- Add delays between organization/project calls
+- **Asset tasks timeout** — see `project_pipeline_incident_2026_06_05.md`
+  for the atomic-transform + 900s timeout fix landed in `e499d0f`.
+- **Pool exhaustion (EMAXCONNSESSION)** — caused by overlapping nightly
+  jobs hitting the pooler's 15-client session cap. Stagger schedules
+  out of the 12-1 AM ET busy window.
+- **Token expiry** — Gmail/Drive/Calendar tokens. GCP project published
+  to Production (2026-03-23) prevents Testing-mode 7-day expiry. If a
+  token does expire, re-run the OAuth flow locally and re-base64 the
+  pickle into the GHA secret.
