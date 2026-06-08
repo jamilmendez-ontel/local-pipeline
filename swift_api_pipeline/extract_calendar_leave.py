@@ -444,33 +444,40 @@ def ai_normalize(raw_teams: list[str], raw_leave_types: list[str]) -> tuple[dict
         logger.warning("CLAUDE_API_KEY not set -- skipping AI normalization")
         return {}, {}
 
+    # Nothing to normalize -- skip the API entirely. Asking the model to map an
+    # empty list is not guaranteed to return bare JSON (it may add prose), which
+    # crashes json.loads. This path is hit on incremental runs where no new
+    # parseable events carry team/leave_type values.
+    if not raw_teams and not raw_leave_types:
+        logger.info("  No distinct team/leave_type values -- skipping AI normalization")
+        return {}, {}
+
     client = anthropic.Anthropic(api_key=api_key)
+
+    def _map_values(prompt: str) -> dict:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+        # Strip ```json fences, then extract the first {...} object so any prose
+        # the model emits around the JSON is ignored.
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+        return json.loads(text)
 
     # Normalize teams
     logger.info(f"  AI normalizing {len(raw_teams)} distinct team values...")
-    team_resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": _build_team_prompt(raw_teams)}],
-    )
-    team_text = team_resp.content[0].text.strip()
-    # Extract JSON from response (may be wrapped in ```json blocks)
-    team_text = re.sub(r"^```(?:json)?\s*", "", team_text)
-    team_text = re.sub(r"\s*```$", "", team_text)
-    team_map = json.loads(team_text)
+    team_map = _map_values(_build_team_prompt(raw_teams)) if raw_teams else {}
     logger.info(f"  Team normalization: {len(team_map)} mappings")
 
     # Normalize leave types
     logger.info(f"  AI normalizing {len(raw_leave_types)} distinct leave_type values...")
-    ltype_resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": _build_leave_type_prompt(raw_leave_types)}],
-    )
-    ltype_text = ltype_resp.content[0].text.strip()
-    ltype_text = re.sub(r"^```(?:json)?\s*", "", ltype_text)
-    ltype_text = re.sub(r"\s*```$", "", ltype_text)
-    leave_type_map = json.loads(ltype_text)
+    leave_type_map = _map_values(_build_leave_type_prompt(raw_leave_types)) if raw_leave_types else {}
     logger.info(f"  Leave type normalization: {len(leave_type_map)} mappings")
 
     return team_map, leave_type_map
@@ -494,13 +501,22 @@ def transform_to_staging(db, run_id: str, events: list, full_refresh: bool = Fal
     # Parse all events
     rows = []
     parse_errors = 0
+    skipped_cancelled = 0
     for ev in events:
+        # Incremental sync returns deleted events as status="cancelled" with no
+        # start/end date or dateTime. Skip them cleanly instead of letting
+        # parse_event KeyError on the missing 'dateTime'.
+        if ev.get("status") == "cancelled":
+            skipped_cancelled += 1
+            continue
         try:
             rows.append(parse_event(ev, run_id))
         except Exception as e:
             parse_errors += 1
             logger.warning(f"  Parse error for event {ev.get('id', '?')}: {e}")
 
+    if skipped_cancelled:
+        logger.info(f"  Skipped {skipped_cancelled} cancelled/deleted events")
     if parse_errors:
         logger.warning(f"  {parse_errors} events failed to parse")
 
