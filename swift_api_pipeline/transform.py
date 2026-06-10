@@ -1247,8 +1247,9 @@ def refresh_quote_mvs():
 
     db = get_db()
 
-    # Options first (the app's chosen-line picker reads it); review second.
-    mvs = ["mv_quote_invoice_options", "mv_quote_review"]
+    # Options first (the app's chosen-line picker reads it); review second; the
+    # Data Source tab's source-invoice-lines MV last.
+    mvs = ["mv_quote_invoice_options", "mv_quote_review", "mv_quote_source_invoice_lines"]
     for mv in mvs:
         try:
             result = db.fetchrow(
