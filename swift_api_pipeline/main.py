@@ -43,6 +43,7 @@ PIPELINE_NAMES = {
     "targeted_task_requirements": "Targeted Task Requirements",
     "analytics_gc": "Analytics GC MV Refresh",
     "forms": "QA Forms",
+    "invoicing": "Invoicing Form",
     "timer": "Timer Activities",
     "aging": "AR Aging",
     "sales": "Sales Detail",
@@ -278,7 +279,7 @@ def run_forms_pipeline():
 def run_invoicing_pipeline():
     """Run invoicing form extraction + transformation (Quote Automation)."""
     from extract_invoicing_form import run_invoicing_extract
-    from transform import run_invoicing_transform
+    from transform import run_invoicing_transform, refresh_quote_mvs
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# INVOICING FORM PIPELINE")
@@ -286,6 +287,10 @@ def run_invoicing_pipeline():
 
     run_id = run_invoicing_extract()
     run_invoicing_transform(run_id)
+
+    # Invoice data drives both quote MVs; refresh so the app reflects new
+    # pricing/lines immediately after an invoicing reload.
+    refresh_quote_mvs()
 
     return True
 
@@ -336,14 +341,20 @@ def run_assets_pipeline():
 
 
 def run_analytics_refresh():
-    """Refresh analytics materialized views"""
-    from transform import refresh_analytics
+    """Refresh analytics materialized views (core + Quote Automation).
+
+    The nightly asset-tasks GHA workflow runs this via `--pipeline analytics`
+    after the worklist (stg_asset_tasks) reloads, so the quote MVs pick up
+    worklist/override/directory changes daily alongside the three core MVs.
+    """
+    from transform import refresh_analytics, refresh_quote_mvs
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# ANALYTICS MV REFRESH")
     logger.info(f"{'#'*60}")
 
     refresh_analytics()
+    refresh_quote_mvs()
     return True
 
 

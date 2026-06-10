@@ -74,6 +74,10 @@ PIPELINE_TABLES = {
     "QA Forms": [
         ("data_staging", "stg_qa_form"),
     ],
+    "Invoicing Form": [
+        ("data_raw", "raw_invoicing_form"),
+        ("data_staging", "stg_invoicing_form"),
+    ],
     "Timer Activities": [
         ("data_raw", "raw_timer_activities"),
         ("data_staging", "stg_timer_activities"),
