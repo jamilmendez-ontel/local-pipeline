@@ -1537,14 +1537,17 @@ def transform_invoicing_form(db, run_id: str) -> int:
     """raw_invoicing_form (jsonb) -> stg_invoicing_form (flat + extra_fields)."""
     from config import INVOICING_KNOWN_FIELDS  # noqa: PLC0415
 
-    db.execute(f"DELETE FROM {SCHEMA_STAGING}.stg_invoicing_form")
-
     # jsonb '-' text[] removes known keys, leaving the overflow.
     known_array = "ARRAY[" + ",".join(
         "'" + k.replace("'", "''") + "'" for k in INVOICING_KNOWN_FIELDS
     ) + "]"
 
+    # Atomic clear+reload in ONE statement: a separate DELETE then INSERT (the
+    # old shape) can leave stg_invoicing_form EMPTY if the INSERT fails after the
+    # DELETE commits (the 2026-06-05 asset-tasks incident). The CTE makes it
+    # all-or-nothing.
     sql = f"""
+    WITH cleared AS (DELETE FROM {SCHEMA_STAGING}.stg_invoicing_form RETURNING 1)
     INSERT INTO {SCHEMA_STAGING}.stg_invoicing_form
       (form_did, project, site_name, site_id, task, requirement, requirement_status,
        sow, invoice_category, service_rate, ll_cop, landlord, landlord_others,

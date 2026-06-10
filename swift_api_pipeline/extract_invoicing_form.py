@@ -6,6 +6,7 @@ Run standalone:  python extract_invoicing_form.py
 import csv
 import io
 import logging
+import time
 
 import requests
 
@@ -18,6 +19,13 @@ from db import retry_db
 logger = logging.getLogger(__name__)
 
 LOAD_BATCH_SIZE = 10000
+
+# Transient-error retry for the Swift API. A brief 5xx / 429 / connection blip
+# must not abort the whole nightly load: on 2026-06-10 a single 503 on one form
+# (-OmoXCo93LkiEzTrsVDy, TS19) killed the run. Retry the page with exponential
+# backoff (2, 4, 8, 16, 32s) before giving up.
+MAX_PAGE_RETRIES = 5
+RETRY_BACKOFF_BASE = 2  # seconds
 
 
 class InvoicingFormExtractor(BaseExtractor):
@@ -47,6 +55,41 @@ class InvoicingFormExtractor(BaseExtractor):
         )
         self.increment_loaded(len(batch))
 
+    def _fetch_page(self, url, headers, params):
+        """GET one page of requirement-responses, surviving transient Swift
+        failures. Re-authenticates on 401, and retries 5xx / 429 / connection
+        errors with exponential backoff. Raises once retries are exhausted.
+        Returns a response the caller still checks for 204 / other 4xx."""
+        for attempt in range(1, MAX_PAGE_RETRIES + 1):
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=60)
+            except requests.exceptions.RequestException as e:
+                if attempt == MAX_PAGE_RETRIES:
+                    raise
+                wait = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+                logger.warning(
+                    "[invoicing] request error: %s (attempt %d/%d, retrying in %ds)",
+                    e, attempt, MAX_PAGE_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+            if resp.status_code == 401:
+                # Re-auth and retry immediately; does not consume the backoff budget meaningfully.
+                headers["Authorization"] = f"Bearer {self.reauthenticate()}"
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt == MAX_PAGE_RETRIES:
+                    resp.raise_for_status()  # exhausted: surface the real error
+                wait = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+                logger.warning(
+                    "[invoicing] HTTP %s from Swift (attempt %d/%d, retrying in %ds)",
+                    resp.status_code, attempt, MAX_PAGE_RETRIES, wait,
+                )
+                time.sleep(wait)
+                continue
+            return resp
+        return resp  # only reached if every attempt was a 401; caller raises on it
+
     def extract_form(self, form_did, batch):
         headers = {"Authorization": f"Bearer {self.authenticate()}", "Accept": "text/csv"}
         url = f"{self.base_url}/api/forms/{form_did}/requirement-responses"
@@ -57,10 +100,7 @@ class InvoicingFormExtractor(BaseExtractor):
             params = {"pageSize": str(PAGE_SIZE)}
             if next_cursor:
                 params["after"] = next_cursor
-            resp = requests.get(url, headers=headers, params=params, timeout=60)
-            if resp.status_code == 401:
-                headers["Authorization"] = f"Bearer {self.reauthenticate()}"
-                continue
+            resp = self._fetch_page(url, headers, params)
             if resp.status_code == 204:
                 break
             resp.raise_for_status()
