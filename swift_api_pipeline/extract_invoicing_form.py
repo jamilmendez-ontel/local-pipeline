@@ -96,6 +96,8 @@ class InvoicingFormExtractor(BaseExtractor):
         next_cursor = None
         fieldnames = None
         form_rows = 0
+        page_count = 0
+        logger.info("[invoicing %s] starting extraction...", form_did)
         while True:
             params = {"pageSize": str(PAGE_SIZE)}
             if next_cursor:
@@ -118,10 +120,14 @@ class InvoicingFormExtractor(BaseExtractor):
                 if len(batch) >= LOAD_BATCH_SIZE:
                     self._load_batch(batch)
                     batch.clear()
+            page_count += 1
+            logger.info(
+                "[invoicing %s] page %d: %s rows so far", form_did, page_count, f"{form_rows:,}"
+            )
             next_cursor = resp.headers.get("x-next")
             if not next_cursor:
                 break
-        logger.info("[invoicing %s] %s rows", form_did, f"{form_rows:,}")
+        logger.info("[invoicing %s] done: %s rows in %d pages", form_did, f"{form_rows:,}", page_count)
         return form_rows
 
 
