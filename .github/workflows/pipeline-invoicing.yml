@@ -1,0 +1,88 @@
+name: "Pipeline: Invoicing Form"
+
+# Standalone nightly extract + transform of the Swift Invoicing Forms that feed
+# Quote Automation (config.INVOICING_FORMS = the 4 form DIDs ->
+# data_raw.raw_invoicing_form -> data_staging.stg_invoicing_form -> analytics views).
+#
+# `main.py --pipeline invoicing` runs through run_pipeline_with_notification, so it
+# emails the standard status report, and its tail calls transform.refresh_quote_mvs()
+# to rebuild mv_quote_invoice_options + mv_quote_review against the freshly-loaded
+# invoice data + current worklist. So this one run keeps the quote-automation app
+# current end-to-end.
+#
+# Triggered by:
+#   - repository_dispatch type 'pipeline-invoicing' (fired by the asset-tasks
+#     pipeline's downstream-dispatch step, so it runs nightly AFTER the worklist
+#     refresh — see pipeline-asset-tasks.yml)
+#   - workflow_dispatch (manual)
+
+on:
+  repository_dispatch:
+    types: [pipeline-invoicing]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-invoicing
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  invoicing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Run invoicing pipeline (with retry)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline invoicing || {
+            echo "Invoicing failed, retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline invoicing
+          }
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoicing-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7

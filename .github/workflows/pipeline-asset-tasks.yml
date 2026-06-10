@@ -165,10 +165,12 @@ jobs:
         working-directory: ${{ env.PIPELINE_DIR }}
         run: python -u main.py --pipeline analytics --no-email
 
-      - name: Dispatch downstream workflows (asset-tasks-export, timer-discrepancies)
+      - name: Dispatch downstream workflows (asset-tasks-export, timer-discrepancies, invoicing)
         if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
         run: |
-          for event in pipeline-asset-tasks-export pipeline-timer-discrepancies; do
+          # pipeline-invoicing runs here (after the worklist refresh) so the quote
+          # MVs its tail rebuilds use fresh worklist + freshly-loaded invoice data.
+          for event in pipeline-asset-tasks-export pipeline-timer-discrepancies pipeline-invoicing; do
             response=$(curl -sw '\n%{http_code}' -X POST \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
