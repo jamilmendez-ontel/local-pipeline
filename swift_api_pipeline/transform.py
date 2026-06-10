@@ -1227,6 +1227,44 @@ def refresh_analytics():
     print(f"\n{'='*60}\n")
 
 
+def refresh_quote_mvs():
+    """Refresh the Quote Automation materialized views.
+
+    mv_quote_invoice_options + mv_quote_review feed the quote-automation app
+    (which reads analytics.v_quote_review = mv_quote_review LEFT JOIN the
+    overrides table). Both derive from stg_asset_tasks (worklist) and
+    stg_invoicing_form (priced lines), so they go stale whenever either source
+    reloads. Refreshed CONCURRENTLY via analytics.refresh_one_mv (migration 085).
+
+    Independent of refresh_analytics()'s three core MVs. Failures here are logged
+    but never raised, so a quote-side issue can't block the nightly pipeline or
+    its downstream dispatches.
+    """
+    print(f"\n{'='*60}")
+    print(f"Quote MV Refresh")
+    print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"{'='*60}\n")
+
+    db = get_db()
+
+    # Options first (the app's chosen-line picker reads it); review second.
+    mvs = ["mv_quote_invoice_options", "mv_quote_review"]
+    for mv in mvs:
+        try:
+            result = db.fetchrow(
+                'SELECT * FROM analytics.refresh_one_mv($1)',
+                mv
+            )
+            if result:
+                print(f"  {result['view_name']}: {result['refresh_time_ms']:,}ms")
+            else:
+                print(f"  {mv}: no data returned")
+        except Exception as e:
+            print(f"  {mv}: FAILED (non-fatal) — {e}")
+
+    print(f"\n{'='*60}\n")
+
+
 # =============================================================================
 # GC PIPELINE TRANSFORMS
 # Clones of the Ontel transforms above with these substitutions:
