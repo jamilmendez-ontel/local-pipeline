@@ -1,5 +1,33 @@
 # AI Projects - Work Log
 
+## Session: 2026-06-16 — asset_did matching overhaul (timer + QA), migration 104
+
+### Context (02:00–02:30 ET)
+Resumed the asset_did path-collision work (migrations 099/100). Audited the timer clean table: 0 dids on 6+ sites confirmed, but the long tail still held a ~33-row mislink class (e.g. `9JK2240A (Civil)` -> non-civil parent `9JK2240A`), and the QA form was still on the old "take-first" (`DISTINCT ON`) + poisoned `qa_form_asset_did_lookup` logic.
+
+### Investigation (02:30–03:30 ET)
+- Matching already uses exact `=` on asset_name/asset_id; the mislinks come from the name-blind site_id-path / FA fallback, not loose matching.
+- Measured project-scope effect: dropping scope alone loses ~4,000 name matches, but the combined (path + name) key absorbs that. site_id paths are shared batch folders (3,350 timer sites map to ~17 candidate assets each); site_name recurs across projects/efforts (e.g. `7WDC100B` = a Replacement asset and a Decom asset). Neither key alone is reliable; the combination is.
+- Verified 0 timer entries still reference multiple assets after correct resolution; remaining problems were name-mismatch (256 sites: path -> 1 wrong-named asset) or orphan path (145 sites: site_id on no asset).
+- Simulated the new design unscoped: timer +244 net, 11 re-points (all exact-name corrections), 1,421 wrong links -> NULL, 99.2% unchanged. QA: 37,208 wrong links corrected, 0 regressions.
+
+### Implementation — migration 104 (03:30–04:00 ET)
+Rewrote `data_staging.backfill_asset_did()` for BOTH timer and QA:
+- Pass A: `asset_id = site_id AND TRIM(asset_name) = TRIM(site_name)`, unique did (path breaks name ties, name breaks path ties).
+- Pass B: `TRIM(asset_name) = TRIM(site_name)`, globally unique did (cross-project moves + shared paths).
+- Dropped: project scope, the site_id-path-only pass, the FA-number pass, and (QA) the poisoned lookup restore + take-first DISTINCT ON.
+- Principle: only link when the asset name matches what the tech typed; otherwise leave NULL.
+
+### Repair + verification (04:00–04:20 ET)
+Re-derivation (NULL all asset_did -> backfill -> rebuild_timer_clean) run via `out/*_repair.py` over the Supavisor pooler, since the full backfill exceeds the MCP 2-min ceiling.
+- Timer: base 266,955 -> 267,199 linked; clean 263,350; 0 dids on 6+ sites; 0 name-mismatched linked rows; `9JK2240A (Civil)` -> NULL; EDGEWATER 2 SC / ROBBINSVILLE / HOPE / LEB MILL STREET re-pointed to their exact-name assets.
+- QA: 386,531 -> 383,230 linked; 37,208 wrong links corrected; 0 name-mismatched, 0 smears. Closes the QA follow-up open since 099/100.
+
+### Files touched
+- `swift_api_pipeline/migrations/104_asset_did_combined_key_no_project_scope.sql` (new)
+- `swift_api_pipeline/migrations/099_*.sql`, `100_*.sql` (prior series, committed now — were untracked)
+- `swift_api_pipeline/out/timer_asset_did_repair.py`, `qa_asset_did_repair.py` (repair record), `timer_asset_link_inspect.py`, `timer_multi_asset_inspect.py`, `timer_problematic_links.py` (analysis)
+
 This document tracks all development sessions, changes made, and issues identified across both projects.
 
 ---
