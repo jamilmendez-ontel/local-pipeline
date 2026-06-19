@@ -9,7 +9,7 @@ import json
 from datetime import datetime, date as _date
 from zoneinfo import ZoneInfo
 from config import (
-    get_db, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_PIPELINE,
+    get_db, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, SCHEMA_PIPELINE,
     retry_db, QA_FORMS, get_logger
 )
 
@@ -1178,13 +1178,14 @@ def backfill_asset_did():
     else:
         print("  RPC returned no data")
 
-    # Backfill carrier_group on stg_assets from carrier_group_lookup
+    # Backfill carrier_group on stg_assets from reference.ref_carrier_groups
+    # (moved from data_staging.carrier_group_lookup in OntelDB reorg Phase A, migration 113)
     updated = db.fetchval(f"""
         WITH matched AS (
             SELECT DISTINCT ON (a.asset_did)
                 a.asset_did, cg.carrier_group
             FROM {SCHEMA_STAGING}.stg_assets a
-            JOIN {SCHEMA_STAGING}.carrier_group_lookup cg
+            JOIN {SCHEMA_REFERENCE}.ref_carrier_groups cg
                 ON a.asset_id ILIKE '%' || cg.search_term || '%'
             WHERE a.carrier_group IS NULL
             ORDER BY a.asset_did, cg.match_order
