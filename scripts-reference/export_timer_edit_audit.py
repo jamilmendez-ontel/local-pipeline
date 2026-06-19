@@ -73,7 +73,7 @@ SELECT
     status,
     created_at  AT TIME ZONE 'America/New_York' AS submitted_et,
     corrected_at AT TIME ZONE 'America/New_York' AS applied_et
-FROM data_staging.stg_timer_corrections
+FROM app_timer.corrections
 WHERE status = 'corrected'
 ORDER BY created_at DESC
 """
@@ -93,7 +93,7 @@ SELECT
     reason,
     removed_at AT TIME ZONE 'America/New_York' AS removed_at_et,
     created_at AT TIME ZONE 'America/New_York' AS submitted_et
-FROM data_staging.stg_timer_entry_removals
+FROM app_timer.entry_removals
 ORDER BY created_at DESC
 """
 
@@ -109,7 +109,7 @@ SELECT
     end_time AT TIME ZONE 'America/New_York' AS end_et,
     duration_min,
     loaded_at AT TIME ZONE 'America/New_York' AS loaded_et
-FROM data_staging.stg_timer_entry_additions
+FROM app_timer.entry_additions
 ORDER BY loaded_at DESC
 """
 

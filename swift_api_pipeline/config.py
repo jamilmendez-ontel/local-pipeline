@@ -20,6 +20,10 @@ SCHEMA_RAW = "data_raw"
 SCHEMA_STAGING = "data_staging"
 SCHEMA_REFERENCE = "reference"
 SCHEMA_PIPELINE = "pipeline"
+# Timer-correction workflow state (OLTP), moved out of data_staging by migration 117.
+# Distinct from SCHEMA_STAGING, which still holds the canonical stg_timer_activities
+# / stg_timer_activities_clean warehouse facts.
+SCHEMA_TIMER = "app_timer"
 
 
 def setup_logging(level: int = logging.INFO) -> None:

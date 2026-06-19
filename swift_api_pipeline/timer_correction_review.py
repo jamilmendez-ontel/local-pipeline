@@ -47,7 +47,7 @@ from email.mime.text import MIMEText
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from config import SCHEMA_STAGING, get_logger, get_db, close_db, retry_db, setup_logging
+from config import SCHEMA_STAGING, SCHEMA_TIMER, get_logger, get_db, close_db, retry_db, setup_logging
 
 logger = get_logger("timer_correction")
 
@@ -843,7 +843,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                 retry_db(
                     lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
-                        f"""INSERT INTO {SCHEMA_STAGING}.stg_timer_daily_notifications
+                        f"""INSERT INTO {SCHEMA_TIMER}.daily_notifications
                             (user_email, send_date, thread_id, message_id,
                              last_sent_at, last_sent_entry_ids)
                             VALUES ($1, $2, $3, $4, NOW(), $5::jsonb)
@@ -949,7 +949,7 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     group_ids = [g["group_id"] for g in dup_groups]
     existing = retry_db(
         lambda: db.fetch(
-            f"SELECT group_id FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews WHERE group_id = ANY($1)",
+            f"SELECT group_id FROM {SCHEMA_TIMER}.duplicate_reviews WHERE group_id = ANY($1)",
             group_ids,
         ),
         description="check existing duplicate groups",
@@ -966,7 +966,7 @@ def detect_and_track_duplicates(db, entries: list[dict]):
         entries_json = _entries_to_jsonb(g["entries"])
         retry_db(
             lambda g=g, ej=entries_json: db.execute(
-                f"""INSERT INTO {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+                f"""INSERT INTO {SCHEMA_TIMER}.duplicate_reviews
                     (group_id, project_did, project, user_email, start_time,
                      site_name, site_id, task, entries, status, notified_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -1083,7 +1083,7 @@ def lookup_entry_by_id(db, entry_id: str) -> dict | None:
     # Check if we already have this entry stored in corrections or removals
     existing = retry_db(
         lambda: db.fetchrow(
-            f"SELECT * FROM {SCHEMA_STAGING}.stg_timer_corrections WHERE entry_id = $1",
+            f"SELECT * FROM {SCHEMA_TIMER}.corrections WHERE entry_id = $1",
             entry_id,
         ),
         description=f"lookup existing correction {entry_id}",
@@ -1093,7 +1093,7 @@ def lookup_entry_by_id(db, entry_id: str) -> dict | None:
 
     existing_rm = retry_db(
         lambda: db.fetchrow(
-            f"SELECT * FROM {SCHEMA_STAGING}.stg_timer_entry_removals WHERE entry_id = $1",
+            f"SELECT * FROM {SCHEMA_TIMER}.entry_removals WHERE entry_id = $1",
             entry_id,
         ),
         description=f"lookup existing removal {entry_id}",
@@ -1133,7 +1133,7 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     """
     review = retry_db(
         lambda: db.fetchrow(
-            f"""SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+            f"""SELECT * FROM {SCHEMA_TIMER}.duplicate_reviews
                 WHERE status IN ('pending', 'notified')
                   AND project_did = $1
                   AND user_email = $2
@@ -1220,7 +1220,7 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
 
     retry_db(
         lambda gid=group_id, sel=selected_label, rej=rejected: db.execute(
-            f"""UPDATE {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+            f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
                 SET status = 'resolved', selected_entry = $1,
                     rejected_entries = $2,
                     resolved_at = $3, resolved_by = 'correction', updated_at = $3
@@ -1259,14 +1259,14 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
     all_ids = [r["entry_id"] for r in responses]
     existing_corrections = retry_db(
         lambda: db.fetch(
-            f"SELECT entry_id, corrected_duration_min FROM {SCHEMA_STAGING}.stg_timer_corrections WHERE entry_id = ANY($1)",
+            f"SELECT entry_id, corrected_duration_min FROM {SCHEMA_TIMER}.corrections WHERE entry_id = ANY($1)",
             all_ids,
         ),
         description="batch check existing corrections",
     )
     existing_removals = retry_db(
         lambda: db.fetch(
-            f"SELECT entry_id FROM {SCHEMA_STAGING}.stg_timer_entry_removals WHERE entry_id = ANY($1)",
+            f"SELECT entry_id FROM {SCHEMA_TIMER}.entry_removals WHERE entry_id = ANY($1)",
             all_ids,
         ),
         description="batch check existing removals",
@@ -1316,7 +1316,7 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
             # Upsert into stg_timer_corrections (entry_id is UNIQUE — last wins)
             retry_db(
                 lambda eid=entry_id, e=entry, cd=corrected_duration, cet=corrected_end_time, r=reason: db.execute(
-                    f"""INSERT INTO {SCHEMA_STAGING}.stg_timer_corrections
+                    f"""INSERT INTO {SCHEMA_TIMER}.corrections
                         (entry_id, project_did, project, user_email, start_time,
                          site_name, site_id, task, end_time, original_duration_min,
                          corrected_duration_min, corrected_end_time, reason, status,
@@ -1354,7 +1354,7 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
             # Upsert into stg_timer_entry_removals (entry_id is UNIQUE — last wins)
             retry_db(
                 lambda eid=entry_id, e=entry, r=reason: db.execute(
-                    f"""INSERT INTO {SCHEMA_STAGING}.stg_timer_entry_removals
+                    f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
                         (entry_id, project_did, project, user_email, start_time,
                          site_name, site_id, task, end_time, duration_min,
                          reason, removed_at, created_at, updated_at)
@@ -1424,7 +1424,7 @@ def auto_resolve_stale(db):
 
     stale = retry_db(
         lambda: db.fetch(
-            f"""SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+            f"""SELECT * FROM {SCHEMA_TIMER}.duplicate_reviews
                 WHERE status IN ('pending', 'notified')
                   AND notified_at IS NOT NULL AND notified_at < $1
             """, cutoff,
@@ -1447,7 +1447,7 @@ def auto_resolve_stale(db):
 
         retry_db(
             lambda gid=review["group_id"], sel=selection, rej=rejected: db.execute(
-                f"""UPDATE {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
                     SET status = 'auto_resolved', selected_entry = $1,
                         rejected_entries = $2,
                         resolved_at = $3, resolved_by = 'auto', updated_at = $3
@@ -1515,8 +1515,8 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                    (rm.entry_id IS NOT NULL) AS is_removed,
                    FALSE AS is_added
             FROM raw r
-            LEFT JOIN {SCHEMA_STAGING}.stg_timer_corrections c ON c.entry_id = r.entry_id
-            LEFT JOIN {SCHEMA_STAGING}.stg_timer_entry_removals rm ON rm.entry_id = r.entry_id
+            LEFT JOIN {SCHEMA_TIMER}.corrections c ON c.entry_id = r.entry_id
+            LEFT JOIN {SCHEMA_TIMER}.entry_removals rm ON rm.entry_id = r.entry_id
 
             UNION ALL
 
@@ -1528,7 +1528,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                    NULL::timestamptz AS corrected_end_time,
                    FALSE AS is_removed,
                    TRUE AS is_added
-            FROM {SCHEMA_STAGING}.stg_timer_entry_additions ad
+            FROM {SCHEMA_TIMER}.entry_additions ad
             WHERE ad.user_email = $1
               AND DATE(ad.start_time AT TIME ZONE 'America/New_York') = $2
 
@@ -1856,7 +1856,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
         notif = retry_db(
             lambda ue=user_email, sd=entry_date: db.fetchrow(
                 f"""SELECT thread_id, message_id
-                    FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    FROM {SCHEMA_TIMER}.daily_notifications
                     WHERE user_email = $1 AND send_date = $2
                 """, ue, sd,
             ),
@@ -1948,7 +1948,7 @@ def run_remind(test_mode: bool = False):
 
     unresolved = retry_db(
         lambda: db.fetch(
-            f"""SELECT * FROM {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+            f"""SELECT * FROM {SCHEMA_TIMER}.duplicate_reviews
                 WHERE status IN ('pending', 'notified')
                   AND notified_at IS NOT NULL
                   AND (last_reminder_at IS NULL
@@ -1990,7 +1990,7 @@ def run_remind(test_mode: bool = False):
         dates_with_notifs = set()
         notif_dates = retry_db(
             lambda: db.fetch(
-                f"SELECT DISTINCT send_date FROM {SCHEMA_STAGING}.stg_timer_daily_notifications"
+                f"SELECT DISTINCT send_date FROM {SCHEMA_TIMER}.daily_notifications"
             ),
             description="get dates with notification records",
         )
@@ -2015,7 +2015,7 @@ def run_remind(test_mode: bool = False):
         notif = retry_db(
             lambda ue=user_email, sd=entry_date: db.fetchrow(
                 f"""SELECT thread_id, message_id, send_date
-                    FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    FROM {SCHEMA_TIMER}.daily_notifications
                     WHERE user_email = $1 AND send_date = $2
                 """, ue, sd,
             ),
@@ -2103,7 +2103,7 @@ def run_remind(test_mode: bool = False):
     if all_group_ids:
         retry_db(
             lambda: db.execute(
-                f"""UPDATE {SCHEMA_STAGING}.stg_timer_duplicate_reviews
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
                     SET reminder_count = reminder_count + 1, last_reminder_at = $1, updated_at = $1
                     WHERE group_id = ANY($2)
                 """, now, all_group_ids,
@@ -2192,7 +2192,7 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
                 c.site_name, c.site_id, c.task, c.task_clean,
                 (corr.id IS NOT NULL) AS is_edited
             FROM {SCHEMA_STAGING}.stg_timer_activities_clean c
-            LEFT JOIN {SCHEMA_STAGING}.stg_timer_corrections corr
+            LEFT JOIN {SCHEMA_TIMER}.corrections corr
                 ON corr.status = 'corrected'
                AND corr.project_did = c.project_did
                AND corr.user_email  = c.user_email
@@ -2230,7 +2230,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
         lambda: db.fetch(f"""
             SELECT user_email, send_date, thread_id, message_id,
                    last_sent_at, last_sent_entry_ids
-            FROM {SCHEMA_STAGING}.stg_timer_daily_notifications
+            FROM {SCHEMA_TIMER}.daily_notifications
             WHERE send_date >= $1
               AND thread_id IS NOT NULL
             ORDER BY send_date DESC, user_email
@@ -2272,7 +2272,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
             bootstrap_ids = sorted(_collect_entry_ids(current))
             retry_db(
                 lambda ue=user_email, sd=send_date, ids=bootstrap_ids: db.execute(
-                    f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_entry_ids = $1::jsonb
                         WHERE user_email = $2 AND send_date = $3
                     """,
@@ -2524,7 +2524,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             current_ids = sorted(_collect_entry_ids(entries))
             retry_db(
                 lambda ue=user_email, sd=send_date, ids=current_ids: db.execute(
-                    f"""UPDATE {SCHEMA_STAGING}.stg_timer_daily_notifications
+                    f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_at = NOW(),
                             last_sent_entry_ids = $1::jsonb
                         WHERE user_email = $2 AND send_date = $3
