@@ -1,5 +1,5 @@
--- Rollback for migration 115: restore the stg_quote_ names.
--- Inverse of every statement in 115, in reverse dependency order.
+-- Rollback for migration 116: restore the stg_quote_ names.
+-- Inverse of every statement in 116, in reverse dependency order.
 
 DROP FUNCTION IF EXISTS app_quote.claim_due_emails(integer);
 

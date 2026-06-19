@@ -1,4 +1,4 @@
--- Migration 115: drop the stg_quote_ prefix on the 9 app_quote tables.
+-- Migration 116: drop the stg_quote_ prefix on the 9 app_quote tables.
 -- Spec: quote-automation/docs/superpowers/specs/2026-06-19-quote-app-table-rename-design.md
 --
 -- Pure naming cleanup. ALTER ... RENAME is metadata-only: rows, indexes, PKs, owned
