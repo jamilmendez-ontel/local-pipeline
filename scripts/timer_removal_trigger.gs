@@ -3,7 +3,7 @@
  *
  * Fires a repository_dispatch event to GitHub Actions when a tech submits
  * a removal via the Remove Timer Entry Google Form. This triggers the same
- * apply workflow which reads the removal, stores it in stg_timer_entry_removals,
+ * apply workflow which reads the removal, stores it in app_timer.entry_removals,
  * and rebuilds stg_timer_activities_clean.
  *
  * DEBOUNCE: Multiple form submissions from the same tech (correction OR removal,

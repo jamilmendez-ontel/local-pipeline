@@ -7,8 +7,8 @@ entry has two actions:
     - "Correct" — fix a wrong duration (opens Google Form with duration picker)
     - "Remove"  — remove a duplicate/wrong entry entirely
 
-Corrections are stored in stg_timer_corrections, removals in
-stg_timer_entry_removals (separate table). Both applied to
+Corrections are stored in app_timer.corrections, removals in
+app_timer.entry_removals (separate table). Both applied to
 stg_timer_activities_clean via rebuild_timer_clean() — the original
 stg_timer_activities is never modified.
 
@@ -712,10 +712,10 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
     target_date defaults to yesterday (the normal nightly flow). For
     backfill sends (e.g., after an outage), pass the actual date the
     entries belong to so the email subject, "Daily Task Summary" date
-    label, and the `send_date` column on stg_timer_daily_notifications
+    label, and the `send_date` column on app_timer.daily_notifications
     all reflect the entries' real date — not today-minus-1.
 
-    Stores thread_id + message_id in stg_timer_daily_notifications for
+    Stores thread_id + message_id in app_timer.daily_notifications for
     reminder threading.
 
     Snapshot source asymmetry (intentional): the initial snapshot is
@@ -881,7 +881,7 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     produces the same group_id as the legacy formula -- existing pending
     reviews keep their IDs and form threads.
 
-    Cluster entries get persisted into stg_timer_duplicate_reviews.entries
+    Cluster entries get persisted into app_timer.duplicate_reviews.entries
     as a JSONB array. Each element now includes start_time (was implicit in
     the parent column before; needed explicitly now that cluster members may
     have different start_times). rebuild_timer_clean() joins on this per-entry
@@ -1235,7 +1235,7 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
 
 
 def apply_responses(db, responses: list[dict]) -> list[dict]:
-    """Store corrections in stg_timer_corrections, removals in stg_timer_entry_removals.
+    """Store corrections in app_timer.corrections, removals in app_timer.entry_removals.
 
     Correction overrides removal — if the same entry is later corrected, the
     removal row stays but rebuild_timer_clean() keeps the entry (correction wins).
@@ -1313,7 +1313,7 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
         if action == "correct":
             corrected_end_time = start_time + timedelta(minutes=corrected_duration)
 
-            # Upsert into stg_timer_corrections (entry_id is UNIQUE — last wins)
+            # Upsert into app_timer.corrections (entry_id is UNIQUE — last wins)
             retry_db(
                 lambda eid=entry_id, e=entry, cd=corrected_duration, cet=corrected_end_time, r=reason: db.execute(
                     f"""INSERT INTO {SCHEMA_TIMER}.corrections
@@ -1351,7 +1351,7 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
             })
 
         else:
-            # Upsert into stg_timer_entry_removals (entry_id is UNIQUE — last wins)
+            # Upsert into app_timer.entry_removals (entry_id is UNIQUE — last wins)
             retry_db(
                 lambda eid=entry_id, e=entry, r=reason: db.execute(
                     f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
@@ -1829,7 +1829,7 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
 def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bool = False):
     """Send a reply-in-thread confirmation email per (user, entry_date) for
     changes applied this run. Threads under the original daily entries email
-    using thread_id/message_id stored in stg_timer_daily_notifications.
+    using thread_id/message_id stored in app_timer.daily_notifications.
     Falls back to standalone email when no thread record exists.
     """
     if not applied_changes:
@@ -2154,7 +2154,7 @@ def _collect_entry_ids(entries: list[dict]) -> list[str]:
     """Return the list of 12-char STABLE resend keys for the given entry
     dicts. Used to track which entries were in the last-sent daily email
     and detect changes for the resend pass. NOTE: these are NOT the same
-    hashes as stg_timer_corrections.entry_id / stg_timer_entry_removals.
+    hashes as app_timer.corrections.entry_id / app_timer.entry_removals.
     entry_id — those use _make_entry_id (full natural key). See
     _make_resend_stable_key for the rationale.
     """
@@ -2335,7 +2335,7 @@ def _build_resend_entries_html(entries: list[dict], snapshot_ids: set[str]) -> s
 
     - EDITED (blue, matches the Edit button color) when the entry's
       `is_edited` flag is True. Set by _fetch_current_day_entries via a
-      LEFT JOIN to stg_timer_corrections on the corrected natural key.
+      LEFT JOIN to app_timer.corrections on the corrected natural key.
     - NEW (green) when the entry is not edited AND its entry_id is not
       present in `snapshot_ids` — indicates the row materialized or was
       manually added since the last sent email.
@@ -2409,7 +2409,7 @@ _RESEND_UPDATED_BADGE = (
 def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
     """Detect (user, date) pairs whose current entry set has changed since
     the last sent email and reply on the original thread with an UPDATED
-    view. Threads via stg_timer_daily_notifications.thread_id; updates
+    view. Threads via app_timer.daily_notifications.thread_id; updates
     last_sent_at + last_sent_entry_ids after each send.
     """
     from gmail_client import authenticate

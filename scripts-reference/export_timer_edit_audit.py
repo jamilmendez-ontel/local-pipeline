@@ -3,9 +3,9 @@
 Captures every change techs (or supervisors) have made to the timer
 clean table via the three feedback forms:
 
-  - Timer Correction form  → writes to stg_timer_corrections
-  - Remove Entry form      → writes to stg_timer_entry_removals
-  - Add Entry form         → writes to stg_timer_entry_additions
+  - Timer Correction form  → writes to app_timer.corrections
+  - Remove Entry form      → writes to app_timer.entry_removals
+  - Add Entry form         → writes to app_timer.entry_additions
 
 The pipeline (rebuild_timer_clean() RPC) applies all three on every
 form submission AND on every nightly timer pipeline run. This script
