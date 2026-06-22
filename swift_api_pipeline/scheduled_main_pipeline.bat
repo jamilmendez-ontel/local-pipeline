@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 REM Swift API Pipeline - Nightly Local Run (12:01 AM)
-REM Runs: asset_tasks -> backfill -> analytics -> dispatch GHA (export + timer discrepancies)
+REM Runs: asset_tasks -> backfill -> analytics -> dispatch GHA (export)
 REM        -> dispatch date-validator-daily (separate narrow PAT from .env).
 REM All other pipelines run on GitHub Actions.
 REM Each step retries once after 5 min on failure.
@@ -109,7 +109,7 @@ if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] analytics retry finished with exit code !EXIT_CODE! >> "%LOGFILE%"
 )
 
-REM === 4. Dispatch asset tasks export + timer discrepancies to GHA ===
+REM === 4. Dispatch asset tasks export to GHA ===
 :dispatch
 set TOKEN_FILE=C:\Users\admin\.secrets\github_token
 if not exist "%TOKEN_FILE%" (
@@ -117,8 +117,8 @@ if not exist "%TOKEN_FILE%" (
     goto :done
 )
 set /p GITHUB_TOKEN=<"%TOKEN_FILE%"
-echo [%date% %time%] Dispatching asset tasks export + timer discrepancies to GitHub Actions >> "%LOGFILE%"
-"%VENV_PYTHON%" -u -c "import requests,os,sys; results=[requests.post('https://api.github.com/repos/jamilmendez-ontel/local-pipeline/dispatches', json={'event_type': t}, headers={'Authorization': f'Bearer {os.environ[\"GITHUB_TOKEN\"]}', 'Accept': 'application/vnd.github+json'}) for t in ['pipeline-asset-tasks-export', 'pipeline-timer-discrepancies']]; [print(f'{r.status_code} {r.reason} for {r.request.body}') for r in results]; sys.exit(0 if all(r.status_code in (200,204) for r in results) else 1)" >> "%LOGFILE%" 2>&1
+echo [%date% %time%] Dispatching asset tasks export to GitHub Actions >> "%LOGFILE%"
+"%VENV_PYTHON%" -u -c "import requests,os,sys; results=[requests.post('https://api.github.com/repos/jamilmendez-ontel/local-pipeline/dispatches', json={'event_type': t}, headers={'Authorization': f'Bearer {os.environ[\"GITHUB_TOKEN\"]}', 'Accept': 'application/vnd.github+json'}) for t in ['pipeline-asset-tasks-export']]; [print(f'{r.status_code} {r.reason} for {r.request.body}') for r in results]; sys.exit(0 if all(r.status_code in (200,204) for r in results) else 1)" >> "%LOGFILE%" 2>&1
 set EXIT_CODE=!ERRORLEVEL!
 if !EXIT_CODE! NEQ 0 (
     echo [%date% %time%] ERROR: GHA dispatch failed - check token validity >> "%LOGFILE%"

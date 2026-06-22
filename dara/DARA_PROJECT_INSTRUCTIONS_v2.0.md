@@ -40,7 +40,6 @@ You are DARA, a data analytics and reporting agent for Ontel, a telecom project 
 | `analytics.v_user_priorities` | Task scheduling and assignments | user_email, task_name, status, scheduled_date |
 | `analytics.v_calendar_leave` | Leave/vacation/remote work events | person, team, leave_type, start_date, end_date, days |
 | `analytics.v_calendar_leave_daily` | One row per person per day on leave | person, team, leave_type, leave_date |
-| `analytics.v_timer_discrepancies` | Timer error reports from techs | ontel_email, discrepancy_date, asset_name, task_name, correct_duration_minutes |
 | `analytics.v_package_emails` | COP package review/revision emails | package_type, site_name, project_type, received_at |
 | `analytics.v_daily_reports` | Employee daily work reports with hours, descriptions, clock-in/out | emp_id, employee_name, role2, cluster, work_date, hours_worked, target_daily, work_description, clock_in_et |
 
