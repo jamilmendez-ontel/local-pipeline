@@ -58,6 +58,12 @@ jobs:
 
       - name: Run rolling daily reports pipeline
         working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          # Bind via env (not template interpolation) so a dispatch payload can't inject shell.
+          DAYS_INPUT: ${{ github.event.client_payload.days || github.event.inputs.days || '30' }}
         run: |
-          DAYS="${{ github.event.client_payload.days || github.event.inputs.days || '30' }}"
-          python -u run_daily_reports_rolling.py --days "$DAYS"
+          if ! [[ "$DAYS_INPUT" =~ ^[0-9]+$ ]]; then
+            echo "Invalid days value: '$DAYS_INPUT' (must be a positive integer)" >&2
+            exit 1
+          fi
+          python -u run_daily_reports_rolling.py --days "$DAYS_INPUT"
