@@ -39,8 +39,8 @@ Out of scope (explicitly):
 
 ## Components
 
-### 1. `extract_daily_reports.py` (small change)
-Today each run does `timers_only` **or** `requirements_only`. Add an **"all" path** so one run fetches the task list once, then does **both** the requirements and timers sub-fetches, with the existing date-window filter applied (`work_date >= today - N days`; future-dated and `milestones` tasks still skipped). Preserve existing upsert behavior to all three staging tables.
+### 1. `extract_daily_reports.py` (minimal change)
+The "all" behavior **already exists**: `DailyReportsPipeline.run(projects, full=False, days=N)` with neither `timers_only` nor `requirements_only` fetches the task list once (Step 3), then runs **both** the requirements sub-fetch (Step 4a) and the timers sub-fetch (Step 4b), with the existing date-window filter (`work_date >= today - N days`; future-dated and `milestones` tasks skipped). So no new "mode" is needed. The only change is to have `run()` **return the staged row counts** (`{tasks, requirements, timers}`) so the wrapper can record `records_extracted`; this is additive (existing callers ignore the return).
 
 ### 2. `run_daily_reports_rolling.py` (new entry point)
 - Calls the extractor's "all" path with `days=30` (configurable via arg).
