@@ -84,3 +84,42 @@ function fireDispatch(mode, days) {
     console.log("❌ Dispatch failed: " + code + " " + response.getContentText());
   }
 }
+
+/**
+ * Rolling trigger — refreshes the last 30 days of ALL daily-reports data
+ * (status/approval + hours + timers) in one job. Install as an every-10-min
+ * time-based trigger. Replaces the daily + requirements split once that pair
+ * is retired (retirement is a separate, manual step — leave triggerDaily /
+ * triggerRequirements installed until then).
+ */
+function triggerDailyReportsRolling() {
+  fireRollingDispatch(30);
+}
+
+/**
+ * Fire repository_dispatch for the rolling workflow (event: daily-reports-rolling).
+ */
+function fireRollingDispatch(days) {
+  var url = "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/dispatches";
+  var options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "token " + getToken(),
+      "Accept": "application/vnd.github.v3+json"
+    },
+    payload: JSON.stringify({
+      event_type: "daily-reports-rolling",
+      client_payload: { days: String(days) }
+    }),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+  if (code === 204) {
+    console.log("✅ Dispatched daily-reports-rolling (days=" + days + ")");
+  } else {
+    console.log("❌ Rolling dispatch failed: " + code + " " + response.getContentText());
+  }
+}
