@@ -386,8 +386,13 @@ def run_sales_pipeline_full():
     return True
 
 
-def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=None, recipients=None):
-    """Run a single pipeline with log capture and email notification."""
+def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=None, recipients=None, email_on_success=True):
+    """Run a single pipeline with log capture and email notification.
+
+    email_on_success=False suppresses the SUCCESS email (failure emails are
+    still sent whenever send_email is True). Used for high-frequency pipelines
+    (e.g. user_priorities every 10 min) where a success email every run is noise.
+    """
     tables = PIPELINE_TABLES.get(name)
     started_at = datetime.now(timezone.utc)
     row_counts_before = snapshot_row_counts(tables)
@@ -404,7 +409,7 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
                 ended_at=ended_at,
                 duration_seconds=duration,
             )
-            if send_email:
+            if send_email and email_on_success:
                 send_pipeline_email(
                     results=[result],
                     log_output=log_handler.get_log_output(),
@@ -784,6 +789,12 @@ Examples:
         help="Suppress email notifications after pipeline run"
     )
     parser.add_argument(
+        "--email-on-failure-only",
+        action="store_true",
+        help="Only send an email if the pipeline FAILS (suppress success emails). "
+             "Used for high-frequency runs like user_priorities every 10 min."
+    )
+    parser.add_argument(
         "--project",
         type=str,
         metavar="TS16",
@@ -792,6 +803,7 @@ Examples:
 
     args = parser.parse_args()
     send_email = not args.no_email
+    email_on_success = not args.email_on_failure_only
 
     if args.project and args.pipeline != "asset_tasks":
         parser.error("--project can only be used with --pipeline asset_tasks")
@@ -830,7 +842,7 @@ Examples:
             else:
                 func = pipeline_funcs[args.pipeline]
             name = PIPELINE_NAMES[args.pipeline]
-            success = run_pipeline_with_notification(func, name, send_email=send_email)
+            success = run_pipeline_with_notification(func, name, send_email=send_email, email_on_success=email_on_success)
         else:
             # Default: run all
             success = run_all_pipelines(send_email=send_email)

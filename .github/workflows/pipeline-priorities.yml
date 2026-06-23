@@ -55,22 +55,32 @@ jobs:
         working-directory: ${{ env.PIPELINE_DIR }}
         run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
 
+      # Runs on every dispatch (10-min refresh AND the daily full run).
+      # Email policy: only notify on FAILURE. First attempt is silent
+      # (--no-email) so a transient blip that recovers on retry sends nothing;
+      # only the retry uses --email-on-failure-only, so a true post-retry
+      # failure sends exactly one failure email.
       - name: Run user_priorities pipeline (with retry)
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
-          python -u main.py --pipeline user_priorities || {
+          python -u main.py --pipeline user_priorities --no-email || {
             echo "User priorities failed, retrying after 2 minutes..."
             sleep 120
-            python -u main.py --pipeline user_priorities
+            python -u main.py --pipeline user_priorities --email-on-failure-only
           }
 
+      # Export + Drive upload only run on the daily full run or a manual dispatch.
+      # The high-frequency (10-min) trigger fires with client_payload.run_export=false,
+      # so it refreshes the DB only and skips these two steps.
       - name: Export user priorities
+        if: github.event_name != 'repository_dispatch' || github.event.client_payload.run_export
         working-directory: scripts-reference
         run: |
-          echo "User priorities pipeline succeeded — running export..."
+          echo "Running user priorities Excel export..."
           python -u export_user_priorities_excel.py --no-upload
 
       - name: Upload user priorities to shared Drive
+        if: github.event_name != 'repository_dispatch' || github.event.client_payload.run_export
         working-directory: scripts-reference
         continue-on-error: true
         run: python -u upload_to_shared_drive.py --export user_priorities

@@ -1,0 +1,8 @@
+# Keep sample data/binaries local; commit only the documenting README.md.
+*.eml
+*.csv
+*.xlsx
+*.pdf
+*.png
+*.jpg
+*.jpeg

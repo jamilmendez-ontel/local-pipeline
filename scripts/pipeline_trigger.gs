@@ -9,15 +9,19 @@
  *      (same project as gmail_trigger.gs — reuses GITHUB_TOKEN)
  *   2. Paste these functions into a new file (e.g. pipeline_trigger.gs)
  *   3. Create time-driven triggers in Apps Script:
- *      - triggerOrgs()           → Daily, 10:13 PM EST
- *      - triggerLightPipelines() → Daily, 12:09 AM EST
+ *      - triggerOrgs()             → Daily, 10:13 PM EST
+ *      - triggerLightPipelines()   → Daily, 12:09 AM EST
+ *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
+ *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
+ *                                    setupPriorityRefreshTrigger() once to create it
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
  * Schedules (EST):
  *   10:13 PM  — Orgs & Projects
  *   12:09 AM  — Timer
- *   12:13 AM  — User Priorities
  *   12:17 AM  — QA Forms
+ *   12:13 AM  — User Priorities FULL run (refresh + Excel export + shared-Drive upload)
+ *   every 10m — User Priorities DB refresh only (extract + transform; no export)
  *   12:01 AM  — Asset Tasks (post-local-batch-retirement; fires dispatch_downstream=true
  *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
@@ -38,29 +42,86 @@ function triggerOrgs() {
 }
 
 /**
- * Trigger all light pipelines with staggered timing.
+ * Trigger the daily light pipelines with staggered timing.
  * Schedule this at 12:09 AM EST daily.
  *
  * 12:09 AM — Timer fires immediately
- * 12:13 AM — User Priorities (4 min delay)
  * 12:17 AM — QA Forms (8 min delay from start)
  *
- * Note: Apps Script time-driven triggers have ±1 min jitter, but the
+ * NOTE: User Priorities is NO LONGER fired here. It now runs on its own
+ * high-frequency trigger every 10 min (see triggerPriorities) plus a daily
+ * full-export run (see triggerPrioritiesDaily).
+ *
+ * Apps Script time-driven triggers have ±1 min jitter, but the
  * relative spacing between dispatches is exact.
  */
 function triggerLightPipelines() {
   // Timer — fires immediately
   fireDispatch_('pipeline-timer');
-  Logger.log('Waiting 4 minutes before triggering priorities...');
+  Logger.log('Waiting 8 minutes before triggering forms...');
 
-  // User Priorities — 4 min after timer
-  Utilities.sleep(4 * 60 * 1000);
-  fireDispatch_('pipeline-priorities');
-  Logger.log('Waiting 4 minutes before triggering forms...');
-
-  // QA Forms — 4 min after priorities (8 min after timer)
-  Utilities.sleep(4 * 60 * 1000);
+  // QA Forms — 8 min after timer
+  Utilities.sleep(8 * 60 * 1000);
   fireDispatch_('pipeline-forms');
+}
+
+/**
+ * Trigger the User Priorities DB refresh ONLY (extract + transform).
+ * Schedule this on a time-driven trigger every 10 minutes (later 5 min).
+ *
+ * Fires with run_export=false so the workflow skips the Excel export and the
+ * shared-Drive upload — those run once daily via triggerPrioritiesDaily().
+ *
+ * The workflow itself emails only on FAILURE (after its internal retry), so a
+ * 10-min cadence produces no success-email noise.
+ *
+ * To create/refresh the 10-min trigger programmatically, run
+ * setupPriorityRefreshTrigger() once (edit PRIORITY_REFRESH_MINUTES to 5 to
+ * move from 10 → 5 min, then re-run it).
+ */
+function triggerPriorities() {
+  fireDispatchWithPayload_('pipeline-priorities', { run_export: false });
+}
+
+/**
+ * Trigger the daily User Priorities FULL run: DB refresh + Excel export +
+ * shared-Drive upload. Schedule this once daily (e.g. 12:13 AM EST).
+ *
+ * Fires with run_export=true so the workflow runs the export + upload steps.
+ */
+function triggerPrioritiesDaily() {
+  fireDispatchWithPayload_('pipeline-priorities', { run_export: true });
+}
+
+/**
+ * Cadence (minutes) for the User Priorities DB-refresh trigger.
+ * Apps Script minute-based triggers allow 1, 5, 10, 15, or 30.
+ * Start at 10; change to 5 and re-run setupPriorityRefreshTrigger() to speed up.
+ */
+var PRIORITY_REFRESH_MINUTES = 10;
+
+/**
+ * Idempotently (re)create the every-N-minute time-driven trigger for
+ * triggerPriorities(). Run this once from the Apps Script editor. Re-running it
+ * deletes the old triggerPriorities trigger first, so it is safe to re-run
+ * after changing PRIORITY_REFRESH_MINUTES (10 → 5).
+ */
+function setupPriorityRefreshTrigger() {
+  // Remove any existing triggers bound to triggerPriorities to avoid duplicates.
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerPriorities') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerPriorities')
+    .timeBased()
+    .everyMinutes(PRIORITY_REFRESH_MINUTES)
+    .create();
+
+  Logger.log('Created triggerPriorities trigger: every ' +
+             PRIORITY_REFRESH_MINUTES + ' minutes.');
 }
 
 /**
