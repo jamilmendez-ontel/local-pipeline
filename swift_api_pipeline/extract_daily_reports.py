@@ -461,6 +461,12 @@ class DailyReportsPipeline:
         logger.info(f"  Run ID: {RUN_ID}")
         logger.info(f"{'='*60}")
 
+        return {
+            "tasks": len(stg_batch),
+            "requirements": len(req_stg_batch),
+            "timers": len(tmr_stg_batch),
+        }
+
 
 def main():
     parser = argparse.ArgumentParser()
