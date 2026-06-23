@@ -17,7 +17,7 @@ import argparse
 import sys
 
 from base_extractor import BaseExtractor
-from config import get_logger, setup_logging
+from config import get_db, get_logger, setup_logging
 from main import run_pipeline_with_notification
 
 # Unbuffered output (match the other run_*.py scripts)
@@ -43,13 +43,26 @@ def run_rolling(days=30):
         projects = discover_projects()
         if not projects:
             logger.info("No active Daily Reports projects found.")
+            # discover_projects() called close_db() (stops the shared event loop and
+            # nulls the singleton). Re-point the tracker at a fresh live pool before
+            # writing the completion row — same run_id, so it updates the 'running' row.
+            tracker.db = get_db()
             tracker.complete_pipeline_run("success", records=0)
             return
         pipeline = DailyReportsPipeline()
         counts = pipeline.run(projects, full=False, days=days)
         records = sum((counts or {}).values())
+        # discover_projects()/run() each call close_db(), which stops the shared event
+        # loop AND nulls the db singleton. The tracker's cached self.db is now stale, so
+        # re-point it at a fresh live pool (same run_id) before completing the run row.
+        tracker.db = get_db()
         tracker.complete_pipeline_run("success", records=records)
     except Exception as e:
+        # Same reason: ensure a live pool before recording the failure.
+        try:
+            tracker.db = get_db()
+        except Exception:
+            pass
         tracker.complete_pipeline_run("failed", error=str(e))
         raise
 
