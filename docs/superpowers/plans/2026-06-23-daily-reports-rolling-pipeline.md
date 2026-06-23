@@ -72,7 +72,7 @@ The rolling entry point: runs all three sub-fetches over the window, records `pi
 
 **Interfaces:**
 - Consumes: `DailyReportsPipeline.run(projects, full=False, days=N) -> dict` (Task 1); `discover_projects()` from `extract_daily_reports`; `BaseExtractor(pipeline_name).start_pipeline_run(metadata=dict)` and `.complete_pipeline_run(status, records, error)` from `base_extractor`; `run_pipeline_with_notification(func, name, send_email, logger_prefixes, recipients, email_on_success)` from `main`.
-- Note: `BaseExtractor(...)` constructor does NOT hit the network (auth is a separate `.authenticate()` call), so creating a tracker instance is cheap and safe. `run_pipeline_with_notification` re-raises on failure after sending the failure email.
+- Note: `BaseExtractor(...)` constructor does not perform Swift auth (that's a separate `.authenticate()` call), but it does lazily open the asyncpg DB pool via `get_db()` — which the tracker needs anyway for `start_pipeline_run`. If the pool can't initialize, the failure surfaces at tracker construction and still re-raises into the failure-email path. `run_pipeline_with_notification` re-raises on failure after sending the failure email.
 
 - [ ] **Step 1: Create the wrapper**
 
@@ -256,10 +256,19 @@ jobs:
 
       - name: Run rolling daily reports pipeline
         working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          # Bind via env (not template interpolation) so a dispatch payload can't inject shell.
+          DAYS_INPUT: ${{ github.event.client_payload.days || github.event.inputs.days || '30' }}
         run: |
-          DAYS="${{ github.event.client_payload.days || github.event.inputs.days || '30' }}"
-          python -u run_daily_reports_rolling.py --days "$DAYS"
+          if ! [[ "$DAYS_INPUT" =~ ^[0-9]+$ ]]; then
+            echo "Invalid days value: '$DAYS_INPUT' (must be a positive integer)" >&2
+            exit 1
+          fi
+          python -u run_daily_reports_rolling.py --days "$DAYS_INPUT"
 ```
+
+> Security: the `days` value is bound through `env:` and validated numeric, never
+> interpolated into the `run:` script body, to avoid GitHub Actions script injection.
 
 - [ ] **Step 2: Verify YAML is valid**
 
