@@ -1480,57 +1480,82 @@ _STATUS_BADGE_HTML = {
 
 def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]:
     """Fetch all timer entries for (user_email, entry_date in ET) and
-    classify each as UNCHANGED / EDITED / REMOVED by joining to corrections
-    and removals. Reuses the same md5 hash formula as lookup_entry_by_id().
-    """
-    hash_expr = (
-        "LEFT(MD5("
-        "a.project_did || '|' || a.user_email || '|' || "
-        "(a.start_time AT TIME ZONE 'UTC')::text || '+00' || '|' || "
-        "COALESCE(a.site_name, 'None') || '|' || "
-        "COALESCE(a.site_id, 'None') || '|' || "
-        "COALESCE(a.task, 'None') || '|' || "
-        "COALESCE((a.end_time AT TIME ZONE 'UTC')::text || '+00', 'None') || '|' || "
-        "COALESCE(a.duration_min::text, 'None')"
-        "), 12)"
-    )
+    classify each as UNCHANGED / EDITED / ADDED / REMOVED.
 
+    The surviving set is sourced directly from stg_timer_activities_clean
+    (the corrected, deduplicated, removals-excluded table that the exports
+    and per-tech emails also read), so this view always agrees with the
+    clean table. Removals are unioned in afterwards for context.
+
+    This deliberately does NOT match on the volatile md5 entry_id hash.
+    That hash includes end_time + duration_min, so an entry edited while
+    its timer was still running (end_time NULL, duration 0) gets a
+    different hash once the timer completes, which used to orphan the
+    correction and drop the surviving edit from the email. Matching the
+    clean table by its natural key avoids that entirely.
+    """
     rows = retry_db(
         lambda: db.fetch(f"""
-            WITH raw AS (
-                SELECT a.project_did, a.project, a.user_email,
-                       a.start_time, a.end_time, a.duration_min,
-                       a.site_name, a.site_id, a.task, a.task_clean,
-                       {hash_expr} AS entry_id
-                FROM {SCHEMA_STAGING}.stg_timer_activities a
-                WHERE a.user_email = $1
-                  AND DATE(a.start_time AT TIME ZONE 'America/New_York') = $2
+            WITH surviving AS (
+                SELECT t.project_did, t.project, t.user_email,
+                       t.start_time, t.end_time, t.duration_min,
+                       t.site_name, t.site_id, t.task, t.task_clean
+                FROM {SCHEMA_STAGING}.stg_timer_activities_clean t
+                WHERE t.user_email = $1
+                  AND DATE(t.start_time AT TIME ZONE 'America/New_York') = $2
             )
-            SELECT r.project_did, r.project, r.user_email,
-                   r.start_time, r.end_time, r.duration_min,
-                   r.site_name, r.site_id, r.task, r.task_clean,
-                   r.entry_id,
-                   c.corrected_duration_min,
-                   c.corrected_end_time,
-                   (rm.entry_id IS NOT NULL) AS is_removed,
-                   FALSE AS is_added
-            FROM raw r
-            LEFT JOIN {SCHEMA_TIMER}.corrections c ON c.entry_id = r.entry_id
-            LEFT JOIN {SCHEMA_TIMER}.entry_removals rm ON rm.entry_id = r.entry_id
+            SELECT s.project_did, s.project, s.user_email,
+                   s.start_time, s.end_time, s.duration_min,
+                   s.site_name, s.site_id, s.task, s.task_clean,
+                   (SELECT c.original_duration_min
+                      FROM {SCHEMA_TIMER}.corrections c
+                     WHERE c.status = 'corrected'
+                       AND c.project_did = s.project_did
+                       AND c.user_email = s.user_email
+                       AND c.start_time = s.start_time
+                       AND c.site_name IS NOT DISTINCT FROM s.site_name
+                       AND c.site_id   IS NOT DISTINCT FROM s.site_id
+                       AND c.task      IS NOT DISTINCT FROM s.task
+                       AND c.corrected_duration_min IS NOT DISTINCT FROM s.duration_min
+                       AND c.corrected_end_time     IS NOT DISTINCT FROM s.end_time
+                     LIMIT 1) AS corr_orig,
+                   EXISTS (SELECT 1
+                      FROM {SCHEMA_TIMER}.corrections c
+                     WHERE c.status = 'corrected'
+                       AND c.project_did = s.project_did
+                       AND c.user_email = s.user_email
+                       AND c.start_time = s.start_time
+                       AND c.site_name IS NOT DISTINCT FROM s.site_name
+                       AND c.site_id   IS NOT DISTINCT FROM s.site_id
+                       AND c.task      IS NOT DISTINCT FROM s.task
+                       AND c.corrected_duration_min IS NOT DISTINCT FROM s.duration_min
+                       AND c.corrected_end_time     IS NOT DISTINCT FROM s.end_time) AS is_edited,
+                   EXISTS (SELECT 1
+                      FROM {SCHEMA_TIMER}.entry_additions a
+                     WHERE a.project_did = s.project_did
+                       AND a.user_email = s.user_email
+                       AND a.start_time = s.start_time
+                       AND a.site_name IS NOT DISTINCT FROM s.site_name
+                       AND a.site_id   IS NOT DISTINCT FROM s.site_id
+                       AND a.task      IS NOT DISTINCT FROM s.task
+                       AND a.duration_min IS NOT DISTINCT FROM s.duration_min) AS is_added,
+                   FALSE AS is_removed
+            FROM surviving s
 
             UNION ALL
 
-            SELECT ad.project_did, ad.project, ad.user_email,
-                   ad.start_time, ad.end_time, ad.duration_min,
-                   ad.site_name, ad.site_id, ad.task, ad.task_clean,
-                   NULL::text AS entry_id,
-                   NULL::numeric AS corrected_duration_min,
-                   NULL::timestamptz AS corrected_end_time,
-                   FALSE AS is_removed,
-                   TRUE AS is_added
-            FROM {SCHEMA_TIMER}.entry_additions ad
-            WHERE ad.user_email = $1
-              AND DATE(ad.start_time AT TIME ZONE 'America/New_York') = $2
+            SELECT rm.project_did, rm.project, rm.user_email,
+                   rm.start_time, rm.end_time, rm.duration_min,
+                   rm.site_name, rm.site_id, rm.task,
+                   NULL::text AS task_clean,
+                   NULL::numeric AS corr_orig,
+                   FALSE AS is_edited,
+                   FALSE AS is_added,
+                   TRUE  AS is_removed
+            FROM {SCHEMA_TIMER}.entry_removals rm
+            WHERE rm.user_email = $1
+              AND DATE(rm.start_time AT TIME ZONE 'America/New_York') = $2
+              AND rm.reason IS DISTINCT FROM 'REVERTED'
 
             ORDER BY start_time, site_name, task
         """, user_email, entry_date),
@@ -1540,24 +1565,33 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
     classified = []
     for r in rows:
         d = dict(r)
-        original_dur = d.get("duration_min")
-        if d.get("is_added"):
-            status = "added"
-            effective_duration = float(original_dur or 0)
-            effective_end = d.get("end_time")
-        elif d.get("is_removed"):
+        surviving_dur = d.get("duration_min")
+        if d.get("is_removed"):
             status = "removed"
             effective_duration = 0.0
             effective_end = d.get("end_time")
-        elif d.get("corrected_duration_min") is not None:
+            corrected_dur = None
+            original_dur = surviving_dur
+        elif d.get("is_added"):
+            status = "added"
+            effective_duration = float(surviving_dur or 0)
+            effective_end = d.get("end_time")
+            corrected_dur = None
+            original_dur = surviving_dur
+        elif d.get("is_edited"):
             status = "edited"
-            effective_duration = float(d["corrected_duration_min"])
-            effective_end = d.get("corrected_end_time") or d.get("end_time")
+            effective_duration = float(surviving_dur or 0)
+            effective_end = d.get("end_time")
+            corrected_dur = surviving_dur
+            original_dur = d.get("corr_orig")
         else:
             status = "unchanged"
-            effective_duration = float(original_dur or 0)
+            effective_duration = float(surviving_dur or 0)
             effective_end = d.get("end_time")
+            corrected_dur = None
+            original_dur = surviving_dur
         d["original_duration_min"] = original_dur
+        d["corrected_duration_min"] = corrected_dur
         d["status"] = status
         d["effective_duration_min"] = effective_duration
         d["effective_end_time"] = effective_end
