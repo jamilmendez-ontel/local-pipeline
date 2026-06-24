@@ -262,12 +262,13 @@ class DailyReportsPipeline:
             approved_by = task.get("approvedBy", {}).get("name") if isinstance(task.get("approvedBy"), dict) else None
             approved_on = epoch_to_dt(task.get("approvedOn"))
             milestone_name = task.get("milestone", {}).get("name") if isinstance(task.get("milestone"), dict) else None
+            assigned_approver = task.get("assignedTo", {}).get("name") if isinstance(task.get("assignedTo"), dict) else None
 
             stg_batch.append((
                 ai["emp_id"], ai["asset_name"], ai["asset_did"], ai["project_did"],
                 wd, tdid, task.get("status", ""),
                 task.get("metrics", {}).get("reqCount", 0), milestone_name,
-                submitted_by, submitted_on, approved_by, approved_on, RUN_ID,
+                submitted_by, submitted_on, approved_by, approved_on, assigned_approver, RUN_ID,
             ))
 
         # Batch insert raw
@@ -293,12 +294,13 @@ class DailyReportsPipeline:
                 lambda c=chunk: db.executemany(
                     f"INSERT INTO {SCHEMA_STAGING}.stg_daily_reports "
                     f"(emp_id, asset_name, asset_did, project_did, work_date, task_did, task_status, "
-                    f" req_count, milestone, submitted_by, submitted_on, approved_by, approved_on, run_id) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::uuid) "
+                    f" req_count, milestone, submitted_by, submitted_on, approved_by, approved_on, assigned_approver, run_id) "
+                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid) "
                     f"ON CONFLICT (task_did) DO UPDATE SET "
                     f"task_status=EXCLUDED.task_status, req_count=EXCLUDED.req_count, "
                     f"submitted_by=EXCLUDED.submitted_by, submitted_on=EXCLUDED.submitted_on, "
                     f"approved_by=EXCLUDED.approved_by, approved_on=EXCLUDED.approved_on, "
+                    f"assigned_approver=EXCLUDED.assigned_approver, "
                     f"run_id=EXCLUDED.run_id, loaded_at=NOW()",
                     c,
                 ),
