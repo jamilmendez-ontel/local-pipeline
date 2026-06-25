@@ -487,6 +487,15 @@ def _run_and_notify(func, name, send_email=True, logger_prefixes=None):
     try:
         run_pipeline_with_notification(func, name, send_email, logger_prefixes=logger_prefixes)
         ended_at = datetime.now(timezone.utc)
+        # NOTE: this aggregate-summary path reports SUCCESS as long as func()
+        # did not raise; it does NOT inspect a returned PipelineOutcome, so a
+        # degraded (partial/abnormal) asset_tasks run would still show green in
+        # the run_all_* summary. The per-pipeline degraded email still fires
+        # inside run_pipeline_with_notification. The scheduled asset-tasks
+        # workflow does NOT use this path (it calls --pipeline asset_tasks*
+        # directly via run_pipeline_with_notification), so the honesty guarantee
+        # holds in production. Fixing this fully would require the wrapper to
+        # return the outcome status, not just True.
         return PipelineResult(
             pipeline_name=name,
             status="SUCCESS",
@@ -634,6 +643,10 @@ def run_all_extractions(send_email=True):
             p_start = datetime.now(timezone.utc)
             try:
                 logger.info(f"\n[{datetime.now():%H:%M:%S}] Extracting {name}...")
+                # NOTE: called directly (not via run_pipeline_with_notification), so a
+                # degraded PipelineOutcome here is NOT surfaced as a red email or a
+                # non-green summary on this aggregate path. The scheduled asset-tasks
+                # job does not use run_all_extractions, so production stays honest.
                 func()
                 p_end = datetime.now(timezone.utc)
                 results[name] = "SUCCESS"

@@ -121,6 +121,10 @@ class BaseExtractor:
         successful run for this pipeline, or ({}, 0) if there is none."""
         row = retry_db(
             lambda: self.db.fetchrow(
+                # NOTE: degraded runs intentionally keep status='success', so this baseline
+                # may come from a prior partial run whose project_counts omitted a failed
+                # project. detect_abnormal_counts still catches 0-row results for such a
+                # project; only the >10% drop check is skipped until a clean baseline exists.
                 f"SELECT records_extracted, metadata->'project_counts' AS project_counts "
                 f"FROM {SCHEMA_PIPELINE}.pipeline_runs "
                 f"WHERE pipeline_name = $1 AND status = 'success' "
