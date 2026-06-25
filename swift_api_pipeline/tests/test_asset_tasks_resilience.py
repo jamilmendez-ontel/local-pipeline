@@ -173,3 +173,45 @@ def test_extract_returns_pipeline_outcome_contract():
     src = inspect.getsource(eat.run_asset_task_pipeline)
     assert "PipelineOutcome(" in src
     assert "return str(extractor.run_id)" not in src
+
+
+# ---------------------------------------------------------------------------
+# Task 6: three-way run_pipeline_with_notification
+# ---------------------------------------------------------------------------
+import importlib
+
+
+def _patch_notify(monkeypatch):
+    main = importlib.import_module("main")
+    sent = {}
+    monkeypatch.setattr(main, "snapshot_row_counts", lambda tables=None: {})
+    def fake_send(**kwargs):
+        sent["overall_status"] = kwargs.get("overall_status")
+    monkeypatch.setattr(main, "send_pipeline_email", fake_send)
+    return main, sent
+
+
+def test_degraded_outcome_sends_partial_email_and_does_not_raise(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    from pipeline_notifier import PipelineOutcome
+    def func():
+        return PipelineOutcome(run_id="r1", failed_projects=["TS19"])
+    result = main.run_pipeline_with_notification(func, "asset_tasks", send_email=True,
+                                                 email_on_success=True)
+    assert result is True
+    assert sent["overall_status"] == "PARTIAL FAILURE"
+
+
+def test_clean_outcome_sends_success(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    from pipeline_notifier import PipelineOutcome
+    def func():
+        return PipelineOutcome(run_id="r1")
+    main.run_pipeline_with_notification(func, "asset_tasks", send_email=True)
+    assert sent["overall_status"] == "SUCCESS"
+
+
+def test_legacy_none_return_still_success(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    main.run_pipeline_with_notification(lambda: None, "some_pipeline", send_email=True)
+    assert sent["overall_status"] == "SUCCESS"

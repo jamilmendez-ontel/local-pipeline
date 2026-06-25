@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import setup_logging, get_logger
 from db import close_db
-from pipeline_notifier import PipelineResult, PIPELINE_TABLES, ALL_TABLES, capture_logs, send_pipeline_email, snapshot_row_counts
+from pipeline_notifier import PipelineResult, PipelineOutcome, PIPELINE_TABLES, ALL_TABLES, capture_logs, send_pipeline_email, snapshot_row_counts
 
 # Unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -100,13 +100,13 @@ def run_asset_tasks_pipeline(project_filter: str = None):
         logger.info(f"# ASSET TASKS PIPELINE")
     logger.info(f"{'#'*60}")
 
-    run_id = run_asset_task_pipeline(project_filter=project_filter)
+    outcome = run_asset_task_pipeline(project_filter=project_filter)
 
     # Transform assets (aggregated from asset tasks)
-    run_assets_transform(run_id)
+    run_assets_transform(outcome.run_id)
 
     # Transform asset tasks (individual task records)
-    run_asset_tasks_transform(run_id)
+    run_asset_tasks_transform(outcome.run_id)
 
     # After single-project recovery, also update backfill and analytics
     if project_filter:
@@ -115,7 +115,7 @@ def run_asset_tasks_pipeline(project_filter: str = None):
         backfill_asset_did()
         refresh_analytics()
 
-    return True
+    return outcome
 
 
 def run_asset_tasks_extract_pipeline():
@@ -130,8 +130,7 @@ def run_asset_tasks_extract_pipeline():
     logger.info(f"# ASSET TASKS EXTRACT")
     logger.info(f"{'#'*60}")
 
-    run_asset_task_pipeline()
-    return True
+    return run_asset_task_pipeline()
 
 
 def run_asset_tasks_transform_pipeline():
@@ -398,10 +397,37 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
     row_counts_before = snapshot_row_counts(tables)
     with capture_logs(logger_prefixes=logger_prefixes) as log_handler:
         try:
-            func()
+            outcome = func()
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
             row_counts_after = snapshot_row_counts(tables)
+
+            if isinstance(outcome, PipelineOutcome) and not outcome.is_clean():
+                overall = outcome.email_status()        # PARTIAL FAILURE | ABNORMAL ROW COUNT
+                result = PipelineResult(
+                    pipeline_name=name,
+                    status=overall,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_seconds=duration,
+                    error_message=outcome.detail,
+                )
+                if send_email:                          # degraded is never routine: ignore email_on_success
+                    send_pipeline_email(
+                        results=[result],
+                        log_output=log_handler.get_log_output(),
+                        overall_status=overall,
+                        run_label=name,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        total_duration=duration,
+                        recipients=recipients,
+                        row_counts_before=row_counts_before,
+                        row_counts_after=row_counts_after,
+                        row_count_tables=tables,
+                    )
+                return True   # exit 0 so good projects' transforms/downstream still run
+
             result = PipelineResult(
                 pipeline_name=name,
                 status="SUCCESS",
