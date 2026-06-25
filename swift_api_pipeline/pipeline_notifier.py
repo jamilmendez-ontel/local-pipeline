@@ -125,6 +125,29 @@ class PipelineResult:
     details: dict = field(default_factory=dict)
 
 
+@dataclass
+class PipelineOutcome:
+    """Returned by a pipeline function to report a non-clean result WITHOUT raising.
+
+    Lets run_pipeline_with_notification choose SUCCESS vs a red degraded email
+    while still letting the successfully-processed work flow downstream.
+    """
+    run_id: str = None
+    failed_projects: list = field(default_factory=list)
+    abnormal_projects: list = field(default_factory=list)
+    detail: str = ""
+
+    def is_clean(self) -> bool:
+        return not self.failed_projects and not self.abnormal_projects
+
+    def email_status(self) -> str:
+        if self.failed_projects:
+            return "PARTIAL FAILURE"
+        if self.abnormal_projects:
+            return "ABNORMAL ROW COUNT"
+        return "SUCCESS"
+
+
 class LogCaptureHandler(logging.Handler):
     """Logging handler that captures log lines in memory.
 
