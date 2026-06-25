@@ -145,10 +145,13 @@ def test_retry_loop_recovers_in_round_two():
 
 
 def test_retry_loop_exhausts_rounds_when_never_recovers():
+    calls = []
     def retry_once(failed):
+        calls.append(list(failed))
         return list(failed)  # never recovers
     still = _retry_loop(retry_once, ["TS19"], max_rounds=3, wait_seconds=0, sleep=lambda s: None)
     assert still == ["TS19"]
+    assert len(calls) == 3  # all 3 rounds run, no more, no fewer
 
 
 def test_retry_loop_no_failures_does_nothing():
