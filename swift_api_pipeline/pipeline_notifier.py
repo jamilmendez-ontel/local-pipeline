@@ -132,7 +132,7 @@ class PipelineOutcome:
     Lets run_pipeline_with_notification choose SUCCESS vs a red degraded email
     while still letting the successfully-processed work flow downstream.
     """
-    run_id: str = None
+    run_id: Optional[str] = None
     failed_projects: list = field(default_factory=list)
     abnormal_projects: list = field(default_factory=list)
     detail: str = ""
