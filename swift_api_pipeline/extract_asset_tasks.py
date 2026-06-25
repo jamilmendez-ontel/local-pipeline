@@ -27,7 +27,28 @@ MAX_RETRIES = 10
 MAX_WORKERS = 6  # Concurrent API + DB writer threads
 LOAD_BATCH_SIZE = 25000
 RETRY_WAIT_SECONDS = 300  # Wait before project-level retry (5 min)
+MAX_RETRY_ROUNDS = 3        # project-level retry rounds after the initial extraction
+ABNORMAL_DROP_PCT = 0.10    # flag a project if its rows drop > 10% vs the previous successful run
 PROJECT_TIMEOUT_SECONDS = 3600  # Max 1 hour per project extraction
+
+
+def detect_abnormal_counts(current_counts, baseline_counts, drop_pct=ABNORMAL_DROP_PCT):
+    """Return sorted project names whose row count looks abnormal.
+
+    A project is abnormal if it returned 0 rows, or (with a positive baseline)
+    fell more than drop_pct below the previous successful run. Projects with no
+    baseline and a nonzero count are skipped so first-ever extractions don't
+    false-alarm.
+    """
+    abnormal = []
+    for name, count in current_counts.items():
+        if count == 0:
+            abnormal.append(name)
+            continue
+        base = baseline_counts.get(name)
+        if base and base > 0 and count < base * (1 - drop_pct):
+            abnormal.append(name)
+    return sorted(abnormal)
 
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
