@@ -75,12 +75,14 @@ def test_constants():
 class _FakeDB:
     def __init__(self, prev_row=None):
         self.executed = []          # list of (sql, params)
+        self.executed_fetchrow = [] # list of (sql, params)
         self._prev_row = prev_row
 
     def execute(self, sql, *params):
         self.executed.append((sql, params))
 
     def fetchrow(self, sql, *params):
+        self.executed_fetchrow.append((sql, params))
         return self._prev_row
 
 
@@ -101,6 +103,10 @@ def test_complete_pipeline_run_merges_project_counts_into_metadata():
     # the json payload param must contain project_counts
     assert any('"project_counts"' in p for p in params if isinstance(p, str))
     assert any('"TS13"' in p for p in params if isinstance(p, str))
+    assert "WHERE run_id = $6" in sql
+    assert len(params) == 6
+    assert params[4] == json.dumps({"project_counts": {"TS13": 100}})
+    assert params[5] == "run-current"
 
 
 def test_get_previous_project_counts_parses_metadata():
@@ -110,6 +116,11 @@ def test_get_previous_project_counts_parses_metadata():
     counts, total = ex.get_previous_project_counts()
     assert counts == {"TS13": 500, "TS16": 400}
     assert total == 900
+    fsql, fparams = db.executed_fetchrow[-1]
+    assert "status = 'success'" in fsql
+    assert "run_id <> $2" in fsql
+    assert fparams[0] == "asset_tasks_extract"
+    assert fparams[1] == "run-current"
 
 
 def test_get_previous_project_counts_handles_no_prior_run():

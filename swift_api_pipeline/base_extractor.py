@@ -116,7 +116,7 @@ class BaseExtractor:
             )
         logger.info(f"Pipeline run completed: {status}")
 
-    def get_previous_project_counts(self) -> tuple:
+    def get_previous_project_counts(self) -> tuple[dict, int]:
         """Return (project_counts dict, total_records) of the most recent prior
         successful run for this pipeline, or ({}, 0) if there is none."""
         row = retry_db(
