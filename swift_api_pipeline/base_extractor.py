@@ -83,18 +83,60 @@ class BaseExtractor:
         )
         logger.info(f"Pipeline run started: {self.run_id}")
 
-    def complete_pipeline_run(self, status: str, records: int = None, error: str = None) -> None:
-        """Update pipeline run status on completion."""
-        retry_db(
-            lambda: self.db.execute(
-                f'UPDATE {SCHEMA_PIPELINE}.pipeline_runs '
-                f'SET status = $1, completed_at = $2, records_extracted = $3, error_message = $4 '
-                f'WHERE run_id = $5',
-                status, datetime.now(timezone.utc), records, error, str(self.run_id)
-            ),
-            description="update pipeline_runs"
-        )
+    def complete_pipeline_run(self, status: str, records: int = None,
+                              error: str = None, project_counts: dict = None) -> None:
+        """Update pipeline run status on completion.
+
+        When project_counts is supplied, merge {"project_counts": {...}} into the
+        run's metadata jsonb so the next run can use it as a row-count baseline.
+        """
+        if project_counts is not None:
+            payload = json.dumps({"project_counts": project_counts})
+            retry_db(
+                lambda: self.db.execute(
+                    f'UPDATE {SCHEMA_PIPELINE}.pipeline_runs '
+                    f'SET status = $1, completed_at = $2, records_extracted = $3, '
+                    f'error_message = $4, '
+                    f'metadata = COALESCE(metadata, \'{{}}\'::jsonb) || $5::jsonb '
+                    f'WHERE run_id = $6',
+                    status, datetime.now(timezone.utc), records, error, payload,
+                    str(self.run_id)
+                ),
+                description="update pipeline_runs (with counts)"
+            )
+        else:
+            retry_db(
+                lambda: self.db.execute(
+                    f'UPDATE {SCHEMA_PIPELINE}.pipeline_runs '
+                    f'SET status = $1, completed_at = $2, records_extracted = $3, '
+                    f'error_message = $4 WHERE run_id = $5',
+                    status, datetime.now(timezone.utc), records, error, str(self.run_id)
+                ),
+                description="update pipeline_runs"
+            )
         logger.info(f"Pipeline run completed: {status}")
+
+    def get_previous_project_counts(self) -> tuple:
+        """Return (project_counts dict, total_records) of the most recent prior
+        successful run for this pipeline, or ({}, 0) if there is none."""
+        row = retry_db(
+            lambda: self.db.fetchrow(
+                f"SELECT records_extracted, metadata->'project_counts' AS project_counts "
+                f"FROM {SCHEMA_PIPELINE}.pipeline_runs "
+                f"WHERE pipeline_name = $1 AND status = 'success' "
+                f"AND completed_at IS NOT NULL AND run_id <> $2 "
+                f"ORDER BY completed_at DESC LIMIT 1",
+                self._pipeline_name, str(self.run_id)
+            ),
+            description="fetch previous project counts"
+        )
+        if not row:
+            return {}, 0
+        raw = row["project_counts"]
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        counts = {k: int(v) for k, v in (raw or {}).items()}
+        return counts, int(row["records_extracted"] or 0)
 
     def increment_loaded(self, count: int) -> None:
         """Thread-safe increment of total_loaded counter."""

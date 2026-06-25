@@ -1,4 +1,5 @@
 # swift_api_pipeline/tests/test_asset_tasks_resilience.py
+import json
 import os
 import sys
 
@@ -7,6 +8,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from pipeline_notifier import PipelineOutcome
 from extract_asset_tasks import detect_abnormal_counts, ABNORMAL_DROP_PCT, MAX_RETRY_ROUNDS
+from base_extractor import BaseExtractor
 
 
 def test_outcome_clean_when_no_problems():
@@ -64,3 +66,52 @@ def test_multiple_projects_sorted():
 def test_constants():
     assert MAX_RETRY_ROUNDS == 3
     assert ABNORMAL_DROP_PCT == 0.10
+
+
+# ---------------------------------------------------------------------------
+# Task 3: persist per-project counts to pipeline_runs.metadata + baseline reader
+# ---------------------------------------------------------------------------
+
+class _FakeDB:
+    def __init__(self, prev_row=None):
+        self.executed = []          # list of (sql, params)
+        self._prev_row = prev_row
+
+    def execute(self, sql, *params):
+        self.executed.append((sql, params))
+
+    def fetchrow(self, sql, *params):
+        return self._prev_row
+
+
+def _make_extractor(fake_db):
+    ex = BaseExtractor.__new__(BaseExtractor)   # bypass __init__/network
+    ex.db = fake_db
+    ex._pipeline_name = "asset_tasks_extract"
+    ex.run_id = "run-current"
+    return ex
+
+
+def test_complete_pipeline_run_merges_project_counts_into_metadata():
+    db = _FakeDB()
+    ex = _make_extractor(db)
+    ex.complete_pipeline_run("success", 100, error=None, project_counts={"TS13": 100})
+    sql, params = db.executed[-1]
+    assert "metadata" in sql and "::jsonb" in sql
+    # the json payload param must contain project_counts
+    assert any('"project_counts"' in p for p in params if isinstance(p, str))
+    assert any('"TS13"' in p for p in params if isinstance(p, str))
+
+
+def test_get_previous_project_counts_parses_metadata():
+    db = _FakeDB(prev_row={"records_extracted": 900,
+                           "project_counts": {"TS13": 500, "TS16": 400}})
+    ex = _make_extractor(db)
+    counts, total = ex.get_previous_project_counts()
+    assert counts == {"TS13": 500, "TS16": 400}
+    assert total == 900
+
+
+def test_get_previous_project_counts_handles_no_prior_run():
+    ex = _make_extractor(_FakeDB(prev_row=None))
+    assert ex.get_previous_project_counts() == ({}, 0)
