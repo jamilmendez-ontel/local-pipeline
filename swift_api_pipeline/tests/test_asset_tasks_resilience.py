@@ -215,3 +215,32 @@ def test_legacy_none_return_still_success(monkeypatch):
     main, sent = _patch_notify(monkeypatch)
     main.run_pipeline_with_notification(lambda: None, "some_pipeline", send_email=True)
     assert sent["overall_status"] == "SUCCESS"
+
+
+def test_degraded_outcome_no_email_when_send_email_false(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    from pipeline_notifier import PipelineOutcome
+    def func():
+        return PipelineOutcome(run_id="r1", failed_projects=["TS19"])
+    result = main.run_pipeline_with_notification(func, "asset_tasks", send_email=False)
+    assert result is True
+    assert "overall_status" not in sent  # email must not fire
+
+
+def test_abnormal_outcome_sends_abnormal_email_and_does_not_raise(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    from pipeline_notifier import PipelineOutcome
+    def func():
+        return PipelineOutcome(run_id="r1", abnormal_projects=["TS19"])
+    result = main.run_pipeline_with_notification(func, "asset_tasks", send_email=True)
+    assert result is True
+    assert sent["overall_status"] == "ABNORMAL ROW COUNT"
+
+
+def test_clean_outcome_no_email_when_email_on_success_false(monkeypatch):
+    main, sent = _patch_notify(monkeypatch)
+    from pipeline_notifier import PipelineOutcome
+    def func():
+        return PipelineOutcome(run_id="r1")
+    main.run_pipeline_with_notification(func, "asset_tasks", send_email=True, email_on_success=False)
+    assert "overall_status" not in sent  # clean SUCCESS suppressed when email_on_success=False
