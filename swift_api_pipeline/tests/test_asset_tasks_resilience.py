@@ -126,3 +126,32 @@ def test_get_previous_project_counts_parses_metadata():
 def test_get_previous_project_counts_handles_no_prior_run():
     ex = _make_extractor(_FakeDB(prev_row=None))
     assert ex.get_previous_project_counts() == ({}, 0)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: _retry_loop — 3-round retry with rest between rounds
+# ---------------------------------------------------------------------------
+from extract_asset_tasks import _retry_loop
+
+
+def test_retry_loop_recovers_in_round_two():
+    calls = []
+    def retry_once(failed):
+        calls.append(list(failed))
+        return [] if len(calls) >= 2 else list(failed)  # all recover on round 2
+    still = _retry_loop(retry_once, ["TS19"], max_rounds=3, wait_seconds=0, sleep=lambda s: None)
+    assert still == []
+    assert len(calls) == 2  # stopped early, did not run round 3
+
+
+def test_retry_loop_exhausts_rounds_when_never_recovers():
+    def retry_once(failed):
+        return list(failed)  # never recovers
+    still = _retry_loop(retry_once, ["TS19"], max_rounds=3, wait_seconds=0, sleep=lambda s: None)
+    assert still == ["TS19"]
+
+
+def test_retry_loop_no_failures_does_nothing():
+    def retry_once(failed):
+        raise AssertionError("should not be called")
+    assert _retry_loop(retry_once, [], wait_seconds=0, sleep=lambda s: None) == []

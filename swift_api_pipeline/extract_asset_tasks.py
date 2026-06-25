@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Extract asset-tasks from Swift API for specified projects.
 
@@ -49,6 +49,27 @@ def detect_abnormal_counts(current_counts, baseline_counts, drop_pct=ABNORMAL_DR
         if base and base > 0 and count < base * (1 - drop_pct):
             abnormal.append(name)
     return sorted(abnormal)
+
+
+def _retry_loop(retry_once, failed_projects, max_rounds=MAX_RETRY_ROUNDS,
+                wait_seconds=RETRY_WAIT_SECONDS, sleep=time.sleep):
+    """Retry failing projects up to max_rounds times, resting between rounds.
+
+    retry_once(failed) performs one retry pass and returns the names still
+    failing. Stops early once nothing remains.
+    """
+    still = list(failed_projects)
+    for round_no in range(1, max_rounds + 1):
+        if not still:
+            break
+        logger.warning(
+            f"Retry round {round_no}/{max_rounds} for {len(still)} project(s) "
+            f"after {wait_seconds}s rest: {still}"
+        )
+        sleep(wait_seconds)
+        still = retry_once(still)
+    return still
+
 
 # Non-PK indexes to drop before bulk load and recreate after.
 # GIN index on data column permanently dropped — costs ~2.4GB, never used by pipeline or agent
@@ -611,78 +632,75 @@ def run_asset_task_pipeline(
 
         # ── Project-level auto-retry (before index restore — faster writes) ──
         if failed_projects:
-            logger.warning(
-                f"Retrying {len(failed_projects)} failed project(s) after "
-                f"{RETRY_WAIT_SECONDS}s: {failed_projects}"
-            )
-            time.sleep(RETRY_WAIT_SECONDS)
+            def retry_once(failed_projects):
+                # For failed projects: resume from cursor if available, else clean and restart
+                for proj_name in failed_projects:
+                    proj = next(p for p in projects if p["project_name"] == proj_name)
+                    progress = extractor.db.fetchrow(
+                        f'SELECT rows_written, after_ap FROM {SCHEMA_PIPELINE}.extraction_progress '
+                        f'WHERE run_id = $1 AND project_did = $2',
+                        str(extractor.run_id), proj["project_did"]
+                    )
+                    if progress and progress["after_ap"]:
+                        logger.info(
+                            f"[{proj_name}] Has resume point at {progress['rows_written']:,} rows "
+                            f"— will resume instead of re-extracting"
+                        )
+                    else:
+                        # No resume point — delete partial data and start fresh
+                        retry_db(
+                            lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                                f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
+                                did, rid
+                            ),
+                            description=f"clean partial raw data for {proj_name}"
+                        )
+                        retry_db(
+                            lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
+                                f"DELETE FROM {SCHEMA_PIPELINE}.extraction_progress WHERE run_id=$1 AND project_did=$2",
+                                rid, did
+                            ),
+                            description=f"clean extraction_progress for {proj_name}"
+                        )
 
-            # For failed projects: resume from cursor if available, else clean and restart
-            for proj_name in failed_projects:
-                proj = next(p for p in projects if p["project_name"] == proj_name)
-                progress = extractor.db.fetchrow(
-                    f'SELECT rows_written, after_ap FROM {SCHEMA_PIPELINE}.extraction_progress '
-                    f'WHERE run_id = $1 AND project_did = $2',
-                    str(extractor.run_id), proj["project_did"]
-                )
-                if progress and progress["after_ap"]:
-                    logger.info(
-                        f"[{proj_name}] Has resume point at {progress['rows_written']:,} rows "
-                        f"— will resume instead of re-extracting"
-                    )
-                else:
-                    # No resume point — delete partial data and start fresh
-                    retry_db(
-                        lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
-                            f"DELETE FROM {SCHEMA_RAW}.raw_asset_tasks WHERE project_did=$1 AND run_id=$2",
-                            did, rid
-                        ),
-                        description=f"clean partial raw data for {proj_name}"
-                    )
-                    retry_db(
-                        lambda did=proj["project_did"], rid=str(extractor.run_id): extractor.db.execute(
-                            f"DELETE FROM {SCHEMA_PIPELINE}.extraction_progress WHERE run_id=$1 AND project_did=$2",
-                            rid, did
-                        ),
-                        description=f"clean extraction_progress for {proj_name}"
-                    )
-
-            # Retry failed projects in parallel using ThreadPoolExecutor
-            retry_projects = [
-                next(p for p in projects if p["project_name"] == name)
-                for name in failed_projects
-            ]
-            still_failed = []
-            retry_executor = ThreadPoolExecutor(max_workers=max_workers)
-            try:
-                retry_futures = {
-                    retry_executor.submit(
-                        extractor.extract_and_load_project,
-                        proj["project_did"],
-                        proj["project_name"],
-                    ): proj
-                    for proj in retry_projects
-                }
+                # Retry failed projects in parallel using ThreadPoolExecutor
+                retry_projects = [
+                    next(p for p in projects if p["project_name"] == name)
+                    for name in failed_projects
+                ]
+                still_failed = []
+                retry_executor = ThreadPoolExecutor(max_workers=max_workers)
                 try:
-                    for future in as_completed(retry_futures, timeout=overall_timeout):
-                        proj = retry_futures[future]
-                        try:
-                            rows = future.result()
-                            project_rows[proj["project_name"]] = rows
-                            logger.info(f"[{proj['project_name']}] Retry SUCCEEDED: {rows:,} rows")
-                        except Exception as e:
-                            logger.error(f"[{proj['project_name']}] Retry FAILED: {type(e).__name__}: {e}")
-                            still_failed.append(proj["project_name"])
-                except TimeoutError:
-                    for fut, proj in retry_futures.items():
-                        if not fut.done():
-                            name = proj["project_name"]
-                            logger.error(f"[{name}] Retry TIMED OUT after {overall_timeout}s")
-                            still_failed.append(name)
-            finally:
-                retry_executor.shutdown(wait=False, cancel_futures=True)
+                    retry_futures = {
+                        retry_executor.submit(
+                            extractor.extract_and_load_project,
+                            proj["project_did"],
+                            proj["project_name"],
+                        ): proj
+                        for proj in retry_projects
+                    }
+                    try:
+                        for future in as_completed(retry_futures, timeout=overall_timeout):
+                            proj = retry_futures[future]
+                            try:
+                                rows = future.result()
+                                project_rows[proj["project_name"]] = rows
+                                logger.info(f"[{proj['project_name']}] Retry SUCCEEDED: {rows:,} rows")
+                            except Exception as e:
+                                logger.error(f"[{proj['project_name']}] Retry FAILED: {type(e).__name__}: {e}")
+                                still_failed.append(proj["project_name"])
+                    except TimeoutError:
+                        for fut, proj in retry_futures.items():
+                            if not fut.done():
+                                name = proj["project_name"]
+                                logger.error(f"[{name}] Retry TIMED OUT after {overall_timeout}s")
+                                still_failed.append(name)
+                finally:
+                    retry_executor.shutdown(wait=False, cancel_futures=True)
 
-            failed_projects = still_failed  # Only projects that failed even after retry
+                return still_failed
+
+            failed_projects = _retry_loop(retry_once, failed_projects)
 
         # Recalculate from project_rows — the accumulating counter may be
         # inflated by rows written in round 1 that were deleted before retry.
