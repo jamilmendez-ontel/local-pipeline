@@ -19,6 +19,7 @@ from config import (
     SCHEMA_RAW, SCHEMA_REFERENCE, SCHEMA_PIPELINE, get_logger, retry_db
 )
 from base_extractor import BaseExtractor
+from pipeline_notifier import PipelineOutcome
 
 logger = get_logger("asset_tasks")
 
@@ -578,7 +579,7 @@ def run_asset_task_pipeline(
             logger.info(f"  Run ID:         {extractor.run_id}")
             logger.info(f"{'='*60}\n")
 
-            return str(extractor.run_id)
+            return PipelineOutcome(run_id=str(extractor.run_id))
 
         # ── NORMAL (FULL) MODE ────────────────────────────────────────────────
         extractor.start_pipeline_run()
@@ -725,51 +726,67 @@ def run_asset_task_pipeline(
             description="clean extraction_progress"
         )
 
-        # Detect partial failures — projects that failed even after retry.
-        # With the per-project safety check (Task 4 of GHA migration),
-        # successful projects keep their fresh data and downstream transforms
-        # should still run. We mark this as 'success' (the only enum value
-        # downstream's `WHERE status='success'` lookup recognizes) and put
-        # the gap detail in error_message, then log loudly without raising.
+        # Row-count guard: compare successfully-extracted projects to the previous
+        # successful run. Failed projects are excluded (they are already PARTIAL).
+        successful_counts = {
+            name: count for name, count in project_rows.items()
+            if name not in failed_projects
+        }
+        baseline_counts, _baseline_total = extractor.get_previous_project_counts()
+        abnormal_projects = detect_abnormal_counts(successful_counts, baseline_counts)
+
+        # Compose the error_message note so the export guard blocks on partial OR
+        # abnormal runs (the guard keys off a non-empty error note).
+        notes = []
         if failed_projects:
             succeeded = len(project_rows) - len(failed_projects)
-            error_detail = (
+            notes.append(
                 f"Partial extraction: {succeeded}/{len(project_rows)} projects "
                 f"succeeded. Failed (old data retained): {', '.join(failed_projects)}"
             )
-            extractor.complete_pipeline_run("success", total_records, error=error_detail)
+        if abnormal_projects:
+            parts = []
+            for name in abnormal_projects:
+                base = baseline_counts.get(name)
+                parts.append(f"{name}: {successful_counts.get(name, 0):,} (prev {base:,})"
+                             if base else f"{name}: {successful_counts.get(name, 0):,} (prev n/a)")
+            notes.append("Abnormal row counts vs previous run: " + "; ".join(parts))
+        error_detail = " | ".join(notes) if notes else None
+
+        # Persist counts of successful projects as next run's baseline. Status stays
+        # 'success' so downstream transforms still resolve via WHERE status='success'.
+        extractor.complete_pipeline_run(
+            "success", total_records, error=error_detail, project_counts=successful_counts
+        )
+
+        if error_detail:
             logger.warning(f"\n{'='*60}")
-            logger.warning(
-                f"Pipeline PARTIAL SUCCESS ({succeeded}/{len(project_rows)} projects)"
-            )
-            logger.warning(f"\nRecords by project:")
+            logger.warning(f"Pipeline DEGRADED: {error_detail}")
             for name, count in sorted(project_rows.items()):
-                marker = " [FAILED - old data retained]" if name in failed_projects else ""
+                marker = ""
+                if name in failed_projects:
+                    marker = " [FAILED - old data retained]"
+                elif name in abnormal_projects:
+                    marker = " [ABNORMAL ROW COUNT]"
                 logger.warning(f"  {name}: {count:,}{marker}")
-            logger.warning(f"\nTotal loaded: {total_records:,}")
-            logger.warning(f"Failed projects: {', '.join(failed_projects)}")
+            logger.warning(f"Total loaded: {total_records:,}")
             logger.warning(f"Run ID: {extractor.run_id}")
             logger.warning(f"{'='*60}\n")
-            # Do NOT raise — let downstream transforms run on the partial data.
-            # The transform's WHERE status='success' lookup will use today's
-            # run_id and produce fresh staging rows for the projects that
-            # extracted successfully. Failed projects keep their partition's
-            # prior data so there's no gap. Return run_id like the
-            # full-success path so callers get consistent semantics.
-            return str(extractor.run_id)
+        else:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Pipeline completed successfully")
+            for name, count in sorted(project_rows.items()):
+                logger.info(f"  {name}: {count:,}")
+            logger.info(f"Total loaded: {total_records:,}")
+            logger.info(f"Run ID: {extractor.run_id}")
+            logger.info(f"{'='*60}\n")
 
-        extractor.complete_pipeline_run("success", total_records)
-
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Pipeline completed successfully")
-        logger.info(f"\nRecords by project:")
-        for name, count in sorted(project_rows.items()):
-            logger.info(f"  {name}: {count:,}")
-        logger.info(f"\nTotal loaded: {total_records:,}")
-        logger.info(f"Run ID: {extractor.run_id}")
-        logger.info(f"{'='*60}\n")
-
-        return str(extractor.run_id)
+        return PipelineOutcome(
+            run_id=str(extractor.run_id),
+            failed_projects=list(failed_projects),
+            abnormal_projects=list(abnormal_projects),
+            detail=error_detail or "",
+        )
 
     except Exception as e:
         logger.error(f"\n{'='*60}")

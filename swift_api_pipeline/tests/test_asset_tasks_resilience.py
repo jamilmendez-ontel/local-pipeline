@@ -158,3 +158,18 @@ def test_retry_loop_no_failures_does_nothing():
     def retry_once(failed):
         raise AssertionError("should not be called")
     assert _retry_loop(retry_once, [], wait_seconds=0, sleep=lambda s: None) == []
+
+
+# ---------------------------------------------------------------------------
+# Task 5: run_asset_task_pipeline returns PipelineOutcome (not bare run-id string)
+# ---------------------------------------------------------------------------
+import inspect
+import extract_asset_tasks as eat
+
+
+def test_extract_returns_pipeline_outcome_contract():
+    # Source-level guard: the success and partial paths must return a PipelineOutcome,
+    # not a bare run-id string, so the notifier can classify the run.
+    src = inspect.getsource(eat.run_asset_task_pipeline)
+    assert "PipelineOutcome(" in src
+    assert "return str(extractor.run_id)" not in src
