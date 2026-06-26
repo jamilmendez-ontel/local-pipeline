@@ -31,24 +31,31 @@ def _upsert_sql() -> str:
     )
 
 
-def _tombstone(db, event_id: str):
+def _tombstone_many(db, event_ids: list):
+    """Soft-delete all given event_ids in one UPDATE. One round-trip regardless
+    of count (a backfill replays thousands of historical cancellations; a
+    per-event UPDATE there is thousands of round-trips)."""
+    if not event_ids:
+        return
     retry_db(
         lambda: db.execute(
             f"UPDATE {SCHEMA_STAGING}.stg_calendar_events "
-            f"SET is_deleted = true, deleted_at = $2 WHERE event_id = $1",
-            event_id, datetime.now(timezone.utc),
+            f"SET is_deleted = true, deleted_at = $2 WHERE event_id = ANY($1)",
+            event_ids, datetime.now(timezone.utc),
         ),
-        description=f"tombstone {event_id}",
+        description=f"tombstone {len(event_ids)} cancelled events",
     )
 
 
 def load_staging(db, run_id: str, events: list, resolve_fn) -> dict:
     upserted = tombstoned = skipped = 0
     rows = []
+    cancelled_ids = []
     for ev in events:
         if ev.get("status") == "cancelled":
-            _tombstone(db, ev.get("id", ""))
-            tombstoned += 1
+            eid = ev.get("id", "")
+            if eid:
+                cancelled_ids.append(eid)
             continue
         try:
             shape = resolve_fn(db, ev.get("summary") or "")
@@ -56,6 +63,9 @@ def load_staging(db, run_id: str, events: list, resolve_fn) -> dict:
         except Exception as e:
             skipped += 1
             logger.warning(f"  Skipped event {ev.get('id','?')}: {e}")
+
+    _tombstone_many(db, cancelled_ids)
+    tombstoned = len(cancelled_ids)
 
     sql = _upsert_sql()
     n_batches = (len(rows) + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE

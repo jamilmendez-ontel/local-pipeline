@@ -36,4 +36,18 @@ def test_load_upserts_active_and_tombstones_cancelled():
     counts = load_staging(db, "run-1", events, resolve_fn=lambda d, s: _shape())
     assert counts["upserted"] == 1
     assert counts["tombstoned"] == 1
-    assert db.tombstones[0][0] == "e2"
+    # cancelled ids are tombstoned in one bulk UPDATE: args[0] is the id list.
+    assert len(db.tombstones) == 1
+    assert "e2" in db.tombstones[0][0]
+
+
+def test_many_cancelled_tombstoned_in_one_round_trip():
+    db = FakeDB()
+    events = [{"id": f"c{i}", "status": "cancelled", "start": {}, "end": {}}
+              for i in range(2000)]
+    counts = load_staging(db, "run-1", events, resolve_fn=lambda d, s: _shape())
+    assert counts["tombstoned"] == 2000
+    assert counts["upserted"] == 0
+    # 2000 cancellations must be ONE execute, not 2000 (the backfill perf fix).
+    assert len(db.tombstones) == 1
+    assert len(db.tombstones[0][0]) == 2000
