@@ -3,7 +3,7 @@
 from calendar_normalize import build_employee_index
 
 
-def load_lookups(db):
+def load_lookups(db) -> dict:
     code_rows = db.fetch("SELECT code, label, category FROM reference.ref_leave_code")
     code_map = {r["code"].upper(): (r["label"], r["category"]) for r in code_rows}
 

@@ -25,6 +25,8 @@ _UPSERT_COLS = [
 
 
 def _enrich(db, shape, lookups):
+    """Return the norm dict (leave/team/person normalized values) for one event.
+    person_note_normalized is always None until Wave 2."""
     lt_norm, _cat = normalize_leave_type(shape.get("leave_type"), lookups["code_map"])
     pm = resolve_person(db, shape.get("person"), shape.get("team"),
                         lookups["emp_index"], lookups["team_map"])
