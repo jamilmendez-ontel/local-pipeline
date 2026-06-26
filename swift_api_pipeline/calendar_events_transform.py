@@ -25,7 +25,7 @@ def _ts(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
 
 
-def build_row(ev: dict, shape: dict, run_id: str) -> dict:
+def build_row(ev: dict, shape: dict, run_id: str, norm: dict) -> dict:
     summary = (ev.get("summary") or "").strip() or None
     start_date, end_date, days, is_all_day = event_dates(ev)
     return {
@@ -34,11 +34,16 @@ def build_row(ev: dict, shape: dict, run_id: str) -> dict:
         "summary_raw": summary,
         "event_kind": shape["event_kind"],
         "leave_type": shape["leave_type"],
-        "leave_type_normalized": None,        # populated in Phase 2 (ref_leave_code)
+        "leave_type_normalized": norm["leave_type_normalized"],
         "team": shape["team"],
-        "team_normalized": None,              # populated in Phase 2
+        "team_normalized": norm["team_normalized"],
+        "team_level": norm["team_level"],
         "person": shape["person"],
+        "person_normalized": norm["person_normalized"],
+        "emp_id": norm["emp_id"],
+        "person_match_source": norm["person_match_source"],
         "person_note": shape["person_note"],
+        "person_note_normalized": norm["person_note_normalized"],
         "rest_day_of_week": shape["rest_day_of_week"],
         "start_date": start_date,
         "end_date": end_date,

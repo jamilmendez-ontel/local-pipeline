@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 
 from config import SCHEMA_STAGING, retry_db
 from calendar_events_transform import build_row
+from calendar_lookups import load_lookups
+from calendar_normalize import normalize_leave_type, normalize_team
+from calendar_person_cache import resolve_person
 
 logger = logging.getLogger("calendar_leave")
 
@@ -12,11 +15,32 @@ LOAD_BATCH_SIZE = 500
 
 _UPSERT_COLS = [
     "event_id", "ical_uid", "summary_raw", "event_kind", "leave_type",
-    "leave_type_normalized", "team", "team_normalized", "person", "person_note",
-    "rest_day_of_week", "start_date", "end_date", "days", "is_all_day",
-    "creator_email", "event_created", "event_updated", "parse_source",
-    "parse_confidence", "needs_review", "is_deleted", "run_id",
+    "leave_type_normalized", "team", "team_normalized", "team_level",
+    "person", "person_normalized", "emp_id", "person_match_source",
+    "person_note", "person_note_normalized", "rest_day_of_week", "start_date",
+    "end_date", "days", "is_all_day", "creator_email", "event_created",
+    "event_updated", "parse_source", "parse_confidence", "needs_review",
+    "is_deleted", "run_id",
 ]
+
+
+def _enrich(db, shape, lookups):
+    """Return the norm dict (leave/team/person normalized values) for one event.
+    person_note_normalized is always None until Wave 2."""
+    lt_norm, _cat = normalize_leave_type(shape.get("leave_type"), lookups["code_map"])
+    pm = resolve_person(db, shape.get("person"), shape.get("team"),
+                        lookups["emp_index"], lookups["team_map"])
+    emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
+    team_norm, team_level = normalize_team(emp, shape.get("team"), lookups["team_map"])
+    return {
+        "leave_type_normalized": lt_norm,
+        "team_normalized": team_norm,
+        "team_level": team_level,
+        "person_normalized": pm["person_normalized"],
+        "emp_id": pm["emp_id"],
+        "person_match_source": pm["match_source"],
+        "person_note_normalized": None,   # filled in Wave 2
+    }
 
 
 def _upsert_sql() -> str:
@@ -51,6 +75,7 @@ def load_staging(db, run_id: str, events: list, resolve_fn) -> dict:
     upserted = tombstoned = skipped = 0
     rows = []
     cancelled_ids = []
+    lookups = load_lookups(db)
     for ev in events:
         if ev.get("status") == "cancelled":
             eid = ev.get("id", "")
@@ -59,7 +84,8 @@ def load_staging(db, run_id: str, events: list, resolve_fn) -> dict:
             continue
         try:
             shape = resolve_fn(db, ev.get("summary") or "")
-            rows.append(build_row(ev, shape, run_id))
+            norm = _enrich(db, shape, lookups)
+            rows.append(build_row(ev, shape, run_id, norm))
         except Exception as e:
             skipped += 1
             logger.warning(f"  Skipped event {ev.get('id','?')}: {e}")

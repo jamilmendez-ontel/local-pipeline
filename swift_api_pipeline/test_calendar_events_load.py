@@ -1,13 +1,21 @@
 """Tests for staging load + tombstone using a fake db. Run:
     cd swift_api_pipeline && venv/Scripts/python -m pytest test_calendar_events_load.py -v
 """
-from calendar_events_load import load_staging
+from calendar_events_load import load_staging, _UPSERT_COLS
 
 
 class FakeDB:
     def __init__(self):
         self.upserts = []
         self.tombstones = []
+
+    def fetch(self, query, *args):
+        # Return empty lists for all reference table lookups (code_map, team_map, emp_rows).
+        return []
+
+    def fetchrow(self, query, *args):
+        # No cached person-match entries.
+        return None
 
     def execute(self, query, *args):
         if "is_deleted = true" in query:
@@ -39,6 +47,14 @@ def test_load_upserts_active_and_tombstones_cancelled():
     # cancelled ids are tombstoned in one bulk UPDATE: args[0] is the id list.
     assert len(db.tombstones) == 1
     assert "e2" in db.tombstones[0][0]
+    # Enrichment ran to completion: the new normalized columns flow through
+    # build_row into the upserted tuple without KeyError, i.e. not silently
+    # swallowed into `skipped`. With an empty FakeDB.fetch, normalize_leave_type
+    # falls back to the raw code and the person stays unmatched.
+    assert len(db.upserts) == 1
+    assert db.upserts[0][_UPSERT_COLS.index("leave_type_normalized")] == "VL"
+    assert db.upserts[0][_UPSERT_COLS.index("person_normalized")] is None
+    assert db.upserts[0][_UPSERT_COLS.index("person_match_source")] == "unmatched"
 
 
 def test_many_cancelled_tombstoned_in_one_round_trip():
