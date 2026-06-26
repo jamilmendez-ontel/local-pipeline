@@ -58,12 +58,15 @@ def load_staging(db, run_id: str, events: list, resolve_fn) -> dict:
             logger.warning(f"  Skipped event {ev.get('id','?')}: {e}")
 
     sql = _upsert_sql()
+    n_batches = (len(rows) + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE
     for i in range(0, len(rows), LOAD_BATCH_SIZE):
         batch = rows[i:i + LOAD_BATCH_SIZE]
         tuples = [tuple(r[c] for c in _UPSERT_COLS) for r in batch]
+        batch_no = i // LOAD_BATCH_SIZE + 1
         retry_db(lambda t=tuples: db.executemany(sql, t),
-                 description=f"upsert stg_calendar_events batch {i // LOAD_BATCH_SIZE + 1}")
+                 description=f"upsert stg_calendar_events batch {batch_no}")
         upserted += len(batch)
+        logger.info(f"  upserted batch {batch_no}/{n_batches} ({upserted} rows)")
 
     logger.info(f"  Upserted {upserted}, tombstoned {tombstoned}, skipped {skipped}")
     return {"upserted": upserted, "tombstoned": tombstoned, "skipped": skipped}
