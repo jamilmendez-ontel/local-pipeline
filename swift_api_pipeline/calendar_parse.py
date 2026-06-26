@@ -77,3 +77,72 @@ def classify_kind(summary: str, leave_type: str | None) -> str:
     if code in KNOWN_LEAVE_CODES or (leave_type and "/" in leave_type):
         return "leave"
     return "other"
+
+
+CONFIDENCE_GATE = 0.8
+
+_BASE_SHAPE_KEYS = (
+    "event_kind", "leave_type", "team", "person", "person_note",
+    "rest_day_of_week", "confidence", "parse_source", "needs_review",
+)
+
+
+def _shape(**kw) -> dict:
+    """Construct a parse result shape with defaults."""
+    base = {k: None for k in _BASE_SHAPE_KEYS}
+    base.update({"parse_source": "deterministic", "needs_review": False,
+                 "confidence": 0.0, "event_kind": "other"})
+    base.update(kw)
+    return base
+
+
+def deterministic_parse(summary: str) -> dict:
+    """Parse a summary into the conformed shape with a calibrated confidence.
+    Confidence is high only when the result is a positively-validated leave
+    row; anything ambiguous returns < CONFIDENCE_GATE for AI fallback."""
+    summary = (summary or "").strip()
+    kind = classify_kind(summary, None)
+
+    # Non-leave kinds: leave-specific fields stay null; confidence high when the
+    # text signal is unambiguous (holiday/birthday/training keywords).
+    if kind in ("holiday", "birthday", "training"):
+        return _shape(event_kind=kind, confidence=0.9)
+    if not summary:
+        return _shape(event_kind="other", confidence=0.9)
+
+    norm = normalize_separators(summary)
+    parts = [p.strip() for p in norm.split(" - ")] if " - " in norm else None
+    if not parts or len(parts) < 3:
+        # 1-2 parts, underscores, or unsplittable: do not trust it.
+        return _shape(event_kind="other", confidence=0.3)
+
+    leave_type = parts[0]
+    team = parts[1]
+    person_raw = " - ".join(parts[2:])
+
+    code_ok = leave_type.upper().replace("/", "") in KNOWN_LEAVE_CODES or "/" in leave_type
+    team_ok = team.upper() in KNOWN_TEAMS
+
+    weekday = canonical_weekday(person_raw)
+    if weekday:
+        person, note = None, None
+    else:
+        person, note = split_note(person_raw)
+
+    # Confidence: both code and team validated -> trust; one unknown -> route to AI.
+    if code_ok and team_ok:
+        confidence = 0.95
+    elif code_ok or team_ok:
+        confidence = 0.6
+    else:
+        confidence = 0.3
+
+    return _shape(
+        event_kind="leave" if code_ok else "other",
+        leave_type=leave_type if code_ok else None,
+        team=team,
+        person=person,
+        person_note=note,
+        rest_day_of_week=weekday if code_ok else None,
+        confidence=confidence,
+    )

@@ -60,3 +60,47 @@ def test_classify_leave_from_known_code():
 def test_classify_other_blank():
     assert classify_kind("", None) == "other"
     assert classify_kind("230701\tRoel Longcop Annual Performance Evaluation", None) == "other"
+
+
+from calendar_parse import deterministic_parse, CONFIDENCE_GATE
+
+
+def test_parse_clean_three_part_high_confidence():
+    r = deterministic_parse("VL - Zeta - Luis")
+    assert r["event_kind"] == "leave"
+    assert r["leave_type"] == "VL"
+    assert r["team"] == "Zeta"
+    assert r["person"] == "Luis"
+    assert r["rest_day_of_week"] is None
+    assert r["confidence"] >= CONFIDENCE_GATE
+
+
+def test_parse_digit_team_now_splits_clean():
+    r = deterministic_parse("VL - CG1- Angelica")
+    assert r["leave_type"] == "VL"
+    assert r["team"] == "CG1"
+    assert r["person"] == "Angelica"
+    assert r["confidence"] >= CONFIDENCE_GATE
+
+
+def test_parse_rest_day_weekday_to_field_not_person():
+    r = deterministic_parse("RD - Alpha - Fri")
+    assert r["event_kind"] == "leave"
+    assert r["leave_type"] == "RD"
+    assert r["team"] == "Alpha"
+    assert r["person"] is None
+    assert r["rest_day_of_week"] == "Fri"
+    assert r["confidence"] >= CONFIDENCE_GATE
+
+
+def test_parse_underscore_low_confidence():
+    # Defect 3: "VL_CRTV_Nicolai" must NOT confidently land in leave_type.
+    r = deterministic_parse("VL_CRTV_Nicolai")
+    assert r["confidence"] < CONFIDENCE_GATE
+
+
+def test_parse_no_separator_noise_low_or_classified():
+    r = deterministic_parse("Ced's Birthday!")
+    assert r["event_kind"] == "birthday"
+    # not leave, and leave_type must be None for a non-leave kind
+    assert r["leave_type"] is None
