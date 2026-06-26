@@ -26,6 +26,8 @@
  *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
+ *   6:00 AM & 6:00 PM — Calendar Leave (twice daily; was 12:30 AM once daily.
+ *               Create via setupCalendarLeaveTriggers())
  *
  * Note: triggerLightPipelines() fires timer at :09, priorities at :13, forms at :17
  * by using Utilities.sleep() for staggering. Apps Script has a 6-min execution limit
@@ -126,10 +128,51 @@ function setupPriorityRefreshTrigger() {
 
 /**
  * Trigger calendar leave pipeline.
- * Schedule this at 12:30 AM EST daily (separate trigger).
+ * Runs TWICE daily at 6:00 AM and 6:00 PM ET. Create the triggers by running
+ * setupCalendarLeaveTriggers() once (it replaces the legacy single 12:30 AM run).
  */
 function triggerCalendarLeave() {
   fireDispatch_('pipeline-calendar-leave');
+}
+
+/**
+ * Run hours (project timezone, ET) for the twice-daily Calendar Leave runs.
+ * Apps Script daily triggers fire within a ~1-hour window around the given hour.
+ */
+var CALENDAR_LEAVE_HOURS = [6, 18];
+
+/**
+ * Idempotently (re)create the twice-daily time-driven triggers for
+ * triggerCalendarLeave() at 6:00 AM and 6:00 PM ET. Run this once from the
+ * Apps Script editor. Re-running it first deletes ALL existing triggers bound
+ * to triggerCalendarLeave — including the legacy single 12:30 AM trigger — so
+ * it is safe to re-run (e.g. after editing CALENDAR_LEAVE_HOURS) and you do NOT
+ * need to delete the old trigger by hand.
+ *
+ * NOTE: atHour() fires in the project's time zone. This assumes the project is
+ * set to America/New_York (ET) like the rest of these schedules — verify via
+ * File > Project Settings > Time zone before relying on the 6 AM / 6 PM times.
+ */
+function setupCalendarLeaveTriggers() {
+  // Remove any existing triggers bound to triggerCalendarLeave to avoid
+  // duplicates (this also clears the legacy 12:30 AM daily trigger).
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerCalendarLeave') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  for (var h = 0; h < CALENDAR_LEAVE_HOURS.length; h++) {
+    ScriptApp.newTrigger('triggerCalendarLeave')
+      .timeBased()
+      .everyDays(1)
+      .atHour(CALENDAR_LEAVE_HOURS[h])
+      .create();
+  }
+
+  Logger.log('Created triggerCalendarLeave triggers at hours (ET): ' +
+             CALENDAR_LEAVE_HOURS.join(', '));
 }
 
 /**
