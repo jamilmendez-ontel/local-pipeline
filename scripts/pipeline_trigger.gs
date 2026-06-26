@@ -10,7 +10,8 @@
  *   2. Paste these functions into a new file (e.g. pipeline_trigger.gs)
  *   3. Create time-driven triggers in Apps Script:
  *      - triggerOrgs()             → Daily, 10:13 PM EST
- *      - triggerLightPipelines()   → Daily, 12:09 AM EST
+ *      - triggerLightPipelines()   → Daily, 12:09 AM EST (Timer only now)
+ *      - triggerForms()            → Daily, 12:17 AM EST (QA Forms — own trigger)
  *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
  *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
  *                                    setupPriorityRefreshTrigger() once to create it
@@ -29,9 +30,13 @@
  *   6:00 AM & 6:00 PM — Calendar Leave (twice daily; was 12:30 AM once daily.
  *               Create via setupCalendarLeaveTriggers())
  *
- * Note: triggerLightPipelines() fires timer at :09, priorities at :13, forms at :17
- * by using Utilities.sleep() for staggering. Apps Script has a 6-min execution limit
- * so the 8-min total stagger fits within one invocation.
+ * Note: QA Forms used to be staggered inside triggerLightPipelines() via an
+ * 8-min Utilities.sleep() after Timer. That was fragile — if the trigger
+ * execution ended before the sleep completed, the forms dispatch was silently
+ * dropped (this happened after the 2026-06-22 redeploy: Timer kept firing but
+ * QA Forms stopped from 2026-06-23 onward). QA Forms now has its own dedicated
+ * time-driven trigger (triggerForms, 12:17 AM EST), so each pipeline fires from
+ * its own short execution with no in-process sleep.
  */
 
 var REPO = 'jamilmendez-ontel/local-pipeline';
@@ -44,26 +49,29 @@ function triggerOrgs() {
 }
 
 /**
- * Trigger the daily light pipelines with staggered timing.
+ * Trigger the daily Timer pipeline.
  * Schedule this at 12:09 AM EST daily.
  *
- * 12:09 AM — Timer fires immediately
- * 12:17 AM — QA Forms (8 min delay from start)
- *
- * NOTE: User Priorities is NO LONGER fired here. It now runs on its own
- * high-frequency trigger every 10 min (see triggerPriorities) plus a daily
- * full-export run (see triggerPrioritiesDaily).
- *
- * Apps Script time-driven triggers have ±1 min jitter, but the
- * relative spacing between dispatches is exact.
+ * NOTE: This used to also fire QA Forms after an 8-min Utilities.sleep() and
+ * User Priorities before that. Both have been split out:
+ *   - QA Forms      → triggerForms() on its own 12:17 AM trigger
+ *   - User Priorities → triggerPriorities() (every 10 min) + triggerPrioritiesDaily()
+ * There is no longer any in-process sleep here, so the execution is short and
+ * cannot silently drop a later dispatch.
  */
 function triggerLightPipelines() {
-  // Timer — fires immediately
   fireDispatch_('pipeline-timer');
-  Logger.log('Waiting 8 minutes before triggering forms...');
+}
 
-  // QA Forms — 8 min after timer
-  Utilities.sleep(8 * 60 * 1000);
+/**
+ * Trigger the daily QA Forms pipeline.
+ * Schedule this at 12:17 AM EST daily (its own time-driven trigger).
+ *
+ * Previously fired from inside triggerLightPipelines() via an 8-min sleep after
+ * Timer; that staggering was fragile and stopped firing after 2026-06-22. Each
+ * pipeline now has its own dedicated trigger.
+ */
+function triggerForms() {
   fireDispatch_('pipeline-forms');
 }
 

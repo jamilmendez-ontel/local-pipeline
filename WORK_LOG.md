@@ -1,5 +1,35 @@
 # AI Projects - Work Log
 
+## Session: 2026-06-25 — QA Forms pipeline stalled (trigger fix)
+
+### Symptom
+`data_staging.stg_qa_form` / `analytics.v_qa_forms` frozen at 2026-06-22 00:49 ET (3 days stale). User noticed "last refresh is 6-22".
+
+### Root cause (Apps Script trigger, not the pipeline)
+- `forms_extract` ran successfully daily through 6-22, then **zero** run records on 6-23/24/25 — the job was never invoked, not failing.
+- GHA confirms it: `pipeline-forms` workflow received **no `repository_dispatch`** after 2026-06-22 04:29 UTC, while `pipeline-timer` (fired by the SAME Apps Script function) kept firing daily through 6-25.
+- Both are dispatched by `triggerLightPipelines()` in `scripts/pipeline_trigger.gs`: Timer fires immediately (works), QA Forms fired only after `Utilities.sleep(8 * 60 * 1000)`. After the 6-22 redeploy (commits 9bc1fc8 retire-discrepancies + 6e2ed50 priorities refactor restructured the function), the post-sleep dispatch stopped executing, silently dropping QA Forms.
+
+### Fix
+Split QA Forms onto its own dedicated time-driven trigger, removing the in-process sleep:
+- `triggerLightPipelines()` now fires Timer only (no sleep).
+- New `triggerForms()` fires `pipeline-forms` from its own short execution (matches the triggerOrgs/triggerCalendarLeave/triggerAssetTasks pattern).
+- Corrected the self-contradictory "6-min limit / 8-min sleep" header note.
+- Audited the rest of `pipeline_trigger.gs`: no other trigger used sleep-staggering, so QA Forms was the only pipeline exposed to this failure mode.
+
+### Manual steps required (code is inert until deployed)
+1. Paste updated `pipeline_trigger.gs` into the Apps Script project.
+2. Create a new time-driven trigger: function `triggerForms`, daily 12:00–1:00 AM EST.
+3. Leave the existing `triggerLightPipelines` trigger (now Timer-only) in place.
+4. (Optional) Check Apps Script Executions log for `triggerLightPipelines` 6-23→6-25 to confirm why the sleep was cut short.
+
+Backfill of the 3 missing days deferred per user (not yet run).
+
+### Files touched
+- `scripts/pipeline_trigger.gs`
+
+---
+
 ## Session: 2026-06-16 — asset_did matching overhaul (timer + QA), migration 104
 
 ### Context (02:00–02:30 ET)
