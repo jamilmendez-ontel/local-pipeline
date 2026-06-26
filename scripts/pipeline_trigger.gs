@@ -12,6 +12,7 @@
  *      - triggerOrgs()             → Daily, 10:13 PM EST
  *      - triggerLightPipelines()   → Daily, 12:09 AM EST (Timer only now)
  *      - triggerForms()            → Daily, 12:17 AM EST (QA Forms — own trigger)
+ *      - triggerOpenItemsData()    → Daily, 02:00 AM EST (Open Items Report Data)
  *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
  *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
  *                                    setupPriorityRefreshTrigger() once to create it
@@ -27,6 +28,8 @@
  *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
+ *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
+ *               run after User Priorities is fresh. Create via own trigger.)
  *   6:00 AM & 6:00 PM — Calendar Leave (twice daily; was 12:30 AM once daily.
  *               Create via setupCalendarLeaveTriggers())
  *
@@ -73,6 +76,26 @@ function triggerLightPipelines() {
  */
 function triggerForms() {
   fireDispatch_('pipeline-forms');
+}
+
+/**
+ * Trigger the Open Items Report Data pipeline (targeted_asset_tasks +
+ * targeted_task_requirements -> stg_targeted_asset_tasks /
+ * stg_targeted_task_requirements). Schedule this at ~02:00 AM EST daily on its
+ * own time-driven trigger.
+ *
+ * Run it AFTER User Priorities is fresh: targeted_task_requirements reads
+ * stg_user_priorities to decide which task_dids to fetch requirements for.
+ * Priorities refreshes every 10 min (triggerPriorities), so any time around
+ * 02:00 AM is safe.
+ *
+ * NOTE: this trigger previously existed only in the deployed Apps Script editor
+ * and was never committed here, so it was lost in the 2026-06-22 redeploy and
+ * the Open Items data silently went stale from 2026-06-23. It now lives in
+ * source so it can be redeployed/recreated.
+ */
+function triggerOpenItemsData() {
+  fireDispatch_('pipeline-open-items-data');
 }
 
 /**
@@ -298,6 +321,7 @@ function testAllDispatches() {
   fireDispatch_('pipeline-timer');
   fireDispatch_('pipeline-priorities');
   fireDispatch_('pipeline-forms');
+  fireDispatch_('pipeline-open-items-data');
   fireDispatch_('pipeline-calendar-leave');
-  Logger.log('All 5 dispatches fired — check GitHub Actions.');
+  Logger.log('All 6 dispatches fired — check GitHub Actions.');
 }

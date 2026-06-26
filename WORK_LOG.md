@@ -25,6 +25,27 @@ Split QA Forms onto its own dedicated time-driven trigger, removing the in-proce
 
 Backfill of the 3 missing days deferred per user (not yet run).
 
+### Second pipeline with the same problem: Open Items Report Data
+Checked whether any other pipeline was similarly affected. Cross-referenced all 15
+workflow `repository_dispatch` types against the event types the committed
+`pipeline_trigger.gs` actually fires:
+- **`pipeline-open-items-data`** (targeted_asset_tasks + targeted_task_requirements)
+  has the identical signature as forms: clean daily success at 02:36 ET through 6-22,
+  then zero dispatches. `stg_targeted_asset_tasks` / `stg_targeted_task_requirements`
+  frozen at 6-22 02:44 ET → the Open Items Report (Mon/Fri) ran on stale data.
+- Root cause: its trigger function `triggerOpenItemsData` **was never committed** — it
+  existed only in the deployed Apps Script editor and was lost in the 6-22 redeploy.
+  Same date as forms because both were collateral of the 6-22 redeploy.
+- Added `triggerOpenItemsData()` to the committed source (fires `pipeline-open-items-data`,
+  ~02:00 AM EST, after priorities) so it's recreatable; updated header schedule + testAllDispatches.
+- All other dispatch types missing from the trigger are fired by other mechanisms
+  (downstream chain, own cron, cross-repo, app) and are fresh as of 6-25.
+- `asset_tasks_gc_extract` is also stale (since 6-03) but that's the separately-known
+  paused GC pilot failing on timeouts, NOT this trigger-drop bug.
+
+### Manual steps (in addition to triggerForms above)
+- Create a time-driven trigger for `triggerOpenItemsData`, daily ~02:00 AM EST.
+
 ### Files touched
 - `scripts/pipeline_trigger.gs`
 
