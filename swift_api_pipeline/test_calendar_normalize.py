@@ -66,3 +66,47 @@ def test_team_unmapped_label_is_null():
 
 def test_team_no_emp_no_team():
     assert normalize_team(None, None, TEAM_MAP) == (None, None)
+
+
+from calendar_normalize import build_employee_index, match_person_deterministic
+
+EMPLOYEES = [
+    {"emp_id": "E1", "full_name": "Edward Cruz", "first_name": "Edward", "nickname": "Ed",
+     "carrier_group": "CG1 - Verizon", "cluster": "Alpha"},
+    {"emp_id": "E2", "full_name": "Edwin Santos", "first_name": "Edwin", "nickname": "Ed",
+     "carrier_group": "CG2 - AT&T/DISH", "cluster": "Epsilon"},
+    {"emp_id": "E3", "full_name": "Prince Uy", "first_name": "Prince", "nickname": None,
+     "carrier_group": "Creatives", "cluster": None},
+]
+EMP_INDEX = build_employee_index(EMPLOYEES)
+TEAM_MAP2 = {"cg1": ("CG1 - Verizon", "carrier_group"), "cg2": ("CG2 - AT&T/DISH", "carrier_group"),
+             "crtv": ("Creatives", "carrier_group")}
+
+
+def test_index_keys_lowercased():
+    assert "ed" in EMP_INDEX and "prince" in EMP_INDEX and "edward cruz" in EMP_INDEX
+
+
+def test_match_unique_first_name():
+    emp, src = match_person_deterministic("Prince", "CRTV", EMP_INDEX, TEAM_MAP2)
+    assert src == "exact" and emp["emp_id"] == "E3"
+
+
+def test_match_ambiguous_nickname_disambiguated_by_team():
+    emp, src = match_person_deterministic("Ed", "CG2", EMP_INDEX, TEAM_MAP2)
+    assert src == "exact" and emp["emp_id"] == "E2"
+
+
+def test_match_ambiguous_without_team_signal():
+    emp, src = match_person_deterministic("Ed", "Nonsense", EMP_INDEX, TEAM_MAP2)
+    assert emp is None and src == "ambiguous"
+
+
+def test_match_unmatched():
+    emp, src = match_person_deterministic("Zzz", "CG1", EMP_INDEX, TEAM_MAP2)
+    assert emp is None and src == "unmatched"
+
+
+def test_match_none_person():
+    emp, src = match_person_deterministic(None, "CG1", EMP_INDEX, TEAM_MAP2)
+    assert emp is None and src == "unmatched"
