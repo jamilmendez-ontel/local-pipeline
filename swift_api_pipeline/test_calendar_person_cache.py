@@ -55,7 +55,7 @@ def test_resolve_cache_hit_skips_match():
 def test_resolve_unmatched_calls_ai_then_caches():
     db = FakeDB()
     def ai_fn(person_raw, team_raw, candidate_names):
-        return {"emp_id": "E1", "person_normalized": "Edward Cruz", "confidence": 0.7}
+        return {"person_normalized": "Edward Cruz", "confidence": 0.7}
     r = resolve_person(db, "Eddie", "CG1", EMP_INDEX, TEAM_MAP, ai_fn=ai_fn)
     assert r["emp_id"] == "E1" and r["match_source"] == "ai"
     assert db.writes == 1
@@ -73,3 +73,12 @@ def test_resolve_null_person_no_write():
     r = resolve_person(db, None, "CG1", EMP_INDEX, TEAM_MAP)
     assert r["emp_id"] is None and r["match_source"] == "unmatched"
     assert db.writes == 0
+
+
+def test_resolve_team_none_cache_hit():
+    db = FakeDB()
+    db.rows[("Prince", "")] = {"person_raw": "Prince", "team_raw": "",
+        "emp_id": "E3", "person_normalized": "Prince Uy", "confidence": 1.0,
+        "match_source": "exact"}
+    r = resolve_person(db, "Prince", None, EMP_INDEX, TEAM_MAP)
+    assert r["emp_id"] == "E3" and db.writes == 0

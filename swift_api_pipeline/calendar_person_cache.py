@@ -72,7 +72,7 @@ def resolve_person(db, person_raw, team_raw, emp_index, team_map, ai_fn=extract_
         return {"emp_id": cached["emp_id"], "person_normalized": cached["person_normalized"],
                 "confidence": cached["confidence"], "match_source": cached["match_source"]}
 
-    emp, source = match_person_deterministic(person_raw, team_raw, emp_index, team_map)
+    emp, _source = match_person_deterministic(person_raw, team_raw, emp_index, team_map)
     if emp is not None:
         result = {"emp_id": emp.get("emp_id"), "person_normalized": emp.get("full_name"),
                   "confidence": 1.0, "match_source": "exact"}
