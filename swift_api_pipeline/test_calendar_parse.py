@@ -48,6 +48,11 @@ def test_classify_birthday():
     assert classify_kind("Ced's Birthday!", None) == "birthday"
 
 
+def test_classify_birthday_leave_is_not_birthday_noise():
+    # "Birthday Leave" is the BL leave type, not a birthday marker.
+    assert classify_kind("Lam - Birthday Leave", None) != "birthday"
+
+
 def test_classify_training():
     assert classify_kind("AT&T COP Refresher Course", None) == "training"
     assert classify_kind("Swift Projects Training Walkthrough", None) == "training"

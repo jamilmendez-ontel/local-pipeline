@@ -69,7 +69,10 @@ def classify_kind(summary: str, leave_type: str | None) -> str:
         return "other"
     if "holiday" in s or summary.startswith(("PH:", "PH Holiday:", "US:")):
         return "holiday"
-    if "birthday" in s or "bday" in s or "b-day" in s or "anniversary" in s:
+    # "Birthday Leave" / "bday leave" is a real leave type (BL), not a birthday
+    # marker like "Ced's Birthday!" -- do not classify those as birthday noise.
+    if (("birthday" in s or "bday" in s or "b-day" in s or "anniversary" in s)
+            and "birthday leave" not in s and "bday leave" not in s):
         return "birthday"
     if any(k in s for k in ("refresher", "training", "walkthrough", "course", "webinar")):
         return "training"
