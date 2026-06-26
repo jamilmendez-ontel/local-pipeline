@@ -165,12 +165,17 @@ jobs:
         working-directory: ${{ env.PIPELINE_DIR }}
         run: python -u main.py --pipeline analytics --no-email
 
-      - name: Dispatch downstream workflows (asset-tasks-export, invoicing)
+      - name: Dispatch downstream workflows (asset-tasks-export, invoicing, open-items-data)
         if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
         run: |
           # pipeline-invoicing runs here (after the worklist refresh) so the quote
           # MVs its tail rebuilds use fresh worklist + freshly-loaded invoice data.
-          for event in pipeline-asset-tasks-export pipeline-invoicing; do
+          # pipeline-open-items-data is fired here too so the OIR data refresh rides
+          # this reliable nightly run instead of a standalone Apps Script timer (which
+          # was silently lost on 2026-06-22, stalling OIR for days). It has no data
+          # dependency on asset-tasks — it runs its own OIR-scoped Swift extract and
+          # reads stg_user_priorities (refreshed every 10 min, always fresh).
+          for event in pipeline-asset-tasks-export pipeline-invoicing pipeline-open-items-data; do
             response=$(curl -sw '\n%{http_code}' -X POST \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
