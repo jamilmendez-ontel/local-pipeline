@@ -59,3 +59,21 @@ def split_note(person_raw: str) -> tuple[str | None, str | None]:
         head, tail = person_raw.split(" - ", 1)
         return head.strip(), tail.strip()
     return person_raw.strip(), None
+
+
+def classify_kind(summary: str, leave_type: str | None) -> str:
+    """Coarse event-kind classification. Order matters: holiday/birthday/training
+    are recognized by summary text; a known leave code wins otherwise."""
+    s = (summary or "").lower()
+    if not summary or not summary.strip():
+        return "other"
+    if "holiday" in s or summary.startswith(("PH:", "PH Holiday:", "US:")):
+        return "holiday"
+    if "birthday" in s or "bday" in s or "b-day" in s or "anniversary" in s:
+        return "birthday"
+    if any(k in s for k in ("refresher", "training", "walkthrough", "course", "webinar")):
+        return "training"
+    code = (leave_type or "").upper().replace("/", "")
+    if code in KNOWN_LEAVE_CODES or (leave_type and "/" in leave_type):
+        return "leave"
+    return "other"

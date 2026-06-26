@@ -1,7 +1,7 @@
 """Unit tests for the deterministic calendar parser. Run:
-    cd swift_api_pipeline && python test_calendar_parse.py
+    cd swift_api_pipeline && python -m pytest test_calendar_parse.py -v
 """
-from calendar_parse import normalize_separators, canonical_weekday, split_note
+from calendar_parse import normalize_separators, canonical_weekday, split_note, classify_kind
 
 
 def test_normalize_digit_team_dash():
@@ -37,3 +37,26 @@ def test_split_note_unparenthesized_trailing():
 
 def test_split_note_plain_name():
     assert split_note("Luis") == ("Luis", None)
+
+
+def test_classify_holiday():
+    assert classify_kind("PH Holiday: Labor Day", "PH") == "holiday"
+    assert classify_kind("Christmas Holiday (Company-Wide)", None) == "holiday"
+
+
+def test_classify_birthday():
+    assert classify_kind("Ced's Birthday!", None) == "birthday"
+
+
+def test_classify_training():
+    assert classify_kind("AT&T COP Refresher Course", None) == "training"
+    assert classify_kind("Swift Projects Training Walkthrough", None) == "training"
+
+
+def test_classify_leave_from_known_code():
+    assert classify_kind("VL - Zeta - Luis", "VL") == "leave"
+
+
+def test_classify_other_blank():
+    assert classify_kind("", None) == "other"
+    assert classify_kind("230701\tRoel Longcop Annual Performance Evaluation", None) == "other"
