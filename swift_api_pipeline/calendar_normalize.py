@@ -1,0 +1,19 @@
+"""Pure normalization functions for calendar events. No DB, no network: all
+lookups are passed in, so these are unit-testable in isolation."""
+import re
+
+
+def normalize_leave_type(code, code_map):
+    """Map a leave code to (label, category). Case-insensitive. Compound codes
+    (e.g. 'UT/SL') join part labels with ' + ' and category 'compound'. Unknown
+    codes fall back to the raw code with category None."""
+    if not code or not code.strip():
+        return None, None
+    raw = code.strip()
+    key = raw.upper().replace(" ", "")
+    if "/" in key:
+        parts = [p for p in key.split("/") if p]
+        labels = [(code_map.get(p, (None, None))[0] or p) for p in parts]
+        return " + ".join(labels), "compound"
+    label, category = code_map.get(key, (None, None))
+    return (label or raw), category
