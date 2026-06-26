@@ -28,9 +28,16 @@ SELECT e.*, gs::date AS leave_date
 FROM analytics.v_calendar_leave e
 CROSS JOIN LATERAL generate_series(e.start_date, e.end_date, interval '1 day') gs;
 
+-- Repoint every metadata row (table-level + per-column) to the new table name.
 UPDATE agent.schema_metadata
-SET table_name = 'raw_calendar_events',
-    description = description || ' [renamed from raw_calendar_leave 2026-06-25]'
+SET table_name = 'raw_calendar_events'
 WHERE schema_name = 'data_raw' AND table_name = 'raw_calendar_leave';
+
+-- Append the rename note to the table-level row only; column descriptions
+-- should not carry a table-rename note.
+UPDATE agent.schema_metadata
+SET description = description || ' [renamed from raw_calendar_leave 2026-06-25]'
+WHERE schema_name = 'data_raw' AND table_name = 'raw_calendar_events'
+  AND column_name IS NULL;
 
 COMMIT;

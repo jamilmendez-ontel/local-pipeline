@@ -53,13 +53,13 @@ jobs:
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
           echo "${{ secrets.CALENDAR_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/calendar_token.pickle
 
-      - name: Run calendar leave (with retry)
+      - name: Run calendar events (with retry)
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
-          python -u extract_calendar_leave.py || {
-            echo "Calendar leave failed, retrying after 2 minutes..."
+          python -u extract_calendar_events.py || {
+            echo "Calendar events failed, retrying after 2 minutes..."
             sleep 120
-            python -u extract_calendar_leave.py
+            python -u extract_calendar_events.py
           }
 
       - name: Upload logs on failure
