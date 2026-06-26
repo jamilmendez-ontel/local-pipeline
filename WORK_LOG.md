@@ -43,30 +43,29 @@ workflow `repository_dispatch` types against the event types the committed
 - `asset_tasks_gc_extract` is also stale (since 6-03) but that's the separately-known
   paused GC pilot failing on timeouts, NOT this trigger-drop bug.
 
-### Manual steps (in addition to triggerForms above)
-- Create a time-driven trigger for `triggerForms`, daily ~12:17 AM EST.
-- OIR data refresh: NO Apps Script trigger needed anymore — see follow-up below.
+### Trigger design — evaluated event-driven, kept standalone 2 AM timer
+Considered firing OIR as a downstream event off the nightly asset-tasks run (briefly
+shipped, then reverted). Decision: keep OIR on its **own standalone Apps Script time
+trigger** (~02:00 AM EST), matching every other pipeline (Orgs/Timer/Calendar).
+Reasoning:
+- GHA cron is off the table by convention (unreliable → we use Apps Script triggers).
+- The 6-22 failure was NOT the standalone-timer pattern (Orgs/Timer/Calendar use it and
+  never broke). It was solely that `triggerOpenItemsData` was never committed, so a
+  redeploy from source wiped it. Fix = keep the function committed (done) — then the
+  timer is as reliable as the others.
+- Standalone keeps OIR fully decoupled and runs it in isolation (~2 AM, no concurrency
+  with the asset-tasks/invoicing tail), vs. the event approach which coupled OIR to
+  asset-tasks' health and overlapped its tail jobs.
+- OIR has no real data dependency on asset-tasks anyway: it runs its own report-scoped
+  `targeted_asset_tasks` extract and reads `stg_user_priorities` (fresh every 10 min).
 
-### Follow-up (same session) — OIR made event-driven instead of time-triggered
-Per the decision to stop relying on a lone Apps Script timer, `pipeline-open-items-data`
-is now fired as a **downstream event** at the end of the nightly Asset Tasks run,
-the same way `pipeline-asset-tasks-export` / `pipeline-invoicing` already are. It
-has no data dependency on asset-tasks (it runs its own OIR-scoped Swift extract and
-reads `stg_user_priorities`, refreshed every 10 min) — asset-tasks is just used as a
-reliable nightly clock, removing the single point of failure that caused this outage.
-The Mon/Fri report email is unchanged (still chains off OIR end-of-run).
-- `pipeline-asset-tasks.yml`: added `pipeline-open-items-data` to the downstream dispatch loop.
-- `pipeline-open-items-data.yml`: header updated (downstream-event trigger, not Apps Script timer).
-- `pipeline_trigger.gs`: removed the `triggerOpenItemsData()` function + its setup/schedule
-  entries; replaced with a note. Do NOT create an Apps Script trigger for OIR.
-- ACTION for the deployed Apps Script: delete any existing `triggerOpenItemsData` time
-  trigger (and the function) so it doesn't double-fire alongside the asset-tasks downstream
-  dispatch. The `concurrency: pipeline-open-items-data` group makes a double-run harmless, but it's wasteful.
+### Manual steps (in addition to triggerForms above)
+- Create a time-driven trigger for `triggerOpenItemsData`, daily ~02:00 AM EST, in the
+  same Apps Script project as the Timer/Orgs triggers. The function is now committed, so
+  a future redeploy will not lose it.
 
 ### Files touched
 - `scripts/pipeline_trigger.gs`
-- `.github/workflows/pipeline-asset-tasks.yml`
-- `.github/workflows/pipeline-open-items-data.yml`
 
 ---
 

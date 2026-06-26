@@ -19,15 +19,10 @@ on:
     types: [pipeline-open-items-data]
   workflow_dispatch:
 
-# Scheduled trigger: fired as a downstream event at the end of the nightly
-# pipeline-asset-tasks run (see its "Dispatch downstream workflows" step), NOT
-# by a standalone Apps Script timer. The old Apps Script triggerOpenItemsData
-# time trigger was a single point of failure — it was silently lost on
-# 2026-06-22 and OIR went stale for days with no backstop. Riding the
-# asset-tasks completion event removes that lone trigger.
-# (workflow_dispatch + repository_dispatch remain for manual / reply-responder runs.)
-# End-of-run, this workflow chains to open-items-report-email in
-# report-automation (Mon/Fri only) so the email fires when the data is fresh.
+# No GHA cron — the Apps Script triggerOpenItemsData (~02:00 ET) is the
+# sole scheduled trigger. End-of-run, this workflow chains to
+# open-items-report-email in report-automation (Mon/Fri only) so the
+# email fires when the data is fresh, not on an independent schedule.
 
 concurrency:
   group: pipeline-open-items-data

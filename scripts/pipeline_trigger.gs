@@ -12,6 +12,7 @@
  *      - triggerOrgs()             → Daily, 10:13 PM EST
  *      - triggerLightPipelines()   → Daily, 12:09 AM EST (Timer only now)
  *      - triggerForms()            → Daily, 12:17 AM EST (QA Forms — own trigger)
+ *      - triggerOpenItemsData()    → Daily, 02:00 AM EST (Open Items Report Data)
  *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
  *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
  *                                    setupPriorityRefreshTrigger() once to create it
@@ -24,15 +25,11 @@
  *   12:13 AM  — User Priorities FULL run (refresh + Excel export + shared-Drive upload)
  *   every 10m — User Priorities DB refresh only (extract + transform; no export)
  *   12:01 AM  — Asset Tasks (post-local-batch-retirement; fires dispatch_downstream=true
- *               so downstream workflows run at end-of-pipeline — including
- *               pipeline-open-items-data, see below)
+ *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
- *   (no timer) — Open Items Report Data: NOT triggered from here. It is fired as
- *               a downstream event at the end of the nightly Asset Tasks run
- *               (pipeline-asset-tasks.yml "Dispatch downstream workflows" step).
- *               Do NOT create an Apps Script time trigger for it — the old lone
- *               timer was a single point of failure (lost 2026-06-22).
+ *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
+ *               run after User Priorities is fresh. Create via own trigger.)
  *   6:00 AM & 6:00 PM — Calendar Leave (twice daily; was 12:30 AM once daily.
  *               Create via setupCalendarLeaveTriggers())
  *
@@ -81,15 +78,29 @@ function triggerForms() {
   fireDispatch_('pipeline-forms');
 }
 
-// Open Items Report Data (pipeline-open-items-data) is intentionally NOT
-// triggered from here. It is fired as a downstream event at the end of the
-// nightly Asset Tasks run (pipeline-asset-tasks.yml "Dispatch downstream
-// workflows" step), so it rides a reliable pipeline's completion instead of a
-// standalone Apps Script timer. The old lone triggerOpenItemsData time trigger
-// existed only in the deployed editor, was never committed, was lost in the
-// 2026-06-22 redeploy, and stalled OIR for days with no backstop. Do not
-// reintroduce an Apps Script trigger for it. For an ad-hoc refresh, use the
-// workflow's workflow_dispatch button in the GitHub Actions UI.
+/**
+ * Trigger the Open Items Report Data pipeline (targeted_asset_tasks +
+ * targeted_task_requirements -> stg_targeted_asset_tasks /
+ * stg_targeted_task_requirements). Schedule this at ~02:00 AM EST daily on its
+ * own time-driven trigger.
+ *
+ * Run it AFTER User Priorities is fresh: targeted_task_requirements reads
+ * stg_user_priorities to decide which task_dids to fetch requirements for.
+ * Priorities refreshes every 10 min (triggerPriorities), so any time around
+ * 02:00 AM is safe.
+ *
+ * ROOT CAUSE of the 6-22 outage — DO NOT REMOVE THIS FUNCTION FROM SOURCE:
+ * this function previously existed ONLY in the deployed Apps Script editor and
+ * was never committed here. When the project was re-pasted from committed source
+ * on 2026-06-22 the function vanished, its time trigger had nothing to bind to,
+ * and OIR silently went stale from 2026-06-23. The standalone-timer pattern is
+ * fine (Orgs/Timer/Calendar all use it and never broke) — the ONLY reason OIR
+ * broke is that its function wasn't in source. Keep it committed and a redeploy
+ * can never lose it again. Re-create the time trigger once in the Apps Script UI.
+ */
+function triggerOpenItemsData() {
+  fireDispatch_('pipeline-open-items-data');
+}
 
 /**
  * Trigger the User Priorities DB refresh ONLY (extract + transform).
