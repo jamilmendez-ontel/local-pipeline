@@ -6,7 +6,6 @@ Usage:
     python extract_calendar_events.py                 # incremental
     python extract_calendar_events.py --full-refresh  # re-resolve all raw
 """
-import os
 import uuid
 import argparse
 from datetime import datetime, timezone
@@ -65,9 +64,11 @@ def main(full_refresh: bool = False):
         counts = load_staging(db, run_id, events, resolve_fn=resolve)
         logger.info(f"Load: {counts}")
 
-    # Reconcile on full listings only (updated_min is None == full window).
-    if updated_min is None:
-        live_ids = {ev.get("id") for ev in events}
+    # Reconcile on full listings only (updated_min is None == full window),
+    # and never on an empty listing (a transient empty API response must not
+    # soft-delete everything).
+    if updated_min is None and events:
+        live_ids = {ev.get("id") for ev in events if ev.get("id")}
         reconcile(db, live_ids)
 
     close_db()

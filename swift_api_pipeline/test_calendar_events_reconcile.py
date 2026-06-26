@@ -1,5 +1,5 @@
 """Test reconciliation soft-deletes absent events. Run:
-    cd swift_api_pipeline && venv/Scripts/python test_calendar_events_reconcile.py
+    cd swift_api_pipeline && venv/Scripts/python -m pytest test_calendar_events_reconcile.py -v
 """
 from calendar_events_reconcile import reconcile
 
