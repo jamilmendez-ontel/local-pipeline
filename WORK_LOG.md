@@ -78,6 +78,26 @@ function.)
   (verified the function → fireDispatch_ → GitHub → workflow chain works end-to-end).
 - No new trigger needed — the existing ~2:36 AM trigger now finds the function and
   succeeds. Future redeploys can't lose it since it's committed.
+- VERIFIED: run `28223265450` completed success; `stg_targeted_asset_tasks` = 181,958
+  rows and `stg_targeted_task_requirements` = 874 rows, both loaded 2026-06-26 03:18 ET.
+  OIR data current again.
+
+### Drift audit (6-26) — clean
+Audited for other editor-only Apps Script functions that could break the same way
+(can't read live editors, so used: committed snapshots vs canonical `.gs`, active
+dispatch-event coverage, and pipeline freshness):
+- `pipeline_trigger.gs`: live snapshot has ZERO functions missing from canonical source
+  (triggerOpenItemsData was the only one; now committed). No remaining drift.
+- Every active `repository_dispatch` event type maps to a committed dispatcher (Apps
+  Script function or a workflow downstream-chain). `asset_tasks_trigger.gs.txt` is a
+  superseded snapshot (its dispatches now in `pipeline_trigger.gs`).
+- Freshness: all pipelines current; `forms_extract` ran 00:08 ET (QA Forms fix live).
+  Only non-current are expected: timer_discrepancies (retired 6-22), asset_tasks_gc
+  (paused GC pilot), calendar_leave (under active restructuring in another branch).
+- Definitive live check left to user: Apps Script Triggers dashboard — any trigger with
+  a non-zero failure-rate % (like OIR's 57.14%) reveals another erroring trigger.
+- Decision rule recorded for future Apps Script edits: replace the WHOLE `.gs` file in
+  the cloud editor from committed source (never paste a fragment) so repo = cloud.
 
 ### Files touched
 - `scripts/pipeline_trigger.gs`
