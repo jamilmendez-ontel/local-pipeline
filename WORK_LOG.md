@@ -8,7 +8,9 @@
 ### Root cause (Apps Script trigger, not the pipeline)
 - `forms_extract` ran successfully daily through 6-22, then **zero** run records on 6-23/24/25 — the job was never invoked, not failing.
 - GHA confirms it: `pipeline-forms` workflow received **no `repository_dispatch`** after 2026-06-22 04:29 UTC, while `pipeline-timer` (fired by the SAME Apps Script function) kept firing daily through 6-25.
-- Both are dispatched by `triggerLightPipelines()` in `scripts/pipeline_trigger.gs`: Timer fires immediately (works), QA Forms fired only after `Utilities.sleep(8 * 60 * 1000)`. After the 6-22 redeploy (commits 9bc1fc8 retire-discrepancies + 6e2ed50 priorities refactor restructured the function), the post-sleep dispatch stopped executing, silently dropping QA Forms.
+- Both are dispatched by `triggerLightPipelines()` in `scripts/pipeline_trigger.gs`: Timer fires immediately (works), QA Forms fired only after `Utilities.sleep(8 * 60 * 1000)`.
+- **CONFIRMED via Apps Script execution log (6-26):** every run 6-23→6-25 logged `Dispatched pipeline-timer successfully` → `Waiting 8 minutes...` → `Error: Exception: Specified sleep period exceeds maximum. at triggerLightPipelines(pipeline_trigger:64:13)`. The function threw at the sleep call, after firing Timer, before the Forms dispatch. `triggerLightPipelines` failure rate was 42.86% = exactly those 3 days.
+- **Real root cause:** `Utilities.sleep()` has a per-call MAXIMUM (a few minutes; ~5 min / 300,000 ms). The old code used TWO 4-min sleeps (each under the cap) so Forms fired fine. The 6-22 priorities refactor (`6e2ed50`) removed the middle Priorities dispatch and collapsed them into ONE 8-min sleep, which EXCEEDS the cap and throws. (NOT the 6-min/30-min execution-time limit — that was a wrong turn in diagnosis; the cap that bit us is `Utilities.sleep`'s own.)
 
 ### Fix
 Split QA Forms onto its own dedicated time-driven trigger, removing the in-process sleep:
