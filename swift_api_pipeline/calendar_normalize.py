@@ -31,7 +31,7 @@ def normalize_team(emp: dict | None, team_raw: str | None, team_map: dict) -> tu
     return None, None
 
 
-def build_employee_index(emp_rows):
+def build_employee_index(emp_rows: list[dict]) -> dict[str, list[dict]]:
     """Map lower(name) -> list of employee dicts, indexing nickname, first_name,
     and full_name. Include resigned employees (historical leave references them)."""
     idx = {}
@@ -42,7 +42,7 @@ def build_employee_index(emp_rows):
     return idx
 
 
-def match_person_deterministic(person_raw, team_raw, emp_index, team_map):
+def match_person_deterministic(person_raw: str | None, team_raw: str | None, emp_index: dict[str, list[dict]], team_map: dict) -> tuple[dict | None, str]:
     """Match a calendar person to an employee. Returns (emp, source) where source
     is exact / ambiguous / unmatched. Multiple name matches are disambiguated by
     the row's team (candidate carrier_group or cluster equals the team canonical)."""

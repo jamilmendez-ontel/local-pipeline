@@ -1,7 +1,12 @@
 """Unit tests for calendar normalization pure functions. Run:
     cd swift_api_pipeline && venv/Scripts/python -m pytest test_calendar_normalize.py -v
 """
-from calendar_normalize import normalize_leave_type, normalize_team
+from calendar_normalize import (
+    normalize_leave_type,
+    normalize_team,
+    build_employee_index,
+    match_person_deterministic,
+)
 
 CODE_MAP = {
     "VL": ("Vacation Leave", "leave"),
@@ -68,8 +73,6 @@ def test_team_no_emp_no_team():
     assert normalize_team(None, None, TEAM_MAP) == (None, None)
 
 
-from calendar_normalize import build_employee_index, match_person_deterministic
-
 EMPLOYEES = [
     {"emp_id": "E1", "full_name": "Edward Cruz", "first_name": "Edward", "nickname": "Ed",
      "carrier_group": "CG1 - Verizon", "cluster": "Alpha"},
@@ -94,6 +97,12 @@ def test_match_unique_first_name():
 
 def test_match_ambiguous_nickname_disambiguated_by_team():
     emp, src = match_person_deterministic("Ed", "CG2", EMP_INDEX, TEAM_MAP2)
+    assert src == "exact" and emp["emp_id"] == "E2"
+
+
+def test_match_ambiguous_disambiguated_by_cluster():
+    team_map = {"eps": ("Epsilon", "cluster")}
+    emp, src = match_person_deterministic("Ed", "eps", EMP_INDEX, team_map)
     assert src == "exact" and emp["emp_id"] == "E2"
 
 
