@@ -64,7 +64,9 @@ per-read join cost; and a one-time cleanup pass, which is not durable.)
 Normalization runs as a step inside `calendar_events_transform.py`. At run start the
 transform loads four lookups into memory; for each row it calls pure functions in a new
 `calendar_normalize.py` module to compute the normalized columns. The same code path
-serves both new runs and the one-time backfill.
+serves both new runs and the one-time backfill. Within a row, person matching runs before
+team derivation, because `team_normalized` is derived from the matched employee
+(see 5.1a).
 
 Lookups loaded per run:
 - `reference.ref_leave_code`
@@ -78,33 +80,43 @@ Lookups loaded per run:
 
 Drives `leave_type_normalized`. Case-insensitive lookup. PK on `code`.
 
-Columns: `code` (PK, upper-case canonical), `label` (nullable, full name), `category`
-(e.g. leave / rest / work / holiday / compound), `is_active`, `created_at`, `updated_at`.
+Columns: `code` (PK, upper-case canonical), `code_num` (the official numeric prefix, e.g.
+`003`, nullable), `label` (nullable, full name), `category` (leave / rest / work /
+overtime / holiday / compound), `scope_note` (e.g. "TS Team only"), `requires_rtw_form`
+(boolean, Return-to-Work form required before resuming), `is_active`, `created_at`,
+`updated_at`.
 
-Seed (DRAFT; labels marked NULL need HR confirmation and are seeded NULL, not guessed):
+Seed from the authoritative HR daily-report code legend (provided by the user 2026-06-26):
 
-| code | label | category |
-|---|---|---|
-| RD | Rest Day | rest |
-| VL | Vacation Leave | leave |
-| SL | Sick Leave | leave |
-| EL | Emergency Leave | leave |
-| UT | Undertime | leave |
-| BL | Birthday Leave | leave |
-| WW | Weekend Work | work |
-| LWOP | Leave Without Pay | leave |
-| HD | Half Day | leave |
-| ML | Maternity Leave | leave |
-| PL | Paternity Leave | leave |
-| BRL | Bereavement Leave | leave |
-| SPL | Solo Parent Leave | leave |
-| PH | Public Holiday | holiday |
-| RDO | (NULL, confirm) | rest |
-| RDOT | (NULL, confirm) | rest |
-| SDL | (NULL, confirm) | leave |
-| LAC | (NULL, confirm) | leave |
-| STL | (NULL, confirm) | leave |
-| LR | (NULL, confirm) | leave |
+| code | code_num | label | category | scope / note |
+|---|---|---|---|---|
+| RDOT | 001 | Rest Day Overtime | overtime | |
+| RDO | 002 | Rest Day Offset | rest | |
+| VL | 003 | Vacation Leave | leave | |
+| SL | 004 | Sick Leave | leave | RTW form required |
+| EL | 005 | Emergency Leave | leave | RTW form required |
+| SDL | 006 | Sudden Leave | leave | |
+| UT | 007 | Undertime | leave | |
+| BL | 008 | Birthday Leave | leave | |
+| ML | 009 | Maternity Leave | leave | start date only; RTW form required |
+| PL | 010 | Paternity Leave | leave | |
+| SPL | 011 | Solo Parent Leave | leave | |
+| BRL | 013 | Bereavement Leave | leave | |
+| LR | 015 | Weekend Live Review | work | TS Team only |
+| WW | 016 | Weekend Work | work | TS Team only |
+| LRWD | 017 | Weekday Live Review | work | TS Team only |
+| LDL | 018 | Learning & Development Leave | leave | |
+| LDO | 019 | Learning & Development Overtime | overtime | |
+| RD | (none) | Rest Day | rest | scheduled rest-day marker, not a requestable code |
+
+`LRWD`, `LDL`, `LDO` do not yet appear in the data but are seeded for completeness.
+`RD` (the most common code, 4,857 rows) is the scheduled rest-day marker; it is not in the
+requestable legend but is a valid, well-understood value, so it is seeded explicitly.
+
+Codes present in the data but NOT in the official legend are treated as legacy/unknown and
+seeded with `label = NULL` (flagged for HR), so `leave_type_normalized` falls back to the
+raw code for them: `LAC` (94 rows), `STL` (2), `HD` (2), `LWOP` (1). These are listed in
+Section 10 as open items, in case any need a definition or are deprecated.
 
 Compound codes (`UT/SL`, `LAC/UT`, `VL / LAC`, `UT/EL`, `UT/SDL`, `EL/SL`, `UT/HD`) are
 not stored as rows. `normalize_leave_type` splits on `/`, trims, looks up each part, joins
@@ -117,15 +129,22 @@ are simply un-expanded until HR fills the label.
 
 ### 4.2 New reference table: `reference.ref_calendar_team`
 
-Drives `team_normalized`. Case-insensitive, trimmed lookup. PK on `team_raw`.
+This is the FALLBACK source for `team_normalized`. The primary source is the matched
+employee's `carrier_group` (see 5.1a); `ref_calendar_team` is consulted only when there is
+no matched person (RD rest-day rows, or unmatched people). It also normalizes the label
+casing/synonyms for those fallback rows.
+
+Rationale: the empirical check (2026-06-26) showed the calendar's team label is sometimes a
+status rather than a team (`Trainee` people span CG1/CG2/CG3 and several clusters) or is
+simply wrong (a person tagged `Marketing` who is really TSPM/Delta). The person's actual
+`ref_employees.carrier_group` is the authoritative team, so the label is fallback-only.
+
+Case-insensitive, trimmed lookup. PK on `team_raw`. `team_normalized` uses the full
+canonical label (for example `CG1 - Verizon`) so it ties to the `ref_employees` taxonomy.
 
 Columns: `team_raw` (PK, the variant as it appears), `team_canonical` (full canonical
 label from the `ref_employees` taxonomy), `level` (carrier_group / cluster / department),
 `created_at`, `updated_at`.
-
-`team_normalized` uses the full canonical label (for example `CG1 - Verizon`), per the
-user's decision, so it ties directly to the org taxonomy in `ref_employees.carrier_group`
-and `ref_employees.cluster`.
 
 Seed mapping (variants on the left collapse to the canonical on the right):
 
@@ -151,16 +170,20 @@ Seed mapping (variants on the left collapse to the canonical on the right):
 | Delta | Delta | cluster |
 | Epsilon | Epsilon | cluster |
 | Zeta, ZETA | Zeta | cluster |
-| MKTG, Marketing, MARKETING | Marketing | department (confirm) |
-| SD | SD (confirm) | department (confirm) |
-| T&D | T&D (confirm) | department (confirm) |
-| Trainee | Trainee (confirm) | department (confirm) |
-| TS Ops, TS OPS | TS-Ops (confirm) | department (confirm) |
-| PHI HR | PHI-HR (confirm) | department (confirm) |
+| MKTG, Marketing, MARKETING | Marketing | department |
+| PHI HR | HR | carrier_group |
+| T&D | Swifttt | carrier_group |
+| Trainee | (NULL) | status, not a team |
+| SD | (NULL, confirm) | unknown |
+| TS Ops, TS OPS | (NULL, confirm) | unknown |
 
-Variants marked "confirm" have no exact `ref_employees.carrier_group` match; the proposed
-canonical is a best guess for the user to confirm during seeding. Unmapped `team_raw`
-values fall back to leaving `team_normalized` NULL (logged), so we never invent a mapping.
+Canonicals for these were derived from the empirical check of who appears under each label:
+`PHI HR` person (Orville) is carrier_group `HR`; `T&D` people (Francis, Jehane) are
+`Swifttt`/Development Operations; `Marketing` is its own department not in the taxonomy.
+`Trainee` is a status (its people belong to many real teams), so as a fallback label it
+maps to NULL and is resolved per-person instead. `SD` (Emman) and `TS Ops` (Mik) people are
+not in `ref_employees`, so they stay NULL and flagged. Unmapped `team_raw` values leave
+`team_normalized` NULL (logged); we never invent a mapping.
 
 ### 4.3 New columns on `data_staging.stg_calendar_events`
 
@@ -169,6 +192,8 @@ Added via migration. Raw columns are unchanged.
 - `person_normalized` text: canonical `full_name` from `ref_employees`, else NULL.
 - `emp_id` text: matched employee id, else NULL.
 - `person_match_source` text: `exact` / `ai` / `unmatched`.
+- `team_level` text: `carrier_group` / `cluster` / `department`, indicating what
+  `team_normalized` represents (carrier_group when person-derived).
 - `person_note_normalized` text: cleaned note, else NULL.
 
 (`leave_type_normalized` and `team_normalized` already exist and get filled.)
@@ -189,10 +214,12 @@ testable in isolation.
 
 - `normalize_leave_type(code, code_map) -> (label, category)`: case-insensitive; compound
   split on `/`; fallback to raw code.
-- `normalize_team(team_raw, team_map) -> (canonical, level)`: case-insensitive, trimmed;
-  fallback to NULL when unmapped.
+- `normalize_team(emp_match, team_raw, team_map) -> (canonical, level)`: PERSON-DERIVED.
+  When `emp_match` is present (person matched), return the employee's `carrier_group`.
+  Otherwise fall back to a case-insensitive, trimmed lookup of `team_raw` in `team_map`
+  (RD rest-day rows, unmatched people). NULL when neither yields a value. See 5.1a.
 - `normalize_person(person_raw, team_raw, emp_index, ai_cache) -> (person_normalized,
-  emp_id, source)`: see 5.1.
+  emp_id, source)`: see 5.1. Person matching runs BEFORE team so its result feeds team.
 - `normalize_person_note(note_raw) -> normalized`: see 5.2.
 
 ### 5.1 Person matching
@@ -213,6 +240,21 @@ Match priority:
    `person_match_source = unmatched`; raw `person` preserved.
 
 RD rows and other rows where `person` is NULL by design are skipped (source stays NULL).
+
+### 5.1a Team derivation (depends on 5.1)
+
+`team_normalized` is derived from the matched person, not the calendar label:
+- Person matched: `team_normalized` = that employee's `carrier_group` (e.g. `CG1 - Verizon`,
+  `Accounting`), `team_level = carrier_group`. This auto-corrects mislabels (a person
+  tagged `Marketing` who is really TSPM resolves to their true carrier_group) and resolves
+  status labels like `Trainee` to each trainee's real team.
+- No matched person (RD rest-day rows like `RD - Alpha - Mon`, or unmatched people): fall
+  back to `ref_calendar_team` on the raw label. RD rows carry a cluster (Alpha..Zeta) in the
+  team position, which maps cleanly.
+- Neither yields a value: `team_normalized` NULL (logged).
+
+Cluster granularity (Alpha/Beta) is not stored separately in this phase; it remains
+available via a join to `ref_employees` if needed later (YAGNI for now).
 
 ### 5.2 person_note normalization
 
@@ -248,14 +290,19 @@ America/New_York.
 
 ## 8. Implementation waves
 
-Each wave is independently shippable. Wave 1 alone fills the two empty columns the user is
-looking at.
+Because `team_normalized` is now person-derived, person matching is foundational and moves
+into Wave 1 (it cannot be a later wave). Revised plan:
 
-1. Categorical: migrations 126/127, leave_type + team normalization in the transform,
-   backfill. View update (129) can land here to expose all new columns, filling
-   progressively across waves.
-2. Person: migration 128, matching module + AI cache, backfill.
-3. Notes: `person_note_normalized` regex, backfill.
+1. Core normalization: migrations 126/127/128/129. In the transform, fill
+   `leave_type_normalized` (deterministic), run person matching (deterministic + AI cache)
+   to fill `person_normalized` / `emp_id` / `person_match_source`, then derive
+   `team_normalized` from the matched employee with label fallback. Backfill the 10,857
+   existing rows. This wave fills both empty columns the user is looking at, plus the new
+   person columns.
+2. Notes: `person_note_normalized` regex, backfill. Independent and shippable separately.
+
+`leave_type_normalized` is independent of person matching, so it can be implemented and
+backfilled first within Wave 1 as an early checkpoint if desired.
 
 ## 9. Testing
 
@@ -274,6 +321,12 @@ Post-backfill data-quality checks (via MCP):
 
 ## 10. Open items requiring user input
 
-- Leave-code labels: `RDO`, `RDOT`, `SDL`, `LAC`, `STL`, `LR` (seeded NULL until provided).
-- Team canonical labels for variants without an exact taxonomy match: `MKTG`/`Marketing`,
-  `SD`, `T&D`, `Trainee`, `TS Ops`, `PHI HR`.
+- Leave codes RESOLVED via the authoritative HR legend (2026-06-26). Remaining: a few
+  codes appear in the data but not the official legend, seeded NULL and flagged:
+  `LAC` (94 rows), `STL` (2), `HD` (2), `LWOP` (1). Confirm whether these are legacy/
+  deprecated or need definitions. Not a blocker (they fall back to the raw code).
+- Team labels mostly RESOLVED by person-derivation + the empirical check. Remaining
+  fallback-label unknowns (only matter for unmatched people): `SD` (Emman) and `TS Ops`
+  (Mik) are not in `ref_employees`. Confirm their canonical team, or accept NULL. Also
+  worth confirming whether `Marketing`, `SD`, `TS Ops` people should be added to
+  `ref_employees` so they match like everyone else.
