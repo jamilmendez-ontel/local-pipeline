@@ -9,6 +9,14 @@ class FakeDB:
         self.upserts = []
         self.tombstones = []
 
+    def fetch(self, query, *args):
+        # Return empty lists for all reference table lookups (code_map, team_map, emp_rows).
+        return []
+
+    def fetchrow(self, query, *args):
+        # No cached person-match entries.
+        return None
+
     def execute(self, query, *args):
         if "is_deleted = true" in query:
             self.tombstones.append(args)
