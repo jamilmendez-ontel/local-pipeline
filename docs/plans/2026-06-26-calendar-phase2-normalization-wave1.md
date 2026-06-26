@@ -918,9 +918,12 @@ def load_lookups(db):
     emp_rows = db.fetch(
         "SELECT emp_id, full_name, first_name, nickname, carrier_group, cluster "
         "FROM reference.ref_employees")
-    emp_index = build_employee_index([dict(r) for r in emp_rows])
+    emps = [dict(r) for r in emp_rows]
+    emp_index = build_employee_index(emps)
+    emp_by_id = {e["emp_id"]: e for e in emps if e.get("emp_id")}
 
-    return {"code_map": code_map, "team_map": team_map, "emp_index": emp_index}
+    return {"code_map": code_map, "team_map": team_map,
+            "emp_index": emp_index, "emp_by_id": emp_by_id}
 ```
 
 - [ ] **Step 6: Wire normalization into `load_staging` in `calendar_events_load.py`**
@@ -951,16 +954,8 @@ def _enrich(db, shape, lookups):
     lt_norm, _cat = normalize_leave_type(shape.get("leave_type"), lookups["code_map"])
     pm = resolve_person(db, shape.get("person"), shape.get("team"),
                         lookups["emp_index"], lookups["team_map"])
-    emp = {"carrier_group": None}
-    if pm["emp_id"]:
-        # find the matched employee's carrier_group from the index for team derivation
-        for cands in lookups["emp_index"].values():
-            for c in cands:
-                if c.get("emp_id") == pm["emp_id"]:
-                    emp = c
-                    break
-    team_norm, team_level = normalize_team(
-        emp if pm["emp_id"] else None, shape.get("team"), lookups["team_map"])
+    emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
+    team_norm, team_level = normalize_team(emp, shape.get("team"), lookups["team_map"])
     return {
         "leave_type_normalized": lt_norm,
         "team_normalized": team_norm,
@@ -1041,13 +1036,7 @@ def renormalize(db):
     for r in rows:
         lt_norm, _cat = normalize_leave_type(r["leave_type"], lookups["code_map"])
         pm = resolve_person(db, r["person"], r["team"], lookups["emp_index"], lookups["team_map"])
-        emp = None
-        if pm["emp_id"]:
-            for cands in lookups["emp_index"].values():
-                for c in cands:
-                    if c.get("emp_id") == pm["emp_id"]:
-                        emp = c
-                        break
+        emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
         team_norm, team_level = normalize_team(emp, r["team"], lookups["team_map"])
         updates.append((r["event_id"], lt_norm, team_norm, team_level,
                         pm["person_normalized"], pm["emp_id"], pm["match_source"]))
