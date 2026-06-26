@@ -73,10 +73,13 @@ def test_parse_clean_three_part_high_confidence():
     assert r["person"] == "Luis"
     assert r["rest_day_of_week"] is None
     assert r["confidence"] >= CONFIDENCE_GATE
+    assert r["parse_source"] == "deterministic"
+    assert r["needs_review"] is False
 
 
 def test_parse_digit_team_now_splits_clean():
     r = deterministic_parse("VL - CG1- Angelica")
+    assert r["event_kind"] == "leave"
     assert r["leave_type"] == "VL"
     assert r["team"] == "CG1"
     assert r["person"] == "Angelica"
@@ -104,3 +107,5 @@ def test_parse_no_separator_noise_low_or_classified():
     assert r["event_kind"] == "birthday"
     # not leave, and leave_type must be None for a non-leave kind
     assert r["leave_type"] is None
+    assert r["rest_day_of_week"] is None
+    assert r["person"] is None
