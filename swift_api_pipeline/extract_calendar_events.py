@@ -51,36 +51,99 @@ def _load_raw(db, run_id, events):
 
 
 def renormalize(db):
-    """Re-enrich existing stg_calendar_events rows in place (no Calendar fetch)."""
+    """Re-enrich existing stg_calendar_events rows in place (no Calendar fetch).
+    Bulk-loads the person-match cache and writes updates in one round-trip to
+    avoid a per-row loop against the remote DB (which times out at scale)."""
     from calendar_lookups import load_lookups
-    from calendar_normalize import normalize_leave_type, normalize_team
-    from calendar_person_cache import resolve_person
+    from calendar_normalize import (normalize_leave_type, normalize_team,
+                                     match_person_deterministic)
+    from calendar_person_cache import extract_person_with_ai
 
     lookups = load_lookups(db)
     rows = db.fetch(
         "SELECT event_id, leave_type, team, person FROM data_staging.stg_calendar_events")
     logger.info(f"Renormalizing {len(rows)} rows")
-    updates = []
+    if not rows:
+        logger.warning("No rows in stg_calendar_events; nothing to renormalize")
+        return
+
+    cache = {}
+    for c in db.fetch(
+            "SELECT person_raw, team_raw, emp_id, person_normalized, confidence, "
+            "match_source FROM agent.calendar_person_match"):
+        cache[(c["person_raw"], c["team_raw"])] = {
+            "emp_id": c["emp_id"], "person_normalized": c["person_normalized"],
+            "confidence": c["confidence"], "match_source": c["match_source"]}
+
+    candidate_names = sorted({e.get("full_name")
+                              for cands in lookups["emp_index"].values()
+                              for e in cands if e.get("full_name")})
+    new_entries = {}
+
+    def _resolve(person, team):
+        if not person or not person.strip():
+            return {"emp_id": None, "person_normalized": None,
+                    "confidence": 0.0, "match_source": "unmatched"}
+        key = (person, team or "")
+        if key in cache:
+            return cache[key]
+        if key in new_entries:
+            return new_entries[key]
+        emp, _src = match_person_deterministic(
+            person, team, lookups["emp_index"], lookups["team_map"])
+        if emp is not None:
+            res = {"emp_id": emp.get("emp_id"), "person_normalized": emp.get("full_name"),
+                   "confidence": 1.0, "match_source": "exact"}
+        else:
+            ai = extract_person_with_ai(person, team, candidate_names)
+            if ai and ai.get("person_normalized"):
+                chosen = ai["person_normalized"]
+                matches = lookups["emp_index"].get(chosen.strip().lower(), [])
+                res = {"emp_id": matches[0].get("emp_id") if matches else None,
+                       "person_normalized": chosen,
+                       "confidence": ai.get("confidence", 0.5), "match_source": "ai"}
+            else:
+                res = {"emp_id": None, "person_normalized": None,
+                       "confidence": 0.0, "match_source": "unmatched"}
+        new_entries[key] = res
+        return res
+
+    event_ids, ltns, tns, tls, pns, eids, pmss = [], [], [], [], [], [], []
     for r in rows:
         lt_norm, _cat = normalize_leave_type(r["leave_type"], lookups["code_map"])
-        pm = resolve_person(db, r["person"], r["team"], lookups["emp_index"], lookups["team_map"])
+        pm = _resolve(r["person"], r["team"])
         emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
         team_norm, team_level = normalize_team(emp, r["team"], lookups["team_map"])
-        updates.append((r["event_id"], lt_norm, team_norm, team_level,
-                        pm["person_normalized"], pm["emp_id"], pm["match_source"]))
+        event_ids.append(r["event_id"]); ltns.append(lt_norm); tns.append(team_norm)
+        tls.append(team_level); pns.append(pm["person_normalized"])
+        eids.append(pm["emp_id"]); pmss.append(pm["match_source"])
 
-    sql = (
+    if new_entries:
+        cache_sql = (
+            "INSERT INTO agent.calendar_person_match "
+            "(person_raw, team_raw, emp_id, person_normalized, confidence, match_source) "
+            "VALUES ($1,$2,$3,$4,$5,$6) "
+            "ON CONFLICT (person_raw, team_raw) DO UPDATE SET "
+            "  emp_id=EXCLUDED.emp_id, person_normalized=EXCLUDED.person_normalized, "
+            "  confidence=EXCLUDED.confidence, match_source=EXCLUDED.match_source, "
+            "  resolved_at=now()")
+        cache_params = [(p, t, v["emp_id"], v["person_normalized"], v["confidence"],
+                         v["match_source"]) for (p, t), v in new_entries.items()]
+        retry_db(lambda: db.executemany(cache_sql, cache_params),
+                 description=f"write {len(cache_params)} person-match cache rows")
+
+    update_sql = (
         "UPDATE data_staging.stg_calendar_events AS s SET "
-        "  leave_type_normalized = v.ltn, team_normalized = v.tn, team_level = v.tl, "
-        "  person_normalized = v.pn, emp_id = v.eid, person_match_source = v.pms "
-        "FROM (VALUES ($1,$2,$3,$4,$5,$6,$7)) AS v(event_id, ltn, tn, tl, pn, eid, pms) "
-        "WHERE s.event_id = v.event_id"
-    )
-    for i in range(0, len(updates), 500):
-        batch = updates[i:i + 500]
-        retry_db(lambda b=batch: db.executemany(sql, b),
-                 description=f"renormalize batch {i//500+1}")
-    logger.info(f"Renormalized {len(updates)} rows")
+        "  leave_type_normalized = d.ltn, team_normalized = d.tn, team_level = d.tl, "
+        "  person_normalized = d.pn, emp_id = d.eid, person_match_source = d.pms "
+        "FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], "
+        "            $6::text[], $7::text[]) "
+        "  AS d(event_id, ltn, tn, tl, pn, eid, pms) "
+        "WHERE s.event_id = d.event_id")
+    retry_db(lambda: db.execute(update_sql, event_ids, ltns, tns, tls, pns, eids, pmss),
+             description=f"bulk renormalize {len(event_ids)} rows")
+    logger.info(f"Renormalized {len(event_ids)} rows "
+                f"({len(new_entries)} new person-match entries)")
 
 
 def main(full_refresh: bool = False, renorm: bool = False):
