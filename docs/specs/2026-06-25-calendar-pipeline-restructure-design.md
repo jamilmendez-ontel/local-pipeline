@@ -265,7 +265,37 @@ recurring-rule source exists). Revisit only if a real schedule-rule source appea
 
 ---
 
-## 7. Open questions for review
+## 7. Retention & windowing
+
+Year distribution (staging, by `start_date`):
+
+| Years | Rows | Personal leave | Nature |
+|---|---|---|---|
+| 2024 | 3,424 | 1,599 | real historical leave + attendance |
+| 2025 | 2,883 | 1,682 | real history (most personal leave of any year) |
+| 2026 | 1,891 | 955 | current year, in progress |
+| 2027–2040 | ~530/yr | 0 | auto-projected recurring rest days only |
+| 2041–2056 | 9/yr | 0 | a few annual markers projected far out |
+
+**Decision: keep full history; do not delete prior years.** 2024–2025 is the only real
+leave/attendance record (~3,300 personal-leave rows) and powers year-over-year trends, per-person
+consumption, tenure, and audit. The table is ~15k rows, so there is no storage/performance reason
+to trim, and raw is append-only so staging is rebuildable regardless.
+
+The genuine noise is the **forward** end: ~6,500 rows of recurring rest days projected to 2056
+with zero real leave. Bound it at the layers that lose no history:
+
+- **Extract horizon cap (forward):** set `timeMax = today + 12 months` on the fetch so recurring
+  rest days (and other recurrences) are only materialized ~12 months out. This removes the
+  2027–2056 bulk at the source. 12 months is generous for genuine future-filed leave; events
+  filed further out are negligible and will materialize as the window rolls forward.
+- **Serving/app window:** serving views (and the HR app) default to a recent display window
+  (e.g. current year or last N months) for UI, without deleting underlying rows.
+- **Backfill note:** the forward cap applies to *future* extraction. Existing far-future rows
+  already in raw/staging can be pruned in a one-time cleanup (or simply left to age out and be
+  excluded by the serving window) — they are harmless at this volume.
+
+## 8. Open questions for review
 
 1. **Parse-cache home:** `agent.calendar_summary_parse` (AI provenance) vs `reference.*`. Lean `agent`.
 2. **Recurring-instance event ids:** confirm whether Google recurring expansions are stored and
@@ -275,7 +305,7 @@ recurring-rule source exists). Revisit only if a real schedule-rule source appea
 4. **`event_kind` for rest day:** keep RD under `event_kind='leave'` with `is_rest_day` flag in
    the code dimension (current plan), or promote `rest_day` to its own `event_kind`?
 
-## 8. Risks
+## 9. Risks
 
 - **Confidence gate too loose** → defects 1/4/5 survive. Mitigation: validate semantics, route
   conservatively (12–15% to AI is fine).
