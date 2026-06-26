@@ -18,3 +18,14 @@ def normalize_leave_type(code: str | None, code_map: dict) -> tuple[str | None, 
         return " + ".join(labels), "compound"
     label, category = code_map.get(key, (None, None))
     return (label or raw), category
+
+
+def normalize_team(emp: dict | None, team_raw: str | None, team_map: dict) -> tuple[str | None, str | None]:
+    """Person-derived team with label fallback. If a matched employee is given,
+    use their carrier_group. Otherwise fall back to the cleaned label map
+    (RD rest-day rows, unmatched people). (None, None) when neither applies."""
+    if emp and emp.get("carrier_group"):
+        return emp["carrier_group"], "carrier_group"
+    if team_raw and team_raw.strip():
+        return team_map.get(team_raw.strip().lower(), (None, None))
+    return None, None
