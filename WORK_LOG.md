@@ -59,10 +59,25 @@ Reasoning:
 - OIR has no real data dependency on asset-tasks anyway: it runs its own report-scoped
   `targeted_asset_tasks` extract and reads `stg_user_priorities` (fresh every 10 min).
 
-### Manual steps (in addition to triggerForms above)
-- Create a time-driven trigger for `triggerOpenItemsData`, daily ~02:00 AM EST, in the
-  same Apps Script project as the Timer/Orgs triggers. The function is now committed, so
-  a future redeploy will not lose it.
+### CONFIRMED root cause (6-26, via Apps Script execution log)
+The time trigger was never lost — it fires nightly (~2:36 AM). The bound *function*
+was gone. Execution log showed, every night since 6-23:
+`Error  Script function not found: triggerOpenItemsData`. The trigger's 57.14%
+failure rate = exactly 4 of the last 7 days (fails 6-23/24/25/26, succeeds 6-20/21/22).
+So the 6-22 redeploy from committed source (which lacked the function — the drift)
+removed the function while the trigger survived, and every fire since threw "not found"
+→ no dispatch → OIR stale. (My earlier "lost trigger" wording was wrong; it was a lost
+function.)
+
+### Resolution (6-26)
+- Restored `triggerOpenItemsData()` to committed source (`168a25b`) with a DO-NOT-REMOVE
+  guard, and synced local main.
+- User pasted the function back into the deployed Apps Script project and saved.
+- Manual Run of `triggerOpenItemsData` fired the dispatch successfully → a new
+  `pipeline-open-items-data` run started on GitHub and reloaded `stg_targeted_*`
+  (verified the function → fireDispatch_ → GitHub → workflow chain works end-to-end).
+- No new trigger needed — the existing ~2:36 AM trigger now finds the function and
+  succeeds. Future redeploys can't lose it since it's committed.
 
 ### Files touched
 - `scripts/pipeline_trigger.gs`
