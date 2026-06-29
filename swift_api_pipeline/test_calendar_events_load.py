@@ -1,7 +1,21 @@
 """Tests for staging load + tombstone using a fake db. Run:
     cd swift_api_pipeline && venv/Scripts/python -m pytest test_calendar_events_load.py -v
 """
-from calendar_events_load import load_staging, _UPSERT_COLS
+import re
+
+from calendar_events_load import load_staging, _UPSERT_COLS, _upsert_sql
+
+
+def test_upsert_sql_has_no_duplicate_column_assignments():
+    """Postgres rejects a DO UPDATE SET that assigns the same column twice
+    ('multiple assignments to same column'). `is_deleted` lives in _UPSERT_COLS
+    (it must be INSERTed) AND is reset explicitly in the tail, so it must be
+    excluded from the dynamic EXCLUDED list."""
+    sql = _upsert_sql()
+    set_clause = sql.split("DO UPDATE SET", 1)[1]
+    assigned = re.findall(r"(\w+)\s*=", set_clause)
+    dupes = {c for c in assigned if assigned.count(c) > 1}
+    assert not dupes, f"columns assigned more than once in SET: {dupes}"
 
 
 class FakeDB:

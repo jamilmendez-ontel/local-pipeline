@@ -43,10 +43,17 @@ def _enrich(db, shape, lookups):
     }
 
 
+# Columns the ON CONFLICT tail assigns explicitly, so they must NOT also appear
+# in the dynamic EXCLUDED list (Postgres rejects assigning a column twice).
+# event_id is the conflict key; is_deleted/deleted_at are reset to "alive" because
+# re-seeing an event means it was un-cancelled.
+_TAIL_MANAGED = {"event_id", "is_deleted"}
+
+
 def _upsert_sql() -> str:
     cols = ", ".join(_UPSERT_COLS)
     ph = ", ".join(f"${i+1}" for i in range(len(_UPSERT_COLS)))
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in _UPSERT_COLS if c != "event_id")
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in _UPSERT_COLS if c not in _TAIL_MANAGED)
     return (
         f"INSERT INTO {SCHEMA_STAGING}.stg_calendar_events ({cols}, parsed_at, loaded_at) "
         f"VALUES ({ph}, now(), now()) "
