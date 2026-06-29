@@ -33,6 +33,17 @@ _USER = os.getenv("SUPABASE_USER", "postgres")
 _PASS = os.getenv("SUPABASE_PASSWORD", "")
 DSN = f"postgresql://{_USER}:{_PASS}@{_HOST}:{_PORT}/{_DB}"
 
+# Pool-init tuning. The DB is in ap-southeast-1 (Singapore); a GHA runner far
+# away can take much longer than asyncpg's default to open a connection. Cap
+# each connect attempt (so a slow one fails fast and the retry loop runs) and
+# wait for the FULL retry budget before declaring failure. The old 30s ready
+# wall was shorter than a single ~60s connect attempt, so start() abandoned a
+# pool that was still initializing -> callers then hit a None pool.
+POOL_CONNECT_TIMEOUT = 15   # seconds per asyncpg connection attempt
+POOL_MAX_ATTEMPTS = 4       # _create_pool retries
+POOL_BASE_DELAY = 3         # seconds, doubles each retry: 3, 6, 12
+POOL_READY_TIMEOUT = 90     # seconds start() waits; must exceed total retry budget (~81s)
+
 
 def _jsonb_binary_encoder(value):
     """Encode Python object to PostgreSQL JSONB binary format (version byte + UTF-8 JSON)."""
@@ -95,22 +106,35 @@ class PipelineDB:
     # ------------------------------------------------------------------
 
     def start(self):
-        """Start the background event loop thread and create the pool."""
-        if self._thread is not None and self._thread.is_alive():
-            return  # Already running
+        """Start the background loop thread and block until the pool is ready.
 
-        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="db-loop")
-        self._thread.start()
-        # Wait for pool to be ready (up to 30s)
-        if not self._ready.wait(timeout=30):
-            raise RuntimeError("Database pool failed to initialize within 30s")
-        logger.info(f"Database pool ready (min=4, max=20)")
+        ALWAYS waits for readiness, even when a thread is already alive: a prior
+        start() may have raised its timeout while the background thread was still
+        retrying _create_pool (pool still None). Returning early in that window
+        let callers run queries against a None pool, surfacing as
+        'NoneType' object has no attribute 'acquire'."""
+        if self._thread is None or not self._thread.is_alive():
+            self._ready = threading.Event()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True, name="db-loop")
+            self._thread.start()
+        if not self._ready.wait(timeout=POOL_READY_TIMEOUT):
+            raise RuntimeError(f"Database pool failed to initialize within {POOL_READY_TIMEOUT}s")
+        if self._pool is None:
+            raise RuntimeError("Database pool thread exited without creating a pool")
+        logger.info("Database pool ready (min=4, max=20)")
 
     def _run_loop(self):
         """Entry point for the background thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._create_pool())
+        try:
+            self._loop.run_until_complete(self._create_pool())
+        except Exception:
+            # All connect attempts failed. Signal start() (which checks _pool is
+            # None and raises) instead of leaving it blocked for the full timeout.
+            logger.exception("Database pool initialization failed in background loop")
+            self._ready.set()
+            return
         self._ready.set()
         self._loop.run_forever()
 
@@ -121,8 +145,8 @@ class PipelineDB:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        max_attempts = 3
-        base_delay = 5  # seconds, doubles each retry
+        max_attempts = POOL_MAX_ATTEMPTS
+        base_delay = POOL_BASE_DELAY  # seconds, doubles each retry
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -131,6 +155,7 @@ class PipelineDB:
                     min_size=4,
                     max_size=20,
                     command_timeout=300,
+                    timeout=POOL_CONNECT_TIMEOUT,  # per-connection acquire cap; slow connects fail fast and retry
                     init=_init_connection,
                     ssl=ssl_ctx,
                 )
@@ -188,8 +213,9 @@ class PipelineDB:
 
     def _run(self, coro):
         """Submit a coroutine to the event loop and block until done."""
-        if not self._loop or not self._loop.is_running():
-            raise RuntimeError("Database event loop is not running. Call start() first.")
+        if self._pool is None or not self._loop or not self._loop.is_running():
+            coro.close()  # avoid "coroutine was never awaited" warning
+            raise RuntimeError("Database pool is not initialized. Call start() first.")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
