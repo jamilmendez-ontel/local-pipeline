@@ -23,9 +23,9 @@ from calendar_parse_cache import summary_key, _row_to_shape
 from calendar_events_load import load_staging
 
 setup_logging()
-logger = get_logger("calendar_leave")
+logger = get_logger("calendar_events")
 
-RAW_TABLE = "raw_calendar_leave"   # pre-cutover name
+RAW_TABLE = "raw_calendar_events"   # renamed from raw_calendar_leave at 2026-06-26 cutover
 PROGRESS_EVERY = 200               # log a line every N distinct summaries resolved
 
 

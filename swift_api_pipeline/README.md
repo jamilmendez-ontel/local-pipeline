@@ -48,7 +48,7 @@ SUPABASE_PASSWORD=...
 ```
 
 For pipelines that need Gmail/Calendar/Drive (notifier, aging, sales,
-calendar_leave, timer-discrepancies), place the corresponding pickle
+calendar_events, timer-discrepancies), place the corresponding pickle
 files under `gmail_credentials/` (see repo root README for which
 pipelines need which token).
 
@@ -66,7 +66,7 @@ python main.py --pipeline orgs
 python main.py --pipeline user_priorities
 python main.py --pipeline targeted_asset_tasks
 python main.py --pipeline targeted_task_requirements
-python main.py --pipeline calendar_leave
+python extract_calendar_events.py                # calendar events (standalone, not a main.py pipeline)
 python main.py --pipeline aging
 python main.py --pipeline sales
 
