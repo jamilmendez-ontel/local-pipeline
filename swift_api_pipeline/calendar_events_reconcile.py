@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from config import SCHEMA_STAGING, retry_db
 
-logger = logging.getLogger("calendar_leave")
+logger = logging.getLogger("calendar_events")
 
 
 def reconcile(db, live_event_ids: set) -> int:

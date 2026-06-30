@@ -13,7 +13,7 @@ Complete reference for how data flows through all pipelines — extraction, tran
 5. [RawTimeData File vs Pipeline Comparison](#5-rawtimedata-file-vs-pipeline-comparison)
 6. [Asset Tasks Pipeline](#6-asset-tasks-pipeline)
 7. [QA Forms Pipeline](#7-qa-forms-pipeline)
-8. [Calendar Leave Pipeline](#8-calendar-leave-pipeline)
+8. [Calendar Events Pipeline](#8-calendar-events-pipeline)
 9. [Gmail Package Scraper Pipeline](#9-gmail-package-scraper-pipeline)
 10. [Organizations & Projects Pipeline](#10-organizations--projects-pipeline)
 11. [User Priorities Pipeline](#11-user-priorities-pipeline)
@@ -46,7 +46,7 @@ Gmail API ──────┘    │  (JSONB)     │    │ (parsed)      │
 
 - Gmail Aging + Sales (`gmail-pipeline.yml`)
 - Gmail Package Scraper (`gmail-scraper/`)
-- Calendar Leave (`extract_calendar_leave.py`)
+- Calendar Events (`extract_calendar_events.py`)
 - Timer Discrepancies (`extract_timer_discrepancies.py`)
 
 ---
@@ -365,28 +365,40 @@ The master reporting Excel file (`RawTimeData_Combined_YYYYMMDD.xlsx`) used by t
 
 ---
 
-## 8. Calendar Leave Pipeline
+## 8. Calendar Events Pipeline
+
+Restructured 2026-06-26 (was the "Calendar Leave" pipeline). One conformed table
+holds ALL calendar event kinds (leave, holiday, birthday, training, other) with
+an `event_kind` discriminator; per-kind serving views split them out.
 
 ### Source
 
-- **Google Calendar API:** Shared "Leave/RD/Weekend Work" calendar
-- **Incremental:** Fetches events changed since `MAX(event_updated)` in staging
+- **Google Calendar API:** Shared calendar (leave / RD / holidays / birthdays / etc.)
+- **Window:** `timeMin = 2024-01-01`, `timeMax = today + 12 months` (forward cap)
+- **Incremental:** `updatedMin` watermark = `MAX(event 'updated')` in raw, minus a
+  60s overlap. Keys off edit time, so edits to past-dated events are re-fetched.
 
-### Extraction (`extract_calendar_leave.py`)
+### Extraction (`extract_calendar_events.py`)
 
-1. Uses `updatedMin` parameter for incremental sync
-2. Full refresh with `--full-refresh` flag
+1. Incremental by default via `updatedMin`; `--full-refresh` ignores the watermark
+2. `--renormalize` re-runs normalization over existing rows (bulk, no re-fetch)
 
 ### Transform
 
-- **Summary parsing:** "LeaveType - Group - Person (note)" → structured fields
-- **AI normalization:** Claude Haiku normalizes team names and leave type codes to canonical forms
-- **Date handling:** All-day events: end_date is exclusive (subtract 1 day). Timed same-day: days = 1
+- **Summary parsing:** validated deterministic fast-path (confidence gate 0.8) +
+  Claude Haiku whole-row extraction on the low-confidence tail; persisted parse cache
+- **Normalization:** `leave_type_normalized` (via `reference.ref_leave_code`),
+  `team_normalized` (person-derived from `ref_employees.carrier_group`, label fallback),
+  person match (deterministic + Haiku-cached in `agent.calendar_person_match`)
+- **Date handling:** all-day end_date exclusive (subtract 1 day); same-day timed: days = 1
 
 ### Storage
 
-**Raw:** `data_raw.raw_calendar_leave` (JSONB)
-**Staging:** `data_staging.stg_calendar_leave` (event_id PK, ON CONFLICT upsert)
+**Raw:** `data_raw.raw_calendar_events` (JSONB, append)
+**Staging:** `data_staging.stg_calendar_events` (event_id PK, ON CONFLICT upsert;
+soft-delete via `is_deleted` + tombstone-on-cancel; reconcile sweeps drift)
+**Serving views:** `analytics.v_calendar_leave` (+ `v_calendar_leave_daily`),
+`v_calendar_holiday`, `v_calendar_birthday`, `v_calendar_training`, `v_calendar_other`
 
 ---
 
@@ -520,7 +532,7 @@ The master reporting Excel file (`RawTimeData_Combined_YYYYMMDD.xlsx`) used by t
 | Task | Schedule | Pipeline |
 |------|----------|----------|
 | SwiftPipeline-Nightly | Daily 12:01 AM | asset_tasks → backfill → analytics → discrepancies → exports |
-| SwiftPipeline-Calendar | Daily 12:30 AM | calendar leave sync |
+| SwiftPipeline-Calendar | Disabled (migrated to GHA, 6 AM & 6 PM ET) | calendar events sync |
 
 ---
 
@@ -569,7 +581,7 @@ For Jan-Dec 2025, the staging table contains **clean durations** (corrections al
 | Asset Tasks | Run-based replacement | One run replaces previous entirely |
 | QA Forms | Full refresh | TRUNCATE + INSERT each run |
 | Organizations/Projects | ON CONFLICT upsert | org_did / project_did |
-| Calendar Leave | ON CONFLICT upsert | event_id |
+| Calendar Events | ON CONFLICT upsert | event_id |
 | Timer Discrepancies | ON CONFLICT upsert | row_number (spreadsheet row) |
 | Gmail Emails | ON CONFLICT DO NOTHING | message_id |
 | Package Emails | Re-parse from stg_emails | message_id |

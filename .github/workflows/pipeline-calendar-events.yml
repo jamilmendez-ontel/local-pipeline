@@ -13,7 +13,7 @@ env:
   PIPELINE_DIR: swift_api_pipeline
 
 jobs:
-  calendar-leave:
+  calendar-events:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -66,6 +66,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: calendar-leave-logs
+          name: calendar-events-logs
           path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
           retention-days: 7

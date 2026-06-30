@@ -91,7 +91,7 @@ report-automation reports that don't need full-scale extracts.
 |---|---|
 | `extract_aging.py` | Gmail-based AR aging (`stg_ar_aging`) |
 | `extract_sales.py` | Gmail-based sales detail (`stg_sales_detail`) |
-| `extract_calendar_leave.py` | Google Calendar leave events (`stg_calendar_leave`) — incremental, AI-normalized |
+| `extract_calendar_events.py` | Google Calendar events → `stg_calendar_events` (all kinds: leave/holiday/birthday/training/other) — incremental, AI-normalized |
 | `extract_daily_reports.py` | Daily reports + per-task work summaries |
 | `extract_revenue_rates.py` | `reference.ref_task_revenue_rates` from a manually-maintained sheet |
 
@@ -125,7 +125,7 @@ python main.py --pipeline orgs
 python main.py --pipeline user_priorities
 python main.py --pipeline targeted_asset_tasks   # OIR-scoped
 python main.py --pipeline targeted_task_requirements
-python main.py --pipeline calendar_leave
+python extract_calendar_events.py                # calendar events (standalone, not a main.py pipeline)
 python main.py --pipeline aging
 python main.py --pipeline sales
 
@@ -170,7 +170,7 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 | `SWIFT_PASSWORD`, `SUPABASE_PASSWORD` | All pipelines |
 | `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via the notifier account) |
 | `SHEETS_TOKEN_PICKLE` | Timer-discrepancies, timer-correction-apply, timer-duplicate-resolve |
-| `CALENDAR_TOKEN_PICKLE` | Calendar-leave pipeline |
+| `CALENDAR_TOKEN_PICKLE` | Calendar-events pipeline |
 | `DATE_VALIDATOR_DISPATCH_PAT` | Cross-repo dispatches (date-validator, report-automation) |
 
 ## Database migrations

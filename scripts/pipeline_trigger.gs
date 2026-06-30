@@ -30,8 +30,8 @@
  *               fires after the Ontel pipeline completes)
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
  *               run after User Priorities is fresh. Create via own trigger.)
- *   6:00 AM & 6:00 PM — Calendar Leave (twice daily; was 12:30 AM once daily.
- *               Create via setupCalendarLeaveTriggers())
+ *   6:00 AM & 6:00 PM — Calendar Events (twice daily; was 12:30 AM once daily.
+ *               Create via setupCalendarEventsTriggers())
  *
  * Note: QA Forms used to be staggered inside triggerLightPipelines() via an
  * 8-min Utilities.sleep() after Timer. That was fragile — if the trigger
@@ -162,52 +162,54 @@ function setupPriorityRefreshTrigger() {
 }
 
 /**
- * Trigger calendar leave pipeline.
- * Runs TWICE daily at 6:00 AM and 6:00 PM ET. Create the triggers by running
- * setupCalendarLeaveTriggers() once (it replaces the legacy single 12:30 AM run).
+ * Trigger the Calendar Events pipeline (all kinds: leave/holiday/birthday/
+ * training/other). Runs TWICE daily at 6:00 AM and 6:00 PM ET. Create the
+ * triggers by running setupCalendarEventsTriggers() once.
  */
-function triggerCalendarLeave() {
+function triggerCalendarEvents() {
   fireDispatch_('pipeline-calendar-events');
 }
 
 /**
- * Run hours (project timezone, ET) for the twice-daily Calendar Leave runs.
+ * Run hours (project timezone, ET) for the twice-daily Calendar Events runs.
  * Apps Script daily triggers fire within a ~1-hour window around the given hour.
  */
-var CALENDAR_LEAVE_HOURS = [6, 18];
+var CALENDAR_EVENTS_HOURS = [6, 18];
 
 /**
  * Idempotently (re)create the twice-daily time-driven triggers for
- * triggerCalendarLeave() at 6:00 AM and 6:00 PM ET. Run this once from the
- * Apps Script editor. Re-running it first deletes ALL existing triggers bound
- * to triggerCalendarLeave — including the legacy single 12:30 AM trigger — so
- * it is safe to re-run (e.g. after editing CALENDAR_LEAVE_HOURS) and you do NOT
- * need to delete the old trigger by hand.
+ * triggerCalendarEvents() at 6:00 AM and 6:00 PM ET. RUN THIS ONCE from the
+ * Apps Script editor after deploying this file. It first deletes ALL existing
+ * triggers bound to triggerCalendarEvents AND to the legacy triggerCalendarLeave
+ * (this function was renamed; the old time triggers are still bound to the old
+ * name and MUST be cleared, or they fail silently with "Script function not
+ * found"). Safe to re-run (e.g. after editing CALENDAR_EVENTS_HOURS).
  *
  * NOTE: atHour() fires in the project's time zone. This assumes the project is
  * set to America/New_York (ET) like the rest of these schedules — verify via
  * File > Project Settings > Time zone before relying on the 6 AM / 6 PM times.
  */
-function setupCalendarLeaveTriggers() {
-  // Remove any existing triggers bound to triggerCalendarLeave to avoid
-  // duplicates (this also clears the legacy 12:30 AM daily trigger).
+function setupCalendarEventsTriggers() {
+  // Remove existing triggers bound to the new name AND to the legacy
+  // triggerCalendarLeave (renamed function — clear its now-orphaned triggers).
   var existing = ScriptApp.getProjectTriggers();
   for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerCalendarLeave') {
+    var fn = existing[i].getHandlerFunction();
+    if (fn === 'triggerCalendarEvents' || fn === 'triggerCalendarLeave') {
       ScriptApp.deleteTrigger(existing[i]);
     }
   }
 
-  for (var h = 0; h < CALENDAR_LEAVE_HOURS.length; h++) {
-    ScriptApp.newTrigger('triggerCalendarLeave')
+  for (var h = 0; h < CALENDAR_EVENTS_HOURS.length; h++) {
+    ScriptApp.newTrigger('triggerCalendarEvents')
       .timeBased()
       .everyDays(1)
-      .atHour(CALENDAR_LEAVE_HOURS[h])
+      .atHour(CALENDAR_EVENTS_HOURS[h])
       .create();
   }
 
-  Logger.log('Created triggerCalendarLeave triggers at hours (ET): ' +
-             CALENDAR_LEAVE_HOURS.join(', '));
+  Logger.log('Created triggerCalendarEvents triggers at hours (ET): ' +
+             CALENDAR_EVENTS_HOURS.join(', '));
 }
 
 /**

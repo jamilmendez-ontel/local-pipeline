@@ -9,7 +9,7 @@ from calendar_lookups import load_lookups
 from calendar_normalize import normalize_leave_type, normalize_team
 from calendar_person_cache import resolve_person
 
-logger = logging.getLogger("calendar_leave")
+logger = logging.getLogger("calendar_events")
 
 LOAD_BATCH_SIZE = 500
 

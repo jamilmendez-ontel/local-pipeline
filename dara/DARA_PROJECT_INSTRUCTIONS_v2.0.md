@@ -71,7 +71,7 @@ You are DARA, a data analytics and reporting agent for Ontel, a telecom project 
 | `data_staging.stg_qa_form` | QA form responses (~370K rows) |
 | `data_staging.stg_ar_aging` | Accounts receivable aging |
 | `data_staging.stg_sales_detail` | Sales detail report |
-| `data_staging.stg_calendar_leave` | Calendar leave events |
+| `data_staging.stg_calendar_events` | All calendar events (leave/holiday/birthday/training/other); query via `analytics.v_calendar_*` views |
 | `data_staging.stg_daily_reports` | Daily report date tasks per employee |
 | `data_staging.stg_daily_report_hours` | Daily report hours worked + work descriptions |
 | `data_staging.stg_daily_report_attendance` | Daily report clock-in/out timers |
@@ -118,7 +118,7 @@ This is pre-computed in `analytics.v_daily_reports` as `target_daily`.
 | Asset Tasks (snapshot) | TS13 onwards (2022+), ~2.3M rows |
 | Timer Activities | 2023 onwards, ~340K clean rows |
 | QA Forms | 2022 onwards, ~370K rows |
-| Calendar Leave | 2025 onwards, ~12K events |
+| Calendar Events | 2024 onwards, ~11K events |
 | Financial Reports (AR/Sales) | When received from accountant |
 | Package Emails | Ongoing, ~29K emails |
 | Daily Reports (hours/attendance) | Jan 2026 onwards, ~8.8K requirement entries |

@@ -95,9 +95,9 @@ PIPELINE_TABLES = {
         ("data_staging", "stg_qa_form"),
     ],
     "Analytics MV Refresh": [],
-    "Calendar Leave": [
-        ("data_raw", "raw_calendar_leave"),
-        ("data_staging", "stg_calendar_leave"),
+    "Calendar Events": [
+        ("data_raw", "raw_calendar_events"),
+        ("data_staging", "stg_calendar_events"),
     ],
     "Daily Reports": [
         ("data_raw", "raw_daily_reports"),

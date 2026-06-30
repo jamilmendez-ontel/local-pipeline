@@ -18,7 +18,7 @@ from calendar_events_reconcile import reconcile
 from calendar_parse_cache import resolve
 
 setup_logging()
-logger = get_logger("calendar_leave")
+logger = get_logger("calendar_events")
 
 CALENDAR_ID = "c_9b404e3738157b5b83e066ba4e0d2dcddbcb2b9bf60b4027620c1d939636c778@group.calendar.google.com"
 TIME_MIN = "2024-01-01T00:00:00Z"
