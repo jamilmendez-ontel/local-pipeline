@@ -60,7 +60,7 @@ async def main():
             # Map pipeline_name to --pipeline CLI flag
             cli_map = {
                 "asset_tasks_extract": "asset_tasks",
-                "calendar_leave": "calendar",
+                "calendar_events": "calendar",
             }
             cli_flag = cli_map.get(pipeline_name)
             if not cli_flag:

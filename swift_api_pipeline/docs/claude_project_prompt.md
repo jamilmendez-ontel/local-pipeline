@@ -164,7 +164,7 @@ One row per date/site/task_type.
 | tasks_completed | Count approved that day |
 | project_name | Project |
 
-### Calendar Leave Views (HR / people data)
+### Calendar Views (HR / people data)
 
 These views track employee leave, rest days, and weekend work from Google Calendar. They are **separate from the construction/Swift API data** above.
 
@@ -261,7 +261,7 @@ FROM data_staging.stg_ar_aging
 WHERE as_of_date = (SELECT MAX(as_of_date) FROM data_staging.stg_ar_aging)
 GROUP BY 1;
 
--- === Calendar Leave Queries ===
+-- === Calendar Queries ===
 
 -- Who is on leave today
 SELECT person, team, leave_type, person_note
