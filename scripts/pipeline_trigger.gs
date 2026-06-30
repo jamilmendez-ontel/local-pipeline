@@ -167,7 +167,7 @@ function setupPriorityRefreshTrigger() {
  * setupCalendarLeaveTriggers() once (it replaces the legacy single 12:30 AM run).
  */
 function triggerCalendarLeave() {
-  fireDispatch_('pipeline-calendar-leave');
+  fireDispatch_('pipeline-calendar-events');
 }
 
 /**
@@ -326,6 +326,6 @@ function testAllDispatches() {
   fireDispatch_('pipeline-priorities');
   fireDispatch_('pipeline-forms');
   fireDispatch_('pipeline-open-items-data');
-  fireDispatch_('pipeline-calendar-leave');
+  fireDispatch_('pipeline-calendar-events');
   Logger.log('All 6 dispatches fired — check GitHub Actions.');
 }
