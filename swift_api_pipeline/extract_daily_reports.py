@@ -280,7 +280,11 @@ class DailyReportsPipeline:
                     f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
                     f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
                     f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT DO NOTHING",
+                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
+                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
+                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
+                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
+                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
                     c,
                 ),
                 description=f"raw tasks batch {i // BATCH_SIZE + 1}",
@@ -398,7 +402,11 @@ class DailyReportsPipeline:
                     f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
                     f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
                     f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT DO NOTHING",
+                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
+                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
+                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
+                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
+                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
                     c,
                 ),
                 description=f"raw reqs batch {i // BATCH_SIZE + 1}",
@@ -445,7 +453,11 @@ class DailyReportsPipeline:
                     f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
                     f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
                     f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT DO NOTHING",
+                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
+                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
+                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
+                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
+                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
                     c,
                 ),
                 description=f"raw timers batch {i // BATCH_SIZE + 1}",
