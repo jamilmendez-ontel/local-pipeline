@@ -2,11 +2,7 @@ name: "Pipeline: Calendar Events"
 
 on:
   repository_dispatch:
-    # New canonical type is pipeline-calendar-events. The legacy
-    # pipeline-calendar-leave is kept ONLY for the transition window until the
-    # Apps Script (pipeline_trigger.gs) is redeployed to fire the new type; then
-    # remove it. Listening to both prevents a missed scheduled run mid-rename.
-    types: [pipeline-calendar-events, pipeline-calendar-leave]
+    types: [pipeline-calendar-events]
   workflow_dispatch:
 
 concurrency:
