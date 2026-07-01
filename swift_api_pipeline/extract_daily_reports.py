@@ -372,7 +372,8 @@ class DailyReportsPipeline:
                 ai["emp_id"], wd, task_did, hours,
                 (r.get("description") or "")[:2000], r.get("status", ""),
                 r.get("id", ""), epoch_to_dt(r.get("dateCreated")),
-                epoch_to_dt(r.get("lastUpdated")), RUN_ID,
+                epoch_to_dt(r.get("lastUpdated")),
+                int((r.get("metrics") or {}).get("fileUploadedCount") or 0), RUN_ID,
             ))
             req_raw_batch.append((
                 "requirement", r.get("id", ""), ai["project_did"], ai["asset_did"],
@@ -385,11 +386,12 @@ class DailyReportsPipeline:
                 lambda c=chunk: db.executemany(
                     f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_hours "
                     f"(emp_id, work_date, task_did, hours_worked, work_description, "
-                    f" req_status, req_id, created_at_api, updated_at_api, run_id) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) "
+                    f" req_status, req_id, created_at_api, updated_at_api, file_uploaded_count, run_id) "
+                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid) "
                     f"ON CONFLICT (task_did, req_id) DO UPDATE SET "
                     f"hours_worked=EXCLUDED.hours_worked, work_description=EXCLUDED.work_description, "
                     f"req_status=EXCLUDED.req_status, updated_at_api=EXCLUDED.updated_at_api, "
+                    f"file_uploaded_count=EXCLUDED.file_uploaded_count, "
                     f"run_id=EXCLUDED.run_id, loaded_at=NOW()",
                     c,
                 ),
