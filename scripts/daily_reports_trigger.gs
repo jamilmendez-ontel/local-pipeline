@@ -87,8 +87,9 @@ function fireDispatch(mode, days) {
 
 /**
  * Rolling trigger — refreshes the last 30 days of ALL daily-reports data
- * (status/approval + hours + timers) in one job. Install as an every-10-min
- * time-based trigger. Replaces the daily + requirements split once that pair
+ * (status/approval + hours + timers) in one job. Install as an every-5-min
+ * time-based trigger (was every-10-min; tightened 2026-06-30 — run is ~2 min
+ * so 5-min leaves a safe non-overlapping gap; source data has huge headroom). Replaces the daily + requirements split once that pair
  * is retired (retirement is a separate, manual step — leave triggerDaily /
  * triggerRequirements installed until then).
  */
