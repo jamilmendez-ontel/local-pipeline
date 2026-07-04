@@ -56,8 +56,8 @@ as $$
   )
   select jsonb_build_object(
     'kpis',   (select to_jsonb(k) from kpis k),
-    'trend',  coalesce((select jsonb_agg(to_jsonb(t)) from trend t), '[]'::jsonb),
-    'groups', coalesce((select jsonb_agg(to_jsonb(g)) from grp g), '[]'::jsonb)
+    'trend',  coalesce((select jsonb_agg(to_jsonb(t) order by t.d) from trend t), '[]'::jsonb),
+    'groups', coalesce((select jsonb_agg(to_jsonb(g) order by g.late_pct desc) from grp g), '[]'::jsonb)
   );
 $$;
 
@@ -72,7 +72,7 @@ as $$
     select emp_id, max(employee_name) as employee_name, max(carrier_group) as carrier_group,
            count(*) filter (where is_matured and task_status <> 'cancelled') as matured,
            count(*) filter (where is_missing_report)                        as missing,
-           count(*) filter (where is_late_filing and is_matured)            as late
+           count(*) filter (where is_late_filing and is_matured and task_status <> 'cancelled') as late
     from analytics.v_hr_report_review
     where work_date between p_from and p_to
     group by emp_id
