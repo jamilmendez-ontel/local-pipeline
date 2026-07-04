@@ -10,6 +10,7 @@ create or replace function analytics.approval_queue_summary(
 language sql
 stable
 security invoker
+set search_path = analytics, public
 as $$
   with q as (
     select assigned_approver, no_approver_flag, pending_wait_days
@@ -43,9 +44,18 @@ as $$
       'no_approver', (select count(*) from tagged where no_approver_flag)
     ),
     'backlog', (select coalesce(jsonb_agg(jsonb_build_object(
-                  'group', "group", 'waiting', waiting, 'amber', amber, 'red', red)), '[]'::jsonb) from backlog)
+                  'group', "group", 'waiting', waiting, 'amber', amber, 'red', red)
+                  order by waiting desc), '[]'::jsonb) from backlog)
   );
 $$;
 
 revoke all on function analytics.approval_queue_summary(text, text, text) from public, anon, authenticated;
 grant execute on function analytics.approval_queue_summary(text, text, text) to service_role;
+
+INSERT INTO agent.schema_metadata (schema_name, table_name, description, business_context, related_tables)
+VALUES
+  ('analytics','approval_queue_summary',
+   'Function(p_carrier_group,p_division,p_search): KPIs (awaiting, amber, red, oldest_wait_days, no_approver) + per-approver-group backlog counts for the awaiting-approval queue, backlog ordered waiting DESC. Same filters and is_awaiting_approval source as the app''s getApprovalQueue.',
+   'Powers the HR /approvals overview so the app computes 5 KPIs + group backlog without fetching the full ~1,250-row awaiting-approval queue client-side.',
+   ARRAY['analytics.v_daily_report_approvals'])
+ON CONFLICT DO NOTHING;
