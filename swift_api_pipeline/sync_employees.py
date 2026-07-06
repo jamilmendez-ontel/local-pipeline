@@ -65,7 +65,8 @@ def read_sheet():
                 val = emp.get(dt_field, "").strip()
                 if val and val not in ("None", "FALSE", "TRUE"):
                     parsed = None
-                    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%d/%m/%Y"):
+                    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%d/%m/%Y",
+                                "%B %d, %Y", "%b %d, %Y"):
                         try:
                             parsed = datetime.strptime(val, fmt).date()
                             break

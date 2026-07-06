@@ -90,6 +90,9 @@ def read_spreadsheet(creds: Credentials, spreadsheet_id: str) -> List[List[str]]
     resp = session.get(url)
     resp.raise_for_status()
 
+    # Drive's CSV export omits the charset, so requests falls back to ISO-8859-1
+    # and mangles UTF-8 (e.g. "Mañalac" -> "MaÃ±alac"). The export is UTF-8.
+    resp.encoding = "utf-8"
     reader = csv.reader(io.StringIO(resp.text))
     return list(reader)
 
