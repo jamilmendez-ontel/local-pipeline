@@ -97,6 +97,16 @@ def read_spreadsheet(creds: Credentials, spreadsheet_id: str) -> List[List[str]]
     return list(reader)
 
 
+def get_modified_time(creds: Credentials, file_id: str):
+    """Return a file's Drive modifiedTime as an RFC3339 string (e.g.
+    '2026-07-06T05:12:34.123Z'), or None if unavailable."""
+    session = AuthorizedSession(creds)
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?fields=modifiedTime"
+    resp = session.get(url)
+    resp.raise_for_status()
+    return resp.json().get("modifiedTime")
+
+
 if __name__ == "__main__":
     print("Authenticating with Google Drive API (for Sheets export)...")
     c = authenticate_sheets()

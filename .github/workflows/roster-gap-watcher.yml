@@ -2,7 +2,7 @@ name: "Watch: Roster Gaps"
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # daily 02:00 UTC = 10:00 AM PHT (backstop; Apps Script dispatch preferred)
+    - cron: '0 20 * * *'   # daily 20:00 UTC = 04:00 AM PHT (after HR's workday so sheet edits have settled)
   repository_dispatch:
     types: [roster-gap-watcher]
   workflow_dispatch:
