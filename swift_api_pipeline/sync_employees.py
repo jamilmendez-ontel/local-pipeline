@@ -117,7 +117,9 @@ def read_sheet():
             col = HEADER_MAP.get(h)
             if not col:
                 continue
-            rec[col] = row[i].strip() if i < len(row) and row[i] else ""
+            # Collapse stray tabs/newlines/repeated spaces (the sheet has e.g. a tab
+            # inside "Kyla\tGueriba Palo") to single spaces, and strip.
+            rec[col] = " ".join(row[i].split()) if i < len(row) and row[i] else ""
         emp_id = rec.get("emp_id", "").strip()
         if not emp_id:
             continue  # spacer / total rows
@@ -248,10 +250,8 @@ def sync(db, sheet_employees, effective_date, apply=False):
         for u in updated_employees:
             emp = u["emp"]
             print(f"  {emp['emp_id']} | {emp.get('full_name', '')}")
-            for field, (old, new) in u["tracked_changes"].items():
-                print(f"    {field}: {old} -> {new}  [NEW HISTORY ROW]")
-            for field, (old, new) in u["simple_changes"].items():
-                print(f"    {field}: {old} -> {new}  [in-place update]")
+            for field, (old, new) in {**u["tracked_changes"], **u["simple_changes"]}.items():
+                print(f"    {field}: {old} -> {new}")
 
     if resigned_employees:
         print(f"\n--- Departures (active in DB, absent from HR active roster) ---")
@@ -298,60 +298,27 @@ def sync(db, sheet_employees, effective_date, apply=False):
         )
         applied += 1
 
-    # Updates
+    # Updates — reference.ref_employees is one row per emp_id (UNIQUE(emp_id)), so we
+    # update the existing row in place rather than inserting effective-dated history
+    # rows (which the UNIQUE(emp_id) constraint forbids). Tracked + simple changes are
+    # applied together in a single UPDATE.
     for u in updated_employees:
         emp = u["emp"]
-
-        # Tracked changes → new history row
-        if u["tracked_changes"]:
-            changes = ", ".join(f"{k}: {old}->{new}" for k, (old, new) in u["tracked_changes"].items())
-            retry_db(
-                lambda e=emp, c=changes: db.execute(
-                    "INSERT INTO reference.ref_employees "
-                    "(emp_id, last_name, first_name, middle_name, full_name, nickname, email, "
-                    " position, role2, carrier, carrier_group, cluster, division, sub_division, "
-                    " work_schedule, shift_schedule, employment_status, hire_date, is_active, "
-                    " resignation_date, regularization_date, immediate_supervisor, "
-                    " shift_time_in_pht, shift_time_out_pht, effective_date, change_reason) "
-                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,"
-                    "$21,$22,$23,$24,$25,$26) "
-                    "ON CONFLICT (emp_id, effective_date) DO UPDATE SET "
-                    "position=EXCLUDED.position, role2=EXCLUDED.role2, carrier=EXCLUDED.carrier, "
-                    "carrier_group=EXCLUDED.carrier_group, cluster=EXCLUDED.cluster, "
-                    "division=EXCLUDED.division, sub_division=EXCLUDED.sub_division, "
-                    "work_schedule=EXCLUDED.work_schedule, shift_schedule=EXCLUDED.shift_schedule, "
-                    "employment_status=EXCLUDED.employment_status, is_active=EXCLUDED.is_active, "
-                    "resignation_date=EXCLUDED.resignation_date, regularization_date=EXCLUDED.regularization_date, "
-                    "immediate_supervisor=EXCLUDED.immediate_supervisor, "
-                    "shift_time_in_pht=EXCLUDED.shift_time_in_pht, shift_time_out_pht=EXCLUDED.shift_time_out_pht, "
-                    "change_reason=EXCLUDED.change_reason, updated_at=NOW()",
-                    e.get("emp_id"), e.get("last_name"), e.get("first_name"), e.get("middle_name"),
-                    e.get("full_name"), e.get("nickname"), e.get("email"),
-                    e.get("position"), e.get("role2"), e.get("carrier"), e.get("carrier_group"),
-                    e.get("cluster"), e.get("division"), e.get("sub_division"),
-                    e.get("work_schedule"), e.get("shift_schedule"), e.get("employment_status"),
-                    e.get("hire_date"), e.get("is_active", True), e.get("resignation_date"),
-                    e.get("regularization_date"), e.get("immediate_supervisor"),
-                    e.get("shift_time_in_pht"), e.get("shift_time_out_pht"),
-                    effective_date, f"Sheet sync: {c}",
-                ),
-                description=f"update tracked {emp.get('full_name', '')}",
-            )
-            applied += 1
-
-        # Simple changes → update latest row in place
-        if u["simple_changes"] and not u["tracked_changes"]:
-            existing = u["existing"]
-            for field, (old, new) in u["simple_changes"].items():
-                retry_db(
-                    lambda eid=emp["emp_id"], ed=existing["effective_date"], f=field, v=emp.get(field): db.execute(
-                        f"UPDATE reference.ref_employees SET {f} = $1, updated_at = NOW() "
-                        f"WHERE emp_id = $2 AND effective_date = $3",
-                        v, eid, ed,
-                    ),
-                    description=f"update simple {emp.get('full_name', '')} {field}",
-                )
-            applied += 1
+        changed = {**u["tracked_changes"], **u["simple_changes"]}
+        if not changed:
+            continue
+        cols = list(changed.keys())
+        set_sql = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(cols))
+        reason = "Sheet sync: " + ", ".join(f"{c}: {o}->{n}" for c, (o, n) in changed.items())
+        params = [emp.get(c) for c in cols] + [reason, emp["emp_id"]]
+        n = len(cols)
+        sql = (f"UPDATE reference.ref_employees SET {set_sql}, "
+               f"change_reason = ${n + 1}, updated_at = NOW() WHERE emp_id = ${n + 2}")
+        retry_db(
+            lambda s=sql, p=params: db.execute(s, *p),
+            description=f"update {emp.get('full_name', '')}",
+        )
+        applied += 1
 
     # Resignations / departures: active in DB but absent from the active-only HR roster.
     # Guard: skip if the sheet returned implausibly few rows (likely a partial/failed read),
@@ -370,27 +337,11 @@ def sync(db, sheet_employees, effective_date, apply=False):
                       f"{resign_dt}" if resign_dt else
                       "Inactivated: removed from HR active roster (no approved reports)")
             retry_db(
-                lambda x=e, rd=resign_dt, rsn=reason: db.execute(
-                    "INSERT INTO reference.ref_employees "
-                    "(emp_id, last_name, first_name, middle_name, full_name, nickname, email, "
-                    " position, role2, carrier, carrier_group, cluster, division, sub_division, "
-                    " work_schedule, shift_schedule, employment_status, hire_date, is_active, "
-                    " resignation_date, regularization_date, immediate_supervisor, "
-                    " shift_time_in_pht, shift_time_out_pht, effective_date, change_reason) "
-                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,false,"
-                    "$19,$20,$21,$22,$23,$24,$25) "
-                    "ON CONFLICT (emp_id, effective_date) DO UPDATE SET "
-                    "is_active=false, resignation_date=EXCLUDED.resignation_date, "
-                    "change_reason=EXCLUDED.change_reason, updated_at=NOW()",
-                    x.get("emp_id"), x.get("last_name"), x.get("first_name"), x.get("middle_name"),
-                    x.get("full_name"), x.get("nickname"), x.get("email"),
-                    x.get("position"), x.get("role2"), x.get("carrier"), x.get("carrier_group"),
-                    x.get("cluster"), x.get("division"), x.get("sub_division"),
-                    x.get("work_schedule"), x.get("shift_schedule"), x.get("employment_status"),
-                    x.get("hire_date"), rd,
-                    x.get("regularization_date"), x.get("immediate_supervisor"),
-                    x.get("shift_time_in_pht"), x.get("shift_time_out_pht"),
-                    effective_date, rsn,
+                lambda eid=e["emp_id"], rd=resign_dt, rsn=reason: db.execute(
+                    "UPDATE reference.ref_employees SET is_active = false, "
+                    "resignation_date = $1, change_reason = $2, updated_at = NOW() "
+                    "WHERE emp_id = $3",
+                    rd, rsn, eid,
                 ),
                 description=f"inactivate {e.get('full_name', '')} (last day {resign_dt})",
             )
