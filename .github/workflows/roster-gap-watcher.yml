@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (report only, no sheet append/sync/chat)"
+        description: "Dry run (read HR roster, print new/updated/departures; no DB writes, no chat)"
         required: false
         default: "false"
 

@@ -211,22 +211,26 @@ def append_rows_to_sheet(rows: list) -> None:
     logger.info(f"Appended {len(values)} row(s) to roster sheet")
 
 
-def build_chat_text(added: list, mismatches: list) -> str:
+def build_chat_text(gaps: list, mismatches: list, resigned: list = None) -> str:
+    resigned = resigned or []
     lines = ["*Roster watcher*"]
-    if added:
+    if gaps:
         lines.append("")
-        lines.append(f"Auto-added {len(added)} missing employee(s) to the roster sheet:")
-        for r in added:
+        lines.append(f"{len(gaps)} employee(s) submitting reports but MISSING from the HR "
+                     f"roster — please add them to the roster sheet so they sync:")
+        for r in gaps:
             known = ", ".join(filter(None, [
                 r["email"] or None,
                 r["carrier_group"] or None,
                 f"hired {r['hire_date']}" if r["hire_date"] else None,
             ]))
             lines.append(f"- {r['full_name']} ({r['emp_id']})" + (f" | {known}" if known else ""))
-        lines.append(
-            "Please fill in the blanks on the roster sheet (position, legal name, "
-            "employment status, division, schedule). The next sync picks them up."
-        )
+    if resigned:
+        lines.append("")
+        lines.append(f"{len(resigned)} employee(s) set INACTIVE (removed from the HR active roster):")
+        for e in resigned:
+            lines.append(f"- {e.get('full_name', '')} ({e.get('emp_id', '')})"
+                         + (f" <{e.get('email')}>" if e.get('email') else ""))
     if mismatches:
         lines.append("")
         lines.append("Timer emails that match no roster email (fix the roster sheet email):")
@@ -272,20 +276,24 @@ def main():
         for m in mismatches:
             print(f"  {m['user_name']} <{m['email']}> last {m['last_entry']}")
 
-        if not rows and not mismatches:
-            print("No gaps; nothing to do.")
-            return
-
+        # HR owns the authoritative "Active Employee Information" roster now, so we
+        # report gaps for HR to add (rather than writing to their sheet) and always
+        # sync so their adds/edits and departures (absent from the active roster ->
+        # is_active=false) flow into the DB.
         if not args.apply:
-            print("\nDry run; use --apply to append + sync + chat.")
+            print("\nDry run; use --apply to sync the HR roster -> DB.")
+            sync(db, read_sheet(), effective_date=date.today(), apply=False)
             return
 
-        if rows:
-            append_rows_to_sheet(rows)
-            sync(db, read_sheet(), effective_date=date.today(), apply=True)
+        summary = sync(db, read_sheet(), effective_date=date.today(), apply=True)
+        resigned = summary.get("resigned", []) if summary else []
+
+        if not rows and not mismatches and not resigned:
+            print("No gaps, mismatches, or departures; nothing to report.")
+            return
 
         if not args.no_chat:
-            post_chat(build_chat_text(rows, mismatches))
+            post_chat(build_chat_text(rows, mismatches, resigned))
     finally:
         close_db()
 
