@@ -1,0 +1,72 @@
+name: "Watch: Roster Gaps"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily 02:00 UTC = 10:00 AM PHT (backstop; Apps Script dispatch preferred)
+  repository_dispatch:
+    types: [roster-gap-watcher]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (report only, no sheet append/sync/chat)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: roster-gap-watcher
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.SHEETS_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_token.pickle
+          echo "${{ secrets.SHEETS_RW_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_rw_token.pickle
+          echo "${{ secrets.CHAT_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/chat_token.pickle
+
+      - name: Watch roster gaps
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          ROSTER_WATCH_CHAT_SPACE: ${{ vars.ROSTER_WATCH_CHAT_SPACE }}
+        run: |
+          APPLY_ARG="--apply"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            APPLY_ARG=""
+          fi
+          python -u roster_gap_watcher.py $APPLY_ARG
