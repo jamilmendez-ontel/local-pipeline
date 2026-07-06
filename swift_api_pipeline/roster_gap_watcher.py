@@ -29,13 +29,18 @@ import argparse
 import os
 import pickle
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from googleapiclient.discovery import build
 
 from config import get_logger, get_db, close_db, retry_db, setup_logging
 from sync_employees import SHEET_ID, read_sheet, sync
+from sheets_client import authenticate_sheets, get_modified_time
+
+# Only sync once the HR sheet's edits have settled this many minutes, so we never act
+# on a mid-edit state (e.g. a row momentarily deleted while HR reorganizes).
+SETTLE_MINUTES = 5
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -252,6 +257,44 @@ def post_chat(text: str) -> None:
     logger.info(f"Posted chat to {space}")
 
 
+def roster_changed_since_last_sync(db):
+    """Return (should_sync, modified_time, reason). Only sync when the HR sheet was
+    modified since our last sync AND edits have settled (> SETTLE_MINUTES old)."""
+    creds = authenticate_sheets()
+    mt_str = get_modified_time(creds, SHEET_ID)
+    if not mt_str:
+        return True, None, "could not read sheet modifiedTime; syncing to be safe"
+    mt = datetime.fromisoformat(mt_str.replace("Z", "+00:00"))
+    age_min = (datetime.now(timezone.utc) - mt).total_seconds() / 60
+    if age_min < SETTLE_MINUTES:
+        return False, mt, (f"sheet edited {age_min:.1f}m ago (<{SETTLE_MINUTES}m); "
+                           "waiting for edits to settle")
+    rows = retry_db(
+        lambda: db.fetch(
+            "SELECT last_modified_time FROM pipeline.sheet_sync_state WHERE sheet_id=$1",
+            SHEET_ID,
+        ),
+        description="read sheet sync watermark",
+    ) or []
+    last = rows[0]["last_modified_time"] if rows else None
+    if last and mt <= last:
+        return False, mt, "no roster changes since last sync"
+    return True, mt, "roster changed since last sync"
+
+
+def update_sync_watermark(db, modified_time):
+    retry_db(
+        lambda: db.execute(
+            "INSERT INTO pipeline.sheet_sync_state (sheet_id, last_modified_time, last_synced_at, updated_at) "
+            "VALUES ($1,$2,NOW(),NOW()) "
+            "ON CONFLICT (sheet_id) DO UPDATE SET last_modified_time=EXCLUDED.last_modified_time, "
+            "last_synced_at=NOW(), updated_at=NOW()",
+            SHEET_ID, modified_time,
+        ),
+        description="update sheet sync watermark",
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
@@ -277,16 +320,23 @@ def main():
             print(f"  {m['user_name']} <{m['email']}> last {m['last_entry']}")
 
         # HR owns the authoritative "Active Employee Information" roster now, so we
-        # report gaps for HR to add (rather than writing to their sheet) and always
-        # sync so their adds/edits and departures (absent from the active roster ->
-        # is_active=false) flow into the DB.
+        # report gaps for HR to add (rather than writing to their sheet) and sync their
+        # adds/edits and departures (absent from the active roster -> is_active=false)
+        # into the DB. The sync is change-gated on the sheet's Drive modifiedTime, so a
+        # daily run is a cheap no-op when nothing changed and never acts mid-edit.
+        should_sync, modified_time, reason = roster_changed_since_last_sync(db)
+        print(f"Roster sheet check: {reason}")
+
+        resigned = []
         if not args.apply:
             print("\nDry run; use --apply to sync the HR roster -> DB.")
             sync(db, read_sheet(), effective_date=date.today(), apply=False)
             return
 
-        summary = sync(db, read_sheet(), effective_date=date.today(), apply=True)
-        resigned = summary.get("resigned", []) if summary else []
+        if should_sync:
+            summary = sync(db, read_sheet(), effective_date=date.today(), apply=True)
+            resigned = summary.get("resigned", []) if summary else []
+            update_sync_watermark(db, modified_time)
 
         if not rows and not mismatches and not resigned:
             print("No gaps, mismatches, or departures; nothing to report.")
