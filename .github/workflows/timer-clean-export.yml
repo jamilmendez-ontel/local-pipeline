@@ -1,0 +1,94 @@
+name: "Timer: Clean Export (manual)"
+
+# Manual, on-demand rerun of ONLY the clean-timer portion of the daily timer
+# pipeline: apply pending corrections, export the clean Excel, email it to the
+# internal recipients (jamil/hajie/sheena), and upload to the shared Drive.
+# Does NOT run --send / --remind / --resend, so techs receive nothing.
+# Use this to recover a day whose Timer Clean Data Export email got skipped
+# (e.g. a transient Supabase pooler cap on the scheduled run).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pipeline-timer
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  clean-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+          echo "${{ secrets.SHEETS_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_token.pickle
+
+      - name: Decode shared Drive token
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
+
+      - name: Timer corrections - apply pending
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        run: |
+          python -u timer_correction_review.py --apply || {
+            echo "Apply failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u timer_correction_review.py --apply
+          }
+
+      - name: Export clean timer data
+        working-directory: scripts-reference
+        run: |
+          python -u export_timer_clean_excel.py || {
+            echo "Clean export failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u export_timer_clean_excel.py
+          }
+
+      - name: Upload clean timer to shared Drive
+        working-directory: scripts-reference
+        continue-on-error: true
+        run: python -u upload_to_shared_drive.py --export timer-clean
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timer-clean-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7
