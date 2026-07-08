@@ -971,12 +971,18 @@ def transform_ar_aging(db, run_id: str):
     """Transform raw_ar_aging to stg_ar_aging for a specific run_id (append mode)."""
     print(f"[{datetime.now():%H:%M:%S}] Transforming AR aging...")
 
-    # Delete staging rows for any email dates covered by this run.
-    # Scoping by email_received_date (not run_id) prevents stacking when
-    # the same email is re-processed across different pipeline runs.
+    # Delete staging rows for any ET calendar days covered by this run.
+    # Scoping by ET day (not exact timestamp) gives replace semantics: when a
+    # second "Daily Revenue Report" email arrives the same day, its snapshot
+    # replaces the earlier one instead of stacking (the report queries group
+    # by email_received_date::date and SUM, so stacked snapshots double the
+    # numbers -- 2026-07-08 incident). Emails are processed oldest-first, so
+    # the latest email for a day always wins.
     db.execute(
-        f'DELETE FROM {SCHEMA_STAGING}.stg_ar_aging WHERE email_received_date IN '
-        f'(SELECT DISTINCT email_received_date FROM {SCHEMA_RAW}.raw_ar_aging WHERE run_id = $1)',
+        f'DELETE FROM {SCHEMA_STAGING}.stg_ar_aging '
+        f"WHERE (email_received_date AT TIME ZONE 'America/New_York')::date IN "
+        f"(SELECT DISTINCT (email_received_date AT TIME ZONE 'America/New_York')::date "
+        f'FROM {SCHEMA_RAW}.raw_ar_aging WHERE run_id = $1)',
         run_id
     )
 
@@ -1063,12 +1069,14 @@ def transform_sales_detail(db, run_id: str):
     """Transform raw_sales_detail to stg_sales_detail for a specific run_id (append mode)."""
     print(f"[{datetime.now():%H:%M:%S}] Transforming sales detail...")
 
-    # Delete staging rows for any email dates covered by this run.
-    # Scoping by email_received_date (not run_id) prevents stacking when
-    # the same email is re-processed across different pipeline runs.
+    # Delete staging rows for any ET calendar days covered by this run.
+    # Same replace semantics as transform_ar_aging: a later same-day email
+    # replaces the earlier snapshot instead of stacking (2026-07-08 incident).
     db.execute(
-        f'DELETE FROM {SCHEMA_STAGING}.stg_sales_detail WHERE email_received_date IN '
-        f'(SELECT DISTINCT email_received_date FROM {SCHEMA_RAW}.raw_sales_detail WHERE run_id = $1)',
+        f'DELETE FROM {SCHEMA_STAGING}.stg_sales_detail '
+        f"WHERE (email_received_date AT TIME ZONE 'America/New_York')::date IN "
+        f"(SELECT DISTINCT (email_received_date AT TIME ZONE 'America/New_York')::date "
+        f'FROM {SCHEMA_RAW}.raw_sales_detail WHERE run_id = $1)',
         run_id
     )
 
