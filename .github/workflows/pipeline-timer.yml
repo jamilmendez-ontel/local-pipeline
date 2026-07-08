@@ -79,12 +79,22 @@ jobs:
       - name: Timer corrections - apply pending
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
-        run: python -u timer_correction_review.py --apply
+        run: |
+          python -u timer_correction_review.py --apply || {
+            echo "Apply failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u timer_correction_review.py --apply
+          }
 
       - name: Export clean timer data
         working-directory: scripts-reference
         continue-on-error: true
-        run: python -u export_timer_clean_excel.py
+        run: |
+          python -u export_timer_clean_excel.py || {
+            echo "Clean export failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u export_timer_clean_excel.py
+          }
 
       - name: Upload clean timer to shared Drive
         working-directory: scripts-reference
