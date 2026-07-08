@@ -1,6 +1,10 @@
--- 157: expose scheduled shift start + late-clock-in minutes on the daily-report
+-- 162: expose scheduled shift start + late-clock-in minutes on the daily-report
 -- serving views, for the Ontel People late clock-in badges (spec
 -- ontel-people/docs/superpowers/specs/2026-07-08-late-clock-in-badges-design.md).
+-- NOTE: applied to prod 2026-07-08 under the supabase_migrations name
+-- "157_clock_in_late_minutes" (numbering collision with the already-existing
+-- 157_approver_scorecard_payroll_deadline.sql caught after apply; file renamed
+-- to 162, DB history row left as-is).
 --
 -- Two columns APPENDED to analytics.v_daily_report_approvals (CREATE OR REPLACE
 -- contract: existing column list/order byte-identical to migration 156, so every
