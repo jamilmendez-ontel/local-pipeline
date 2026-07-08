@@ -87,6 +87,7 @@ jobs:
           }
 
       - name: Export clean timer data
+        id: clean_export
         working-directory: scripts-reference
         continue-on-error: true
         run: |
@@ -122,6 +123,14 @@ jobs:
         # rebase. Compare-against-pre-stored-snapshot now uses a hash that
         # ignores NUMERIC duration_min precision tails.
         run: python -u timer_correction_review.py --resend
+
+      # Turn a silently-skipped clean export into a red run + email alert.
+      # The export step is continue-on-error, so without this a transient
+      # pooler cap would drop the export while the run still went green.
+      - name: Alert if clean export did not send
+        if: always()
+        working-directory: scripts-reference
+        run: python -u alert_missing_clean_export.py --step-outcome "${{ steps.clean_export.outcome }}"
 
       - name: Upload logs on failure
         if: failure()
