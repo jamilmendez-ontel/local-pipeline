@@ -154,9 +154,15 @@ class DailyReportsPipeline:
         return tasks
 
     def fetch_requirement_and_timer(self, task_did, timers_only=False, requirements_only=False):
-        """Fetch requirements and/or timer for one task."""
+        """Fetch requirements and/or timer for one task.
+
+        Returns (reqs, timers, ok). ok=False means the fetch threw and the
+        (empty) lists are NOT authoritative -- Step 5's reconcile-delete must
+        skip that task or a transient API failure would wipe its staged rows.
+        """
         reqs = []
         timers = []
+        ok = True
         try:
             if not timers_only:
                 r1 = self._request(f"{self.base}/api/asset-tasks/{task_did}/requirements")
@@ -168,7 +174,8 @@ class DailyReportsPipeline:
                     timers = r2.get("list", []) if isinstance(r2, dict) else r2
         except Exception as e:
             logger.warning(f"Failed req/timer for {task_did}: {e}")
-        return reqs, timers
+            ok = False
+        return reqs, timers, ok
 
     def run(self, projects, full=False, days=None, timers_only=False, requirements_only=False):
         """Run the full extraction pipeline."""
@@ -317,6 +324,11 @@ class DailyReportsPipeline:
         # Step 4: Fetch requirements and timers separately
         all_reqs = []
         all_timers = []
+        # Tasks whose child fetch SUCCEEDED this run: for these (and only
+        # these) the fetched set is authoritative, so Step 5 may delete staged
+        # rows Swift no longer returns (requirement/timer deleted in Swift).
+        req_ok_dids = []
+        timer_ok_dids = []
 
         # 4a: Fetch requirements (if not timers_only)
         if not timers_only and tasks_with_reqs:
@@ -326,12 +338,14 @@ class DailyReportsPipeline:
                 ai = task_info["asset_info"]
                 wd = task_info["work_date"]
                 task_did = task_info["task"].get("id", "")
-                reqs, _ = self.fetch_requirement_and_timer(task_did, requirements_only=True)
-                return ai, wd, task_did, reqs
+                reqs, _, ok = self.fetch_requirement_and_timer(task_did, requirements_only=True)
+                return ai, wd, task_did, reqs, ok
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {executor.submit(fetch_reqs, t): t for t in tasks_with_reqs}
                 for future in as_completed(futures, timeout=7200):
-                    ai, wd, task_did, reqs = future.result()
+                    ai, wd, task_did, reqs, fetch_ok = future.result()
+                    if fetch_ok and task_did:
+                        req_ok_dids.append(task_did)
                     for r in reqs:
                         all_reqs.append((ai, wd, task_did, r))
                     done += 1
@@ -347,12 +361,14 @@ class DailyReportsPipeline:
                 ai = task_info["asset_info"]
                 wd = task_info["work_date"]
                 task_did = task_info["task"].get("id", "")
-                _, timers = self.fetch_requirement_and_timer(task_did, timers_only=True)
-                return ai, wd, task_did, timers
+                _, timers, ok = self.fetch_requirement_and_timer(task_did, timers_only=True)
+                return ai, wd, task_did, timers, ok
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {executor.submit(fetch_tmrs, t): t for t in tasks_for_timers}
                 for future in as_completed(futures, timeout=7200):
-                    ai, wd, task_did, timers = future.result()
+                    ai, wd, task_did, timers, fetch_ok = future.result()
+                    if fetch_ok and task_did:
+                        timer_ok_dids.append(task_did)
                     for t in timers:
                         all_timers.append((ai, wd, task_did, t))
                     done += 1
@@ -466,6 +482,65 @@ class DailyReportsPipeline:
             )
         logger.info(f"  Loaded {len(tmr_stg_batch)} timers")
 
+        # Step 5: reconcile deletions. The staging loads above are upsert-only,
+        # so a requirement/timer deleted in Swift lingered in staging forever,
+        # inflating req_count/total_hours in the serving views (found 2026-07-08:
+        # a deleted 11h requirement kept a report at 21h in HR review). For each
+        # task whose child fetch succeeded this run, anything staged beyond the
+        # fetched set was deleted in Swift -- remove it. Tasks whose fetch threw
+        # are skipped (ok=False; a transient API failure must never wipe rows)
+        # and self-heal on a later run. Tasks reporting reqCount == 0 never
+        # enter the requirements fetch at all, so their leftovers are cleared
+        # from the task payload's own metric (explicit 0 only -- a task with no
+        # metrics dict is never treated as empty).
+        logger.info("\n=== Step 5: Reconciling deletions ===")
+        stale_reqs = 0
+        stale_timers = 0
+        if not timers_only:
+            zero_req_dids = [
+                t["task"].get("id", "") for t in all_tasks
+                if t["task"].get("id")
+                and isinstance(t["task"].get("metrics"), dict)
+                and t["task"]["metrics"].get("reqCount") == 0
+            ]
+            recon_dids = req_ok_dids + zero_req_dids
+            seen_req_ids = [r.get("id", "") for _, _, _, r in all_reqs]
+            for i in range(0, len(recon_dids), BATCH_SIZE):
+                chunk = recon_dids[i:i + BATCH_SIZE]
+                status = retry_db(
+                    lambda c=chunk: db.execute(
+                        f"WITH keep AS (SELECT unnest($2::text[]) AS req_id) "
+                        f"DELETE FROM {SCHEMA_STAGING}.stg_daily_report_hours h "
+                        f"WHERE h.task_did = ANY($1::text[]) "
+                        f"AND NOT EXISTS (SELECT 1 FROM keep WHERE keep.req_id = h.req_id)",
+                        c, seen_req_ids,
+                    ),
+                    description=f"reconcile reqs batch {i // BATCH_SIZE + 1}",
+                )
+                stale_reqs += int(status.rsplit(" ", 1)[-1])
+            skipped = len(tasks_with_reqs) - len(req_ok_dids)
+            logger.info(f"  Stale requirements deleted: {stale_reqs} "
+                        f"({len(recon_dids)} tasks reconciled, {skipped} skipped on failed fetch)")
+
+        if not requirements_only:
+            seen_timer_ids = [t.get("id", "") for _, _, _, t in all_timers]
+            for i in range(0, len(timer_ok_dids), BATCH_SIZE):
+                chunk = timer_ok_dids[i:i + BATCH_SIZE]
+                status = retry_db(
+                    lambda c=chunk: db.execute(
+                        f"WITH keep AS (SELECT unnest($2::text[]) AS timer_id) "
+                        f"DELETE FROM {SCHEMA_STAGING}.stg_daily_report_attendance h "
+                        f"WHERE h.task_did = ANY($1::text[]) "
+                        f"AND NOT EXISTS (SELECT 1 FROM keep WHERE keep.timer_id = h.timer_id)",
+                        c, seen_timer_ids,
+                    ),
+                    description=f"reconcile timers batch {i // BATCH_SIZE + 1}",
+                )
+                stale_timers += int(status.rsplit(" ", 1)[-1])
+            skipped = len(tasks_for_timers) - len(timer_ok_dids)
+            logger.info(f"  Stale timers deleted: {stale_timers} "
+                        f"({len(timer_ok_dids)} tasks reconciled, {skipped} skipped on failed fetch)")
+
         close_db()
 
         logger.info(f"\n{'='*60}")
@@ -474,6 +549,7 @@ class DailyReportsPipeline:
         logger.info(f"  Tasks: {len(stg_batch)}")
         logger.info(f"  Requirements: {len(req_stg_batch)}")
         logger.info(f"  Timers: {len(tmr_stg_batch)}")
+        logger.info(f"  Stale rows removed: {stale_reqs} reqs, {stale_timers} timers")
         logger.info(f"  Run ID: {RUN_ID}")
         logger.info(f"{'='*60}")
 
@@ -481,6 +557,8 @@ class DailyReportsPipeline:
             "tasks": len(stg_batch),
             "requirements": len(req_stg_batch),
             "timers": len(tmr_stg_batch),
+            "stale_requirements_deleted": stale_reqs,
+            "stale_timers_deleted": stale_timers,
         }
 
 
