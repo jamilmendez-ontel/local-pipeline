@@ -198,10 +198,21 @@ class TxDB:
 
     async def _create_pool(self):
         """Create the asyncpg connection pool with retry on transient failures."""
-        # Supabase's pooler also requires SSL
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
+        # Supabase's pooler requires SSL. Unlike db.py's legacy CERT_NONE,
+        # this module verifies the chain AND hostname against Supabase's
+        # published Root 2021 CA (certs/supabase-root-2021-ca.crt; the pooler
+        # cert is *.pooler.supabase.com signed by that private CA, so the
+        # system trust store cannot validate it). The strict-profile flag is
+        # cleared because the 2021 CA predates the keyUsage extension that
+        # Python 3.13+ enforces via VERIFY_X509_STRICT; chain and hostname
+        # verification remain fully enabled.
+        ca_file = os.environ.get(
+            "SUPABASE_TX_CA_FILE",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "certs", "supabase-root-2021-ca.crt"),
+        )
+        ssl_ctx = ssl.create_default_context(cafile=ca_file)
+        ssl_ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
         max_attempts = POOL_MAX_ATTEMPTS
         base_delay = POOL_BASE_DELAY  # seconds, doubles each retry
