@@ -1078,8 +1078,51 @@ def read_form_responses() -> list[dict]:
     return results
 
 
-def lookup_entry_by_id(db, entry_id: str) -> dict | None:
-    """Find the timer entry matching the given entry_id hash."""
+def lookup_entries_by_hash(db, entry_ids: list[str]) -> dict[str, dict]:
+    """Batch-resolve entry_id hashes against stg_timer_activities in ONE scan.
+
+    The hash is computed per row (no index can serve it), so each lookup is a
+    full-table scan. Unmatched sheet rows are re-checked every --apply run
+    forever; doing them one query per row blew past the workflow's job timeout
+    once the table grew (48 rows x ~6s/scan on 2026-07-09). One scan resolves
+    them all.
+    """
+    if not entry_ids:
+        return {}
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            SELECT * FROM (
+                SELECT LEFT(MD5(
+                    project_did || '|' || user_email || '|' ||
+                    (start_time AT TIME ZONE 'UTC')::text || '+00' || '|' ||
+                    COALESCE(site_name, 'None') || '|' ||
+                    COALESCE(site_id, 'None') || '|' ||
+                    COALESCE(task, 'None') || '|' ||
+                    COALESCE((end_time AT TIME ZONE 'UTC')::text || '+00', 'None') || '|' ||
+                    COALESCE(duration_min::text, 'None')
+                ), 12) AS _entry_id_hash,
+                project_did, project, user_email, start_time, site_name,
+                site_id, task, end_time, duration_min
+                FROM {SCHEMA_STAGING}.stg_timer_activities
+            ) t
+            WHERE _entry_id_hash = ANY($1::text[])
+        """, entry_ids),
+        description=f"batch lookup {len(entry_ids)} entries by hash",
+    )
+    result: dict[str, dict] = {}
+    for r in rows or []:
+        d = dict(r)
+        h = d.pop("_entry_id_hash")
+        result.setdefault(h, d)
+    return result
+
+
+def lookup_entry_by_id(db, entry_id: str, hash_map: dict[str, dict] | None = None) -> dict | None:
+    """Find the timer entry matching the given entry_id hash.
+
+    hash_map: optional pre-resolved {entry_id: row} from lookup_entries_by_hash();
+    when provided, the per-row full-table hash scan is skipped.
+    """
     # Check if we already have this entry stored in corrections or removals
     existing = retry_db(
         lambda: db.fetchrow(
@@ -1100,6 +1143,10 @@ def lookup_entry_by_id(db, entry_id: str) -> dict | None:
     )
     if existing_rm:
         return dict(existing_rm)
+
+    if hash_map is not None:
+        entry = hash_map.get(entry_id)
+        return dict(entry) if entry else None
 
     # Recompute hash in SQL to match Python's _make_entry_id()
     row = retry_db(
@@ -1295,13 +1342,23 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
         logger.info(f"Skipping {len(responses) - len(new_responses)} exact-duplicate responses "
                      f"(GSheet duplicate rows), {len(new_responses)} to process")
 
+    # Resolve all hashes not already stored in ONE table scan (each per-row
+    # scan is a full-table MD5 recompute; permanently-unmatched sheet rows
+    # otherwise re-scan the table every run and blow the job timeout).
+    scan_ids = [
+        r["entry_id"] for r in new_responses
+        if r["entry_id"] not in stored_correction_values
+        and r["entry_id"] not in stored_removal_ids
+    ]
+    hash_map = lookup_entries_by_hash(db, sorted(set(scan_ids)))
+
     for resp in new_responses:
         entry_id = resp["entry_id"]
         action = resp["action"]
         corrected_duration = resp.get("corrected_duration_min")
         reason = resp["reason"]
 
-        entry = lookup_entry_by_id(db, entry_id)
+        entry = lookup_entry_by_id(db, entry_id, hash_map=hash_map)
         if not entry:
             logger.warning(f"No timer entry found for entry_id={entry_id}, skipping")
             continue
