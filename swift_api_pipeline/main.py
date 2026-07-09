@@ -69,16 +69,40 @@ def run_orgs_projects_pipeline():
 
 
 def run_user_priorities_pipeline():
-    """Run user priorities extraction + transformation"""
+    """Run user priorities extraction + transformation.
+
+    Snapshot-aware: when the fetched snapshot is byte-identical to the last
+    loaded one, the extract returns None and the full delete+reload of raw
+    AND staging (~23.5k row writes at the 5-minute cadence) is skipped.
+    Freshness is unchanged: any real change still loads within one run.
+    The watermark advances only after a successful transform.
+    """
     from pipeline import run_user_priorities_extract
     from transform import run_user_priorities_transform
+    from config import SCHEMA_PIPELINE, get_db, retry_db
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# USER PRIORITIES PIPELINE")
     logger.info(f"{'#'*60}")
 
-    run_id = run_user_priorities_extract()
+    result = run_user_priorities_extract(skip_if_unchanged=True)
+    if result is None:
+        logger.info("Snapshot unchanged since last load: transform skipped")
+        return True
+
+    run_id, snapshot_hash = result
     run_user_priorities_transform(run_id)
+
+    retry_db(
+        lambda: get_db().execute(
+            f"INSERT INTO {SCHEMA_PIPELINE}.content_watermarks "
+            f"(pipeline_name, content_hash, updated_at) VALUES ($1, $2, now()) "
+            f"ON CONFLICT (pipeline_name) DO UPDATE SET "
+            f"content_hash = EXCLUDED.content_hash, updated_at = now()",
+            "user_priorities", snapshot_hash,
+        ),
+        description="advance user_priorities content watermark",
+    )
 
     return True
 
