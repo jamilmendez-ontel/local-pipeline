@@ -209,7 +209,7 @@ def capture_logs(logger_prefixes: Optional[Sequence[str]] = None):
         root_logger.removeHandler(handler)
 
 
-def snapshot_row_counts(tables: Optional[List] = None) -> Dict[str, int]:
+def snapshot_row_counts(tables: Optional[List] = None, estimate: bool = False) -> Dict[str, int]:
     """Take a snapshot of table row counts for email comparison.
 
     Retries once with a fresh DB pool if the connection is stale (common after
@@ -217,6 +217,13 @@ def snapshot_row_counts(tables: Optional[List] = None) -> Dict[str, int]:
 
     Args:
         tables: List of (schema, table) tuples to count. If None, returns empty.
+        estimate: Use pg_class.reltuples instead of COUNT(*). Exact counts
+            full-scan every table before AND after each run; at the 5-minute
+            pipelines' cadence that was hundreds of GB/day of disk reads
+            (Supabase Disk IO budget depletion, 2026-07-09). The churned
+            tables are autoanalyzed near-constantly, so the estimate tracks
+            the exact count closely. Used for high-frequency runs where the
+            counts only ever appear in a failure email.
     """
     if not tables:
         return {}
@@ -228,7 +235,14 @@ def snapshot_row_counts(tables: Optional[List] = None) -> Dict[str, int]:
             db = get_db()
             counts = {}
             for schema, table in tables:
-                count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
+                if estimate:
+                    count = db.fetchval(
+                        "SELECT greatest(reltuples, 0)::bigint FROM pg_class "
+                        "WHERE oid = to_regclass($1)",
+                        f"{schema}.{table}",
+                    )
+                else:
+                    count = db.fetchval(f'SELECT COUNT(*) FROM {schema}.{table}')
                 counts[f"{schema}.{table}"] = count if count is not None else 0
             return counts
         except Exception as e:

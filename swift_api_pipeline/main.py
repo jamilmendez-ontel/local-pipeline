@@ -392,15 +392,22 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
     still sent whenever send_email is True). Used for high-frequency pipelines
     (e.g. user_priorities every 10 min) where a success email every run is noise.
     """
-    tables = PIPELINE_TABLES.get(name)
+    # Counts exist only for the notification emails: skip them entirely when
+    # no email can be sent, and use cheap reltuples estimates for
+    # high-frequency runs (email_on_success=False) where they'd only ever
+    # show in a failure email. Exact COUNT(*) full-scans every table twice
+    # per run, which at a 5-minute cadence was a main driver of the Supabase
+    # Disk IO budget depletion (2026-07-09).
+    tables = PIPELINE_TABLES.get(name) if send_email else None
+    estimate_counts = not email_on_success
     started_at = datetime.now(timezone.utc)
-    row_counts_before = snapshot_row_counts(tables)
+    row_counts_before = snapshot_row_counts(tables, estimate=estimate_counts)
     with capture_logs(logger_prefixes=logger_prefixes) as log_handler:
         try:
             outcome = func()
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
-            row_counts_after = snapshot_row_counts(tables)
+            row_counts_after = snapshot_row_counts(tables, estimate=estimate_counts)
 
             if isinstance(outcome, PipelineOutcome) and not outcome.is_clean():
                 overall = outcome.email_status()        # PARTIAL FAILURE | ABNORMAL ROW COUNT
@@ -453,7 +460,7 @@ def run_pipeline_with_notification(func, name, send_email=True, logger_prefixes=
         except Exception as e:
             ended_at = datetime.now(timezone.utc)
             duration = (ended_at - started_at).total_seconds()
-            row_counts_after = snapshot_row_counts(tables)
+            row_counts_after = snapshot_row_counts(tables, estimate=estimate_counts)
             result = PipelineResult(
                 pipeline_name=name,
                 status="FAILED",

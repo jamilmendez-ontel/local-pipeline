@@ -312,7 +312,17 @@ class DailyReportsPipeline:
                     f"submitted_by=EXCLUDED.submitted_by, submitted_on=EXCLUDED.submitted_on, "
                     f"approved_by=EXCLUDED.approved_by, approved_on=EXCLUDED.approved_on, "
                     f"assigned_approver=EXCLUDED.assigned_approver, "
-                    f"run_id=EXCLUDED.run_id, loaded_at=NOW()",
+                    f"run_id=EXCLUDED.run_id, loaded_at=NOW() "
+                    # Skip no-op rewrites: unconditionally bumping run_id/loaded_at
+                    # rewrote all ~46k window rows every 5-min run (WAL + autovacuum
+                    # churn that depleted the Supabase Disk IO budget, 2026-07-09).
+                    f"WHERE (stg_daily_reports.task_status, stg_daily_reports.req_count, "
+                    f" stg_daily_reports.submitted_by, stg_daily_reports.submitted_on, "
+                    f" stg_daily_reports.approved_by, stg_daily_reports.approved_on, "
+                    f" stg_daily_reports.assigned_approver) IS DISTINCT FROM "
+                    f"(EXCLUDED.task_status, EXCLUDED.req_count, EXCLUDED.submitted_by, "
+                    f" EXCLUDED.submitted_on, EXCLUDED.approved_by, EXCLUDED.approved_on, "
+                    f" EXCLUDED.assigned_approver)",
                     c,
                 ),
                 description=f"stg tasks batch {i // BATCH_SIZE + 1}",
@@ -408,7 +418,13 @@ class DailyReportsPipeline:
                     f"hours_worked=EXCLUDED.hours_worked, work_description=EXCLUDED.work_description, "
                     f"req_status=EXCLUDED.req_status, updated_at_api=EXCLUDED.updated_at_api, "
                     f"file_uploaded_count=EXCLUDED.file_uploaded_count, "
-                    f"run_id=EXCLUDED.run_id, loaded_at=NOW()",
+                    f"run_id=EXCLUDED.run_id, loaded_at=NOW() "
+                    # Skip no-op rewrites (Disk IO churn; see stg_daily_reports upsert)
+                    f"WHERE (stg_daily_report_hours.hours_worked, stg_daily_report_hours.work_description, "
+                    f" stg_daily_report_hours.req_status, stg_daily_report_hours.updated_at_api, "
+                    f" stg_daily_report_hours.file_uploaded_count) IS DISTINCT FROM "
+                    f"(EXCLUDED.hours_worked, EXCLUDED.work_description, EXCLUDED.req_status, "
+                    f" EXCLUDED.updated_at_api, EXCLUDED.file_uploaded_count)",
                     c,
                 ),
                 description=f"stg reqs batch {i // BATCH_SIZE + 1}",
@@ -459,7 +475,11 @@ class DailyReportsPipeline:
                     f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) "
                     f"ON CONFLICT (task_did, timer_id) DO UPDATE SET "
                     f"timer_start=EXCLUDED.timer_start, timer_end=EXCLUDED.timer_end, "
-                    f"duration_min=EXCLUDED.duration_min, run_id=EXCLUDED.run_id, loaded_at=NOW()",
+                    f"duration_min=EXCLUDED.duration_min, run_id=EXCLUDED.run_id, loaded_at=NOW() "
+                    # Skip no-op rewrites (Disk IO churn; see stg_daily_reports upsert)
+                    f"WHERE (stg_daily_report_attendance.timer_start, stg_daily_report_attendance.timer_end, "
+                    f" stg_daily_report_attendance.duration_min) IS DISTINCT FROM "
+                    f"(EXCLUDED.timer_start, EXCLUDED.timer_end, EXCLUDED.duration_min)",
                     c,
                 ),
                 description=f"stg timers batch {i // BATCH_SIZE + 1}",
@@ -542,17 +562,31 @@ class DailyReportsPipeline:
                         f"({len(timer_ok_dids)} tasks reconciled, {skipped} skipped on failed fetch)")
 
         # Step 6: refresh the email alias map (migration 167/169). Swift-side
-        # feed of reference.ref_employee_emails: full recompute, idempotent,
-        # so a member submitting under a new email registers within one run.
+        # feed of reference.ref_employee_emails: full recompute, idempotent.
+        # Throttled to hourly: the harvest reads ~150 MB per call, which at the
+        # rolling pipeline's 5-minute cadence was ~44 GB/day of disk reads and
+        # a main driver of the Supabase Disk IO budget depletion (2026-07-09).
+        # The harvest bumps last_seen on every evidenced alias, so
+        # max(last_seen) marks the last successful harvest.
         # Best-effort: a harvest failure must not fail the pipeline run (the
-        # next run self-heals).
+        # next due run self-heals).
         logger.info("\n=== Step 6: Harvesting email aliases ===")
         try:
-            harvested = retry_db(
-                lambda: db.fetchval("SELECT reference.harvest_employee_email_aliases()"),
-                description="email alias harvest",
+            harvest_due = retry_db(
+                lambda: db.fetchval(
+                    "SELECT COALESCE(max(last_seen) < now() - interval '55 minutes', true) "
+                    "FROM reference.ref_employee_emails"
+                ),
+                description="email alias harvest due check",
             )
-            logger.info(f"  Alias rows upserted: {harvested}")
+            if harvest_due:
+                harvested = retry_db(
+                    lambda: db.fetchval("SELECT reference.harvest_employee_email_aliases()"),
+                    description="email alias harvest",
+                )
+                logger.info(f"  Alias rows upserted: {harvested}")
+            else:
+                logger.info("  Skipped (harvested within the last hour)")
         except Exception as exc:  # noqa: BLE001 - alias freshness is best-effort
             logger.warning(f"  Email alias harvest failed (non-fatal): {exc}")
 
