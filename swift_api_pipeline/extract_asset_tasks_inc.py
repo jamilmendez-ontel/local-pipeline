@@ -51,6 +51,8 @@ def plan_asset_visits(fetched_assets, stored_assets):
         fetched_ids.add(did)
         stored = stored_assets.get(did)
         fetched_ts = epoch_to_ts(a.get(FIELD_MAP["last_updated"]))
+        # Deliberate bias: an entity with a missing/unparseable lastUpdated
+        # is ALWAYS visited/written. Fail toward extra work, never staleness.
         if stored is None or stored.get("last_updated") is None \
                 or fetched_ts is None or fetched_ts > stored["last_updated"]:
             visits.append(a)
