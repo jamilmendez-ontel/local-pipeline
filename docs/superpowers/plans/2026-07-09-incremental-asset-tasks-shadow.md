@@ -117,6 +117,8 @@ if __name__ == "__main__":
 Run: `cd swift_api_pipeline && python probe_inc_asset_tasks.py --project-number 13`
 Expected: key inventories for all three levels, `lastUpdated` present at every level, ids unique. If the asset FK for `fetch_tasks` is not `id`, note the correct field.
 
+ALSO inventory the `metrics` object at project and asset level for child-count fields (e.g. `taskCount`, `assetCount`). If asset metrics expose a task count, deletions become detectable from the parent's count mismatch alone (stored count vs fetched count triggers a descend + reconcile), which replaces the full-walk sweep at GC scale. Record what count fields exist in the findings doc.
+
 - [ ] **Step 3: Fill the findings doc's "Still open" section**
 
 Record in `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`: the three key inventories, the confirmed FK field, id-uniqueness results, requirement-count field name, and the DELETE-propagation test result (procedure: Jamil deletes one disposable test task in Swift; re-run the probe against its asset and compare `lastUpdated` before/after). If delete does NOT propagate, keep "weekly full-walk safety net REQUIRED" in the doc; Task 6 wires it either way behind a flag.
@@ -648,7 +650,9 @@ concurrency:
 #   upload pipeline_logs on failure like the other workflows
 ```
 
-No cron and no Apps Script dispatcher yet: pilot runs are manual `gh workflow run`. Wiring the nightly dispatch (and the weekly `--full-walk` if Task 1 found deletes don't propagate) happens AFTER a clean week, per the Apps-Script-for-scheduling convention.
+No cron and no Apps Script dispatcher yet: pilot runs are manual `gh workflow run`. Wiring the schedule happens AFTER a clean week, per the Apps-Script-for-scheduling convention, as two Apps Script triggers dispatching `pipeline-asset-tasks-inc`:
+- daily incremental (`client_payload.mode = "incremental"`)
+- **Sunday `--full-walk` ghost sweep** (`client_payload.mode = "full-walk"`, Sunday 06:00 PHT = Saturday 6 PM ET, outside the 1-10 PM PHT shift; decided by Jamil 2026-07-09). At TS13+ pilot scale a weekly full walk is cheap insurance. It does NOT scale to GC (15M+ rows); see Task 9 for the GC-scale deletion strategy.
 
 - [ ] **Step 2: Dispatch once and watch it**
 
@@ -682,6 +686,11 @@ README paragraph must state: shadow status, that the current pipeline remains au
 4. Delete-propagation behavior confirmed and covered (either natively or by the weekly full-walk).
 
 Then: re-structure the current asset-tasks pipeline on this pattern and build gc-asset-tasks the same way (its data is mostly untouched daily, the best case for this design).
+
+**GC-scale deletion strategy (15M+ rows; a weekly full walk does NOT scale there).** In priority order:
+1. If Task 1's delete test shows hard deletes bump the parent `lastUpdated`: no sweep needed at any scale, the normal walk sees them.
+2. If asset/project `metrics` expose child counts (Task 1 inventories this): detect deletions from count mismatch (stored vs fetched count on the CHEAP parent-list call), descend + reconcile only mismatched scopes. Near-free at any scale.
+3. Fallback only: rotating partial sweep, 1/Nth of assets per night round-robin so full coverage every N days without any single heavy run. The Sunday full walk stays a pilot-scale tool.
 
 - [ ] **Step 2: Commit + push**
 
