@@ -44,6 +44,17 @@ POOL_MAX_ATTEMPTS = 4       # _create_pool retries
 POOL_BASE_DELAY = 3         # seconds, doubles each retry: 3, 6, 12
 POOL_READY_TIMEOUT = 90     # seconds start() waits; must exceed total retry budget (~81s)
 
+# Pre-warmed connections. The session-mode pooler caps ALL clients at 15, and
+# create_pool must open min_size connections upfront or it fails outright, so
+# a high floor both hoards slots for the whole run and needs that many free
+# slots at once just to start (the 2026-07-09 EMAXCONNSESSION pile-up). The
+# pool still grows on demand to max_size, so threaded extractors keep their
+# concurrency either way. Heavy asset-tasks workflows set POOL_MIN_SIZE=4 in
+# their env to keep the designed pre-warm. Rollback to the old behavior:
+# POOL_MIN_SIZE=4 in a workflow's env block (no code change needed).
+POOL_MIN_SIZE = max(1, int(os.getenv("POOL_MIN_SIZE", "1")))
+POOL_MAX_SIZE = 20
+
 
 def _jsonb_binary_encoder(value):
     """Encode Python object to PostgreSQL JSONB binary format (version byte + UTF-8 JSON)."""
@@ -121,7 +132,7 @@ class PipelineDB:
             raise RuntimeError(f"Database pool failed to initialize within {POOL_READY_TIMEOUT}s")
         if self._pool is None:
             raise RuntimeError("Database pool thread exited without creating a pool")
-        logger.info("Database pool ready (min=4, max=20)")
+        logger.info(f"Database pool ready (min={POOL_MIN_SIZE}, max={POOL_MAX_SIZE})")
 
     def _run_loop(self):
         """Entry point for the background thread."""
@@ -152,8 +163,8 @@ class PipelineDB:
             try:
                 self._pool = await asyncpg.create_pool(
                     DSN,
-                    min_size=4,
-                    max_size=20,
+                    min_size=POOL_MIN_SIZE,
+                    max_size=POOL_MAX_SIZE,
                     command_timeout=300,
                     timeout=POOL_CONNECT_TIMEOUT,  # per-connection acquire cap; slow connects fail fast and retry
                     init=_init_connection,

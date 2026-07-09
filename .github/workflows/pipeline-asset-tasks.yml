@@ -51,6 +51,8 @@ concurrency:
 
 env:
   PIPELINE_DIR: swift_api_pipeline
+  # Threaded extractors (6-12 DB writer workers): keep the designed pre-warm.
+  POOL_MIN_SIZE: "4"
 
 jobs:
   asset-tasks:

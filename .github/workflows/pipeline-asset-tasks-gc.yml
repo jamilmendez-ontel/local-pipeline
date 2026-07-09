@@ -49,6 +49,8 @@ concurrency:
 
 env:
   PIPELINE_DIR: swift_api_pipeline
+  # Threaded extractors (6-12 DB writer workers): keep the designed pre-warm.
+  POOL_MIN_SIZE: "4"
   # Default org scope — TSC Construction.
   DEFAULT_GC_ORG_DIDS: '-LSLnbjcxlr7_LrWCzeH'
   # Default project scope — 17 projects under TSC needed for the
