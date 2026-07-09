@@ -6,6 +6,8 @@
 
 **Architecture:** First run seeds a full baseline. Every later run fetches the cheap asset list per project, descends only into assets whose `lastUpdated` moved past what's stored, fetches task lists only for those assets, and upserts only tasks whose `lastUpdated` moved. Deletions are handled by keep-list reconcile inside every scope that was actually visited with a successful fetch. The stored rows themselves are the watermark (self-healing); a per-project skip check against `pipeline.content_watermarks` avoids even the asset-list call for untouched projects. All DB access goes through the transaction-mode pooler (port 6543) so N workers hold zero idle session slots.
 
+**Pruning rules are empirically verified** (Jamil, devtools, 2026-07-09; authority: `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`): org lastUpdated is frozen so the walk starts at the project list; project / asset-project / asset-task lastUpdated are all reliable, and the asset-task level even bumps for file-requirement upload/removal. The ONE exception: never gate on a file-requirement's own lastUpdated (it does not move); read its `metrics.fileUploadedCount` / `fileSubmittedCount` / `status` count fields instead, and only ever fetch requirements because the parent asset-task bumped.
+
 **Tech Stack:** Python 3.12, asyncpg via a new `db_tx.py` (transaction pooler, `statement_cache_size=0`), requests, ThreadPoolExecutor (6 workers, same as current pipeline), GitHub Actions (workflow_dispatch only during pilot), pytest for pure-function tests.
 
 ## Global Constraints
@@ -23,19 +25,21 @@
 
 ---
 
-### Task 1: API probe script + findings doc
+### Task 1: API probe script + close out the findings doc
 
-The walk depends on exact field names and `lastUpdated` semantics of three endpoints already used elsewhere in the repo (`extract_daily_reports.py` uses them for daily-report projects; TS asset projects are the same Swift shapes but must be confirmed):
-- `GET /api/organizations/{org_id}/projects` (project rows; need `lastUpdated`)
-- `GET /api/projects/{project_did}/assets` (asset rows; need `id`, `lastUpdated`, name/requirement fields)
-- `GET /api/asset-projects/{asset_project_id}/asset-tasks` (task rows; need `id`, `lastUpdated`, name/status/scheduled/people fields)
+The `lastUpdated` semantics are ALREADY VERIFIED (Jamil, devtools, 2026-07-09) and recorded in `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`, which is the authority for pruning rules. Summary: org lastUpdated is frozen (never check it); project, asset-project, and asset-task lastUpdated are all reliable (asset-task bumps even for file-requirement upload/removal); file-requirement lastUpdated is UNRELIABLE, use its `metrics.fileUploadedCount` / `fileSubmittedCount` / `status` count fields instead; personnel lastUpdated reflects profile activity, never use it for pruning.
+
+This task verifies only what remains open (listed in the findings doc's last section), using the three endpoints already exercised by `extract_daily_reports.py`:
+- `GET /api/organizations/{org_id}/projects` (project rows)
+- `GET /api/projects/{project_did}/assets` (asset rows)
+- `GET /api/asset-projects/{asset_project_id}/asset-tasks` (task rows)
 
 **Files:**
 - Create: `swift_api_pipeline/probe_inc_asset_tasks.py`
-- Create: `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`
+- Modify: `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md` (fill the "Still open" section)
 
 **Interfaces:**
-- Produces: the findings doc that Task 4's `FIELD_MAP` constants must match, and the empirical answers to: (a) which asset field is the FK for the asset-tasks endpoint (expected `id`), (b) does DELETING a task bump asset/project `lastUpdated`, (c) are task `id` values unique within a project, (d) which asset field carries the requirement count.
+- Produces: the completed findings doc that Task 4's `FIELD_MAP` constants must match. Open items to answer: (a) exact payload key inventories for a TS project, (b) which asset field is the FK for the asset-tasks endpoint (expected `id`), (c) id uniqueness within project for assets and tasks, (d) which asset field carries the requirement count, (e) does DELETING a task bump the parent lastUpdated (submits/approvals/cancellations confirmed; hard delete untested; the weekly `--full-walk` stays mandatory until confirmed).
 
 - [ ] **Step 1: Write the probe script**
 
@@ -113,9 +117,9 @@ if __name__ == "__main__":
 Run: `cd swift_api_pipeline && python probe_inc_asset_tasks.py --project-number 13`
 Expected: key inventories for all three levels, `lastUpdated` present at every level, ids unique. If the asset FK for `fetch_tasks` is not `id`, note the correct field.
 
-- [ ] **Step 3: Write the findings doc**
+- [ ] **Step 3: Fill the findings doc's "Still open" section**
 
-Record in `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`: the three key inventories, the confirmed FK field, id-uniqueness results, requirement-count field name, and the DELETE-propagation test result (procedure: Jamil deletes one disposable test task in Swift; re-run the probe against its asset and compare `lastUpdated` before/after). If delete does NOT propagate, add "weekly full-walk safety net REQUIRED" to the doc; Task 6 wires it either way behind a flag.
+Record in `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`: the three key inventories, the confirmed FK field, id-uniqueness results, requirement-count field name, and the DELETE-propagation test result (procedure: Jamil deletes one disposable test task in Swift; re-run the probe against its asset and compare `lastUpdated` before/after). If delete does NOT propagate, keep "weekly full-walk safety net REQUIRED" in the doc; Task 6 wires it either way behind a flag.
 
 - [ ] **Step 4: Commit**
 
