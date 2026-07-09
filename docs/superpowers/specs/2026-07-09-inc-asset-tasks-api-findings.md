@@ -68,11 +68,18 @@ successfully on both projects, exactly as `extract_daily_reports.py` does.
 - **Project `metrics`**: counts live in NESTED dicts, not top-level. `metrics.asset` aggregates across all asset-projects: `assetProjectCount` (TS19's matched the fetched row count exactly, 4,727; TS17 reported 5,062 vs 5,025 fetched, a +37 drift; treat project-level aggregates as advisory, not reconciliation-grade), plus `taskCount`, `reqCount`, `milestoneCount` and the same per-status/file/form splits. `metrics.project` carries the same shape for project-level (non-asset) tasks only. `metrics.lastUpdated` and `metrics.status` are the other members.
 - **Asset-task `metrics`**: `reqCount` + splits (see d); requirement deletion under a task is likewise count-detectable.
 
-### Still open: DELETE propagation (pending-human-test)
+### Confirmed 2026-07-09 evening: attachment hard-delete propagates to the task
+
+Jamil hard-deleted an attachment PDF from a requirement; the parent TASK's
+lastUpdated bumped. This confirms with a true deletion what the reliability
+table showed for uploads: file-level changes (add AND remove) are visible at
+the asset-task layer. The requirement's own lastUpdated remains untrusted.
+
+## Still open: DELETE propagation (pending-human-test)
 
 Does hard-deleting an asset-task bump the parent asset-project/project
 `lastUpdated`? Submits/approvals/cancellations are confirmed to propagate; hard
-deletes remain UNTESTED (requires a human to delete a task in Swift; not
+deletes of a WHOLE TASK remain UNTESTED (requires a human to delete a task in Swift; not
 scriptable read-only). **Until confirmed, the weekly `--full-walk` safety net
 stays mandatory** (Task 6 wires it behind a flag either way).
 
