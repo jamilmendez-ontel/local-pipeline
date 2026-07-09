@@ -541,6 +541,21 @@ class DailyReportsPipeline:
             logger.info(f"  Stale timers deleted: {stale_timers} "
                         f"({len(timer_ok_dids)} tasks reconciled, {skipped} skipped on failed fetch)")
 
+        # Step 6: refresh the email alias map (migration 167/169). Swift-side
+        # feed of reference.ref_employee_emails: full recompute, idempotent,
+        # so a member submitting under a new email registers within one run.
+        # Best-effort: a harvest failure must not fail the pipeline run (the
+        # next run self-heals).
+        logger.info("\n=== Step 6: Harvesting email aliases ===")
+        try:
+            harvested = retry_db(
+                lambda: db.fetchval("SELECT reference.harvest_employee_email_aliases()"),
+                description="email alias harvest",
+            )
+            logger.info(f"  Alias rows upserted: {harvested}")
+        except Exception as exc:  # noqa: BLE001 - alias freshness is best-effort
+            logger.warning(f"  Email alias harvest failed (non-fatal): {exc}")
+
         close_db()
 
         logger.info(f"\n{'='*60}")
