@@ -84,3 +84,51 @@ task in Swift; re-run and compare the asset-project's and project's
 pruning fully covers deletes and the weekly full-walk can be demoted to a
 paranoia check. Note: the asset's `metrics.taskCount` drop is an independent
 delete signal even if `lastUpdated` does NOT bump.
+
+## Task 5 mapping notes (verified live 2026-07-09, throwaway probe, deleted after use)
+
+The daily-reports pipeline's `task.get("submittedBy")` etc. (top-level, used
+in `extract_daily_reports.py`) turned out to be the SAME shape used by the
+"asset-tasks" collection rows in the TS17/TS19 pilot -- the earlier probe's
+key inventory (section (a) above) just happened to sample rows where these
+sparse fields were unpopulated. A targeted probe across ~1,200 real
+asset-task rows (`collection == "asset-tasks"`) on TS17 confirmed all of the
+following are top-level keys, not nested under `ast` or `task`:
+
+| stg_asset_tasks_inc column | Source path | Notes |
+|---|---|---|
+| `task_did` | `task["id"]` | |
+| `project_did` | `project["project_did"]` (caller-supplied) | |
+| `project_status` | `project.get("status")` | project row's own status, denormalized onto every task |
+| `asset_did` | `asset["id"]` (asset-project row's top-level id) | |
+| `asset_id` | `asset.get("identifier")` (`FIELD_MAP["asset_identifier"]`) | sparse per Task 1 findings; None-safe |
+| `asset_name` | `asset.get("name")` | |
+| `asset_requirement_count` | `asset.get("metrics", {}).get("reqCount")` | from the ASSET's metrics, denormalized onto every task row under it (same design as the existing `stg_asset_tasks`) |
+| `task_name` | `task.get("name")` | |
+| `task_status` | `task.get("status")` | audit-hash column |
+| `task_scheduled` | `task.get("scheduled")` -> epoch ms -> `America/New_York` calendar date | audit-hash column; NEW top-level key not listed in the original Task 1 key inventory (that inventory sampled only one asset's 89 rows and missed it) |
+| `task_assigned_to_did/_collection/_name` | `task.get("assignedTo", {}).get("id"/"collection"/"name")` | |
+| `task_assigned_to_email` | `task.get("assignedTo", {}).get("email")` | path is real but **0/67 populated** in the probe sample: `assignedTo`'s nested `type` sub-dict differs from the personnel dicts below (only `collection`+`id`, no name-record fields), i.e. `assignedTo` can reference a non-personnel entity that has no email. NULL is expected/correct for most rows, not a mapping failure. |
+| `task_submitted_on` / `task_approved_on` / `task_cancelled_on` | `task.get("submittedOn"/"approvedOn"/"cancelledOn")` -> epoch ms -> `America/New_York` calendar date | matches `transform.py`'s SQL date semantics for `stg_asset_tasks` so the two tables diff cleanly |
+| `task_submitted_by_did/_name/_email` | `task.get("submittedBy", {}).get("id"/"name"/"email")` | personnel dict; 81/81 populated rows carried id+collection+name+email together in the probe |
+| `task_approved_by_did/_name/_email` | `task.get("approvedBy", {}).get(...)` | same personnel-dict shape, 81/81 |
+| `task_cancelled_by_did/_name/_email` | `task.get("cancelledBy", {}).get(...)` | same personnel-dict shape, 20/20 |
+| `task_name_clean` | `clean_task_name(task.get("name"))` (imported from `transform.py`, not copied) | audit-hash column |
+| `last_updated` | `task.get("lastUpdated")` -> epoch ms -> UTC datetime | audit-hash column (via `task_did` join) |
+
+No column had to be loaded as NULL for lack of a source path. The only
+genuinely sparse column is `task_assigned_to_email` (structural, documented
+above), and `task_cancelled_on`/`task_cancelled_by_*` are NULL whenever a
+task was never cancelled (expected, not a gap).
+
+Personnel dict shape (`submittedBy`/`approvedBy`/`cancelledBy`, and
+`scheduledBy` which has no destination column): `ETag, aliasFor, avc,
+collection, createdBy, dateCreated, email, firstName, id, lastName,
+lastOnline, lastSeen, lastUpdated, name, organization`.
+
+`assignedTo` shape (no `email`): `ETag, avc, collection, createdBy,
+dateCreated, id, lastUpdated, name, organization, type` (`type` is itself a
+`{collection, id}` reference, not a scalar).
+
+`scheduled` is epoch millis (int), same encoding as `lastUpdated` et al.
+`sched_idx` is an unrelated opaque string id, not used.

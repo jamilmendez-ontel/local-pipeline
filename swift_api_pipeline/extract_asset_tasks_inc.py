@@ -7,7 +7,17 @@ changed tasks + keep-list reconcile inside every successfully-fetched
 scope. See docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md
 and the API findings doc for field semantics.
 """
+import json
+import logging
+import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+from extract import SwiftAPIExtractor
+from extract_daily_reports import DailyReportsPipeline
+from transform import clean_task_name
+
+logger = logging.getLogger("pipeline.inc_asset_tasks")
 
 # FIELD_MAP: single place where Swift payload keys are named. MUST match
 # docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md; update
@@ -84,3 +94,386 @@ def plan_task_writes(fetched_tasks, stored_task_ts):
             writes.append(t)
     missing = set(stored_task_ts) - fetched_ids
     return writes, missing
+
+
+# ---------------------------------------------------------------------------
+# Walker IO: fetcher, field-path mapping, guarded upserts, keep-list reconcile
+#
+# Field paths verified live against TS17 2026-07-09 (throwaway probe, keys
+# only, deleted after use). See "Task 5 mapping notes" in
+# docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md for the
+# full table and the assignedTo/email sparsity finding.
+# ---------------------------------------------------------------------------
+
+TZ_ET = ZoneInfo("America/New_York")
+
+BATCH_SIZE = 500
+
+
+class IncFetcher(DailyReportsPipeline):
+    """DailyReportsPipeline's fetch_assets/fetch_tasks/_request, without its
+    DB dependency. BaseExtractor.__init__ (used by DailyReportsPipeline)
+    calls get_db(), which needs the direct DB host (IPv6-only, requires
+    Cloudflare WARP). This walker only needs the API side here -- all DB
+    access goes through the caller's get_tx_db() facade (transaction pooler,
+    no WARP needed) -- so authenticate via SwiftAPIExtractor instead, same
+    as probe_inc_asset_tasks.py's ProbeFetcher. _request()'s 401 retry path
+    (self.ext.authenticate() / self.ext.token) works unchanged.
+    """
+
+    def __init__(self):
+        ex = SwiftAPIExtractor()
+        ex.authenticate()
+        self.ext = ex
+        self.headers = {"Authorization": f"Bearer {ex.token}"}
+        self.base = ex.base_url
+
+
+_fetcher_lock = threading.Lock()
+_fetcher = None
+
+
+def _get_fetcher():
+    """Shared IncFetcher singleton so concurrent per-project walks (Task 6's
+    ThreadPoolExecutor) authenticate once instead of once per project."""
+    global _fetcher
+    if _fetcher is None:
+        with _fetcher_lock:
+            if _fetcher is None:
+                _fetcher = IncFetcher()
+    return _fetcher
+
+
+def _get_field(d, spec):
+    """Resolve a FIELD_MAP value against dict d: spec is either a plain key
+    or an (outer, inner) tuple path (e.g. FIELD_MAP["req_count"])."""
+    if isinstance(spec, tuple):
+        outer, inner = spec
+        sub = d.get(outer)
+        return sub.get(inner) if isinstance(sub, dict) else None
+    return d.get(spec)
+
+
+def epoch_to_et_date(val):
+    """Swift epoch millis -> America/New_York calendar date (None-safe).
+
+    Matches transform.py's SQL date semantics for stg_asset_tasks
+    (TO_TIMESTAMP(...) AT TIME ZONE 'America/New_York')::date, so
+    stg_asset_tasks_inc's date columns are directly diffable by the drift
+    audit against the current pipeline's output.
+    """
+    dt = epoch_to_ts(val)
+    if dt is None:
+        return None
+    return dt.astimezone(TZ_ET).date()
+
+
+def _person_fields(d):
+    """Extract (did, collection, name, email) from a nested personnel/entity
+    dict (assignedTo, submittedBy, approvedBy, cancelledBy). Confirmed live
+    (2026-07-09 probe): submittedBy/approvedBy/cancelledBy are personnel
+    records and reliably carry id/collection/name/email together whenever
+    populated. assignedTo can reference a non-personnel entity (its 'type'
+    sub-dict differs) and never carried an 'email' key in the probe sample
+    (0/67 populated rows) -- the path is real, the field is just sparse for
+    that reason. See mapping notes in the findings doc.
+    """
+    if not isinstance(d, dict) or not d:
+        return None, None, None, None
+    return d.get("id"), d.get("collection"), d.get("name"), d.get("email")
+
+
+STG_COLS = (
+    "task_did, project_did, project_status, asset_did, asset_id, asset_name, "
+    "asset_requirement_count, task_name, task_status, task_scheduled, "
+    "task_assigned_to_did, task_assigned_to_collection, task_assigned_to_name, "
+    "task_assigned_to_email, task_submitted_on, task_submitted_by_did, "
+    "task_submitted_by_name, task_submitted_by_email, task_approved_on, "
+    "task_approved_by_did, task_approved_by_name, task_approved_by_email, "
+    "task_cancelled_on, task_cancelled_by_did, task_cancelled_by_name, "
+    "task_cancelled_by_email, task_name_clean, last_updated"
+)
+
+# Guarded upsert: only rewrite when business payload OR last_updated moved.
+UPSERT_TASK = f"""
+INSERT INTO data_staging.stg_asset_tasks_inc ({STG_COLS}, loaded_at)
+VALUES ({",".join(f"${i}" for i in range(1, 29))}, now())
+ON CONFLICT (task_did) DO UPDATE SET
+  project_status=EXCLUDED.project_status, asset_id=EXCLUDED.asset_id,
+  asset_name=EXCLUDED.asset_name,
+  asset_requirement_count=EXCLUDED.asset_requirement_count,
+  task_name=EXCLUDED.task_name, task_status=EXCLUDED.task_status,
+  task_scheduled=EXCLUDED.task_scheduled,
+  task_assigned_to_did=EXCLUDED.task_assigned_to_did,
+  task_assigned_to_collection=EXCLUDED.task_assigned_to_collection,
+  task_assigned_to_name=EXCLUDED.task_assigned_to_name,
+  task_assigned_to_email=EXCLUDED.task_assigned_to_email,
+  task_submitted_on=EXCLUDED.task_submitted_on,
+  task_submitted_by_did=EXCLUDED.task_submitted_by_did,
+  task_submitted_by_name=EXCLUDED.task_submitted_by_name,
+  task_submitted_by_email=EXCLUDED.task_submitted_by_email,
+  task_approved_on=EXCLUDED.task_approved_on,
+  task_approved_by_did=EXCLUDED.task_approved_by_did,
+  task_approved_by_name=EXCLUDED.task_approved_by_name,
+  task_approved_by_email=EXCLUDED.task_approved_by_email,
+  task_cancelled_on=EXCLUDED.task_cancelled_on,
+  task_cancelled_by_did=EXCLUDED.task_cancelled_by_did,
+  task_cancelled_by_name=EXCLUDED.task_cancelled_by_name,
+  task_cancelled_by_email=EXCLUDED.task_cancelled_by_email,
+  task_name_clean=EXCLUDED.task_name_clean,
+  last_updated=EXCLUDED.last_updated, loaded_at=now()
+WHERE stg_asset_tasks_inc.last_updated IS DISTINCT FROM EXCLUDED.last_updated
+   OR (stg_asset_tasks_inc.task_status, stg_asset_tasks_inc.task_name)
+      IS DISTINCT FROM (EXCLUDED.task_status, EXCLUDED.task_name)
+"""
+
+# Guarded upsert for the asset-level watermark store.
+UPSERT_ASSET = """
+INSERT INTO data_staging.stg_assets_inc
+  (asset_did, project_did, asset_id, asset_name, asset_requirement_count,
+   last_updated, loaded_at)
+VALUES ($1, $2, $3, $4, $5, $6, now())
+ON CONFLICT (asset_did) DO UPDATE SET
+  project_did=EXCLUDED.project_did, asset_id=EXCLUDED.asset_id,
+  asset_name=EXCLUDED.asset_name,
+  asset_requirement_count=EXCLUDED.asset_requirement_count,
+  last_updated=EXCLUDED.last_updated, loaded_at=now()
+WHERE (stg_assets_inc.last_updated, stg_assets_inc.asset_name,
+       stg_assets_inc.asset_requirement_count)
+      IS DISTINCT FROM
+      (EXCLUDED.last_updated, EXCLUDED.asset_name,
+       EXCLUDED.asset_requirement_count)
+"""
+
+# Guarded upsert for the raw payload archive; guard purely on payload
+# equality (raw rows have no separate business columns to diff on).
+UPSERT_RAW_TASK = """
+INSERT INTO data_raw.raw_asset_tasks_inc
+  (task_did, asset_did, project_did, data, last_updated, loaded_at)
+VALUES ($1, $2, $3, $4::jsonb, $5, now())
+ON CONFLICT (task_did) DO UPDATE SET
+  asset_did=EXCLUDED.asset_did, project_did=EXCLUDED.project_did,
+  data=EXCLUDED.data, last_updated=EXCLUDED.last_updated, loaded_at=now()
+WHERE raw_asset_tasks_inc.data IS DISTINCT FROM EXCLUDED.data
+"""
+
+# Watermark advance: guarded so a walk that saw nothing new (e.g. baseline
+# re-run) never rewrites the row.
+UPSERT_WATERMARK = """
+INSERT INTO pipeline.content_watermarks (pipeline_name, content_hash, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (pipeline_name) DO UPDATE SET
+  content_hash=EXCLUDED.content_hash, updated_at=now()
+WHERE content_watermarks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+"""
+
+
+def task_to_stg_row(project, asset, task):
+    """Map (project, asset, task) dicts from the Swift hierarchy API into a
+    tuple matching STG_COLS' column order for stg_asset_tasks_inc.
+
+    project: dict with "project_did" (required) and "status" (optional,
+    the project's own status, denormalized onto every task row as
+    project_status).
+    asset: one row from fetch_assets(project_did) (asset-project level);
+    its metrics.reqCount and identifier/name are denormalized onto every
+    task under it, same as the existing stg_asset_tasks pipeline.
+    task: one row from fetch_tasks(asset_project_id) with
+    collection == "asset-tasks" (callers filter via plan_task_writes /
+    the same check before calling this).
+    """
+    assigned_did, assigned_coll, assigned_name, assigned_email = _person_fields(
+        task.get("assignedTo"))
+    sub_did, sub_coll, sub_name, sub_email = _person_fields(task.get("submittedBy"))
+    app_did, app_coll, app_name, app_email = _person_fields(task.get("approvedBy"))
+    can_did, can_coll, can_name, can_email = _person_fields(task.get("cancelledBy"))
+
+    return (
+        task.get(FIELD_MAP["id"]),                                    # task_did
+        project["project_did"],                                       # project_did
+        project.get("status"),                                        # project_status
+        asset.get(FIELD_MAP["id"]),                                    # asset_did
+        asset.get(FIELD_MAP["asset_identifier"]),                      # asset_id
+        asset.get(FIELD_MAP["asset_name"]),                            # asset_name
+        _get_field(asset, FIELD_MAP["req_count"]),                     # asset_requirement_count
+        task.get("name"),                                              # task_name
+        task.get("status"),                                           # task_status
+        epoch_to_et_date(task.get("scheduled")),                       # task_scheduled
+        assigned_did, assigned_coll, assigned_name, assigned_email,    # task_assigned_to_*
+        epoch_to_et_date(task.get("submittedOn")),                     # task_submitted_on
+        sub_did, sub_name, sub_email,                                  # task_submitted_by_*
+        epoch_to_et_date(task.get("approvedOn")),                      # task_approved_on
+        app_did, app_name, app_email,                                  # task_approved_by_*
+        epoch_to_et_date(task.get("cancelledOn")),                     # task_cancelled_on
+        can_did, can_name, can_email,                                  # task_cancelled_by_*
+        clean_task_name(task.get("name")),                             # task_name_clean
+        epoch_to_ts(task.get(FIELD_MAP["last_updated"])),               # last_updated
+    )
+
+
+def _executemany_batched(db, query, rows):
+    """executemany in batches of BATCH_SIZE; no-op for an empty row list."""
+    for i in range(0, len(rows), BATCH_SIZE):
+        db.executemany(query, rows[i:i + BATCH_SIZE])
+
+
+def walk_project(db, project, baseline=False):
+    """Walk one project: watermark skip check -> assets -> per-visited-asset
+    tasks, with guarded upserts and keep-list reconcile inside every scope
+    whose fetch succeeded. A failed fetch NEVER triggers a reconcile for
+    that scope (fail toward keeping stale rows, never toward wiping live
+    ones on a transient API error).
+
+    project: dict with "project_did" (required), "status" (optional,
+    project-level status), "lastUpdated" (optional epoch millis from the
+    org projects listing; used only for the skip check below).
+    baseline: when True, skip the watermark check and visit/write every
+    fetched asset/task regardless of its lastUpdated (still guarded on
+    write, so re-running baseline is a no-op for rows that did not change).
+
+    Returns a stats dict:
+      {"skipped": True} -- nothing fetched, watermark unchanged.
+      {"ok": False} -- the project-level asset fetch failed; no writes/
+        deletes happened at all for this project.
+      {"ok": True, "assets": N, "visited": N, "task_writes": N,
+       "task_deletes": N} -- ok is False here (but stats still meaningful)
+        if any per-asset task fetch failed; the watermark is NOT advanced
+        in that case.
+    """
+    project_did = project["project_did"]
+    watermark_name = f"asset_tasks_inc/{project_did}"
+    fetcher = _get_fetcher()
+
+    if not baseline:
+        prev_row = db.fetchrow(
+            "SELECT content_hash FROM pipeline.content_watermarks WHERE pipeline_name = $1",
+            watermark_name,
+        )
+        prev = int(prev_row["content_hash"]) if prev_row and prev_row["content_hash"] else None
+        proj_last_updated = project.get(FIELD_MAP["last_updated"])
+        if prev is not None and proj_last_updated is not None and int(proj_last_updated) <= prev:
+            return {"skipped": True}
+
+    try:
+        assets = fetcher.fetch_assets(project_did)
+    except Exception as e:
+        logger.warning(f"[{project_did}] fetch_assets failed: {e}")
+        return {"ok": False}
+
+    stored_asset_rows = db.fetch(
+        "SELECT asset_did, last_updated FROM data_staging.stg_assets_inc WHERE project_did = $1",
+        project_did,
+    )
+    stored_assets = {r["asset_did"]: {"last_updated": r["last_updated"]} for r in stored_asset_rows}
+
+    visits, missing_assets = plan_asset_visits(assets, stored_assets)
+    if baseline:
+        visits = assets
+
+    max_last_updated = 0  # epoch millis; max seen across asset + task rows this walk
+
+    # Step 5: guarded upsert of ALL fetched assets (not just visited ones --
+    # an asset's own metrics can move without any task under it moving).
+    asset_rows = []
+    for a in assets:
+        did = a.get(FIELD_MAP["id"])
+        if not did:
+            continue
+        raw_lu = a.get(FIELD_MAP["last_updated"])
+        if raw_lu:
+            max_last_updated = max(max_last_updated, int(raw_lu))
+        asset_rows.append((
+            did, project_did,
+            a.get(FIELD_MAP["asset_identifier"]),
+            a.get(FIELD_MAP["asset_name"]),
+            _get_field(a, FIELD_MAP["req_count"]),
+            epoch_to_ts(raw_lu),
+        ))
+    _executemany_batched(db, UPSERT_ASSET, asset_rows)
+
+    if missing_assets:
+        missing_list = list(missing_assets)
+        db.execute(
+            "DELETE FROM data_staging.stg_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
+            missing_list,
+        )
+        db.execute(
+            "DELETE FROM data_raw.raw_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
+            missing_list,
+        )
+        db.execute(
+            "DELETE FROM data_staging.stg_assets_inc WHERE asset_did = ANY($1::text[])",
+            missing_list,
+        )
+
+    # Step 6: per visited asset, fetch tasks and reconcile.
+    task_writes_total = 0
+    task_deletes_total = 0
+    any_task_fetch_failed = False
+
+    for a in visits:
+        asset_did = a.get(FIELD_MAP["id"])
+        if not asset_did:
+            continue
+        try:
+            tasks = fetcher.fetch_tasks(asset_did)
+        except Exception as e:
+            logger.warning(f"[{project_did}] fetch_tasks failed for asset {asset_did}: {e}")
+            any_task_fetch_failed = True
+            continue  # no reconcile for this asset's tasks
+
+        # Track the max lastUpdated across every real asset-task row seen
+        # (not just written ones), same conservative approach as assets.
+        for t in tasks:
+            if t.get(FIELD_MAP["collection"]) != "asset-tasks":
+                continue
+            raw_lu = t.get(FIELD_MAP["last_updated"])
+            if raw_lu:
+                max_last_updated = max(max_last_updated, int(raw_lu))
+
+        stored_task_rows = db.fetch(
+            "SELECT task_did, last_updated FROM data_staging.stg_asset_tasks_inc WHERE asset_did = $1",
+            asset_did,
+        )
+        stored_task_ts = {r["task_did"]: r["last_updated"] for r in stored_task_rows}
+
+        writes, missing = plan_task_writes(tasks, stored_task_ts)
+        if baseline:
+            writes = [t for t in tasks if t.get(FIELD_MAP["collection"]) == "asset-tasks"]
+
+        stg_rows = []
+        raw_rows = []
+        for t in writes:
+            stg_rows.append(task_to_stg_row(project, a, t))
+            raw_rows.append((
+                t.get(FIELD_MAP["id"]), asset_did, project_did,
+                json.dumps(t, default=str),
+                epoch_to_ts(t.get(FIELD_MAP["last_updated"])),
+            ))
+        _executemany_batched(db, UPSERT_TASK, stg_rows)
+        _executemany_batched(db, UPSERT_RAW_TASK, raw_rows)
+        task_writes_total += len(writes)
+
+        if missing:
+            missing_list = list(missing)
+            db.execute(
+                "DELETE FROM data_staging.stg_asset_tasks_inc WHERE task_did = ANY($1::text[])",
+                missing_list,
+            )
+            db.execute(
+                "DELETE FROM data_raw.raw_asset_tasks_inc WHERE task_did = ANY($1::text[])",
+                missing_list,
+            )
+            task_deletes_total += len(missing_list)
+
+    ok = not any_task_fetch_failed
+    if ok:
+        db.execute(UPSERT_WATERMARK, watermark_name, str(max_last_updated))
+
+    return {
+        "ok": ok,
+        "assets": len(assets),
+        "visited": len(visits),
+        "task_writes": task_writes_total,
+        "task_deletes": task_deletes_total,
+    }
