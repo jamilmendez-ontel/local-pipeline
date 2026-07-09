@@ -54,7 +54,7 @@ successfully on both projects, exactly as `extract_daily_reports.py` does.
 ### (c) id uniqueness: PASS (with a milestone caveat)
 
 - Asset-project `id`: unique within project. TS17 5,025/5,025; TS19 4,727/4,727.
-- Asset-task `id`: unique within an asset (89/89, 87/87) AND across assets — swept the first 40 assets per project (capped at 40 to keep the one-off probe fast): TS17 3,121/3,121 unique, TS19 3,040/3,040 unique for `collection == "asset-tasks"` rows.
+- Asset-task `id`: unique within an asset (89/89, 87/87) AND across assets. Swept the first 40 assets per project (capped at 40 to keep the one-off probe fast): TS17 3,121/3,121 unique, TS19 3,040/3,040 unique for `collection == "asset-tasks"` rows.
 - CAVEAT: the RAW listing is NOT unique across assets, because the ~11 project-level `milestones` rows repeat under every asset (TS17: 3,561 rows -> 3,132 unique; all 429 duplicates were milestone rows). After the milestone filter, `id` is a safe natural key for upserts.
 
 ### (d) Requirement-count field: `metrics.reqCount`
@@ -65,8 +65,8 @@ successfully on both projects, exactly as `extract_daily_reports.py` does.
 ### (e) Metrics child-count fields (GC-scale deletion strategy): PRESENT at every level
 
 - **Asset-project `metrics`** (on 100% of rows): `taskCount` + per-status `taskPending/taskApproved/taskRejected/taskCancelled/taskSubmitted/taskInProgress/taskHasRejection`, `milestoneCount`, `reqCount` + splits, and file/form requirement counters (`fileRequirementCurrent/Max/Min/Approved/Rejected/Submitted`, `formRequirementTotal/Current/Approved/Rejected`). A stored-vs-fetched `taskCount` mismatch detects task deletion under an asset WITHOUT descending -> count-based reconcile is viable at GC scale.
-- **Project `metrics`**: counts live in NESTED dicts, not top-level. `metrics.asset` aggregates across all asset-projects: `assetProjectCount` (TS19's matched the fetched row count exactly, 4,727; TS17 reported 5,062 vs 5,025 fetched, a +37 drift — treat project-level aggregates as advisory, not reconciliation-grade), plus `taskCount`, `reqCount`, `milestoneCount` and the same per-status/file/form splits. `metrics.project` carries the same shape for project-level (non-asset) tasks only. `metrics.lastUpdated` and `metrics.status` are the other members.
-- **Asset-task `metrics`**: `reqCount` + splits (see d) — requirement deletion under a task is likewise count-detectable.
+- **Project `metrics`**: counts live in NESTED dicts, not top-level. `metrics.asset` aggregates across all asset-projects: `assetProjectCount` (TS19's matched the fetched row count exactly, 4,727; TS17 reported 5,062 vs 5,025 fetched, a +37 drift; treat project-level aggregates as advisory, not reconciliation-grade), plus `taskCount`, `reqCount`, `milestoneCount` and the same per-status/file/form splits. `metrics.project` carries the same shape for project-level (non-asset) tasks only. `metrics.lastUpdated` and `metrics.status` are the other members.
+- **Asset-task `metrics`**: `reqCount` + splits (see d); requirement deletion under a task is likewise count-detectable.
 
 ### Still open: DELETE propagation (pending-human-test)
 
