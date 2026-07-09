@@ -20,7 +20,7 @@
 - DB via transaction pooler `aws-0-ap-southeast-1.pooler.supabase.com:6543`, `statement_cache_size=0`, no session-scoped features (no session SET, no advisory locks, no LISTEN/NOTIFY). Per-statement timeouts via `SET LOCAL` inside explicit transactions where needed.
 - Timestamps from Swift are epoch millis; store as `timestamptz` (UTC). Display conversions to America/New_York only at reporting time.
 - Migration numbering: LIST `swift_api_pipeline/migrations/` for the next free number before creating (176 expected next; 157/170 collisions happened before).
-- Scope: projects from `reference.ref_ontel_techops_projects WHERE project_number >= 13` (same source the current pipeline uses).
+- Scope, PHASE 1 (test week, decided by Jamil 2026-07-09): ONLY TS17, TS18, TS19 (three active projects; active = stresses change-detection correctness, and 3 projects keeps every run light and the audit deep). The CLI takes `--projects TS17,TS18,TS19` (matched against `ref_ontel_techops_projects.project_name` tail) and this is the default during the pilot. PHASE 2 after a clean week: widen the default to all `project_number >= 13`.
 - Commit after every task; push only when the task's verification passed.
 
 ---
@@ -213,6 +213,22 @@ create table data_staging.stg_asset_tasks_inc (
 create index idx_stg_asset_tasks_inc_project on data_staging.stg_asset_tasks_inc (project_did);
 create index idx_stg_asset_tasks_inc_asset on data_staging.stg_asset_tasks_inc (asset_did);
 alter table data_staging.stg_asset_tasks_inc enable row level security;
+
+-- Test-week evidence trail: one row per project per audit run. The pilot
+-- decision (expand / fix / abort) is made from this table's week of data.
+create table pipeline.inc_audit_results (
+  id             bigint generated always as identity primary key,
+  audited_at     timestamptz not null default now(),
+  project_did    text not null,
+  rows_current   integer,
+  rows_inc       integer,
+  hash_match     boolean,
+  missing_in_inc text[],   -- task_dids in current but not in _inc (LIMIT 50)
+  extra_in_inc   text[],   -- task_dids in _inc but not in current (LIMIT 50)
+  column_diffs   jsonb,    -- {task_did: {col: [current, inc]}} sample (LIMIT 20)
+  notes          text
+);
+alter table pipeline.inc_audit_results enable row level security;
 ```
 
 - [ ] **Step 3: Apply to prod and verify**
@@ -551,7 +567,7 @@ git commit -m "inc asset tasks: per-project walker with guarded upserts + keep-l
 
 **Interfaces:**
 - Consumes: `walk_project` (Task 5); `reference.ref_ontel_techops_projects` (project_number >= 13); project `lastUpdated` from `SwiftAPIExtractor.extract_organizations/extract_projects`.
-- Produces: CLI `python extract_asset_tasks_inc.py [--baseline] [--full-walk] [--workers 6] [--project TS13]`; records runs in `pipeline.pipeline_runs` as `asset_tasks_inc` (reuse `SupabaseLoader.start_pipeline_run/complete_pipeline_run` pattern but through `db_tx`, copy the two small INSERT/UPDATE statements rather than importing the session-pool loader).
+- Produces: CLI `python extract_asset_tasks_inc.py [--baseline] [--full-walk] [--workers 6] [--projects TS17,TS18,TS19]` (default = the phase-1 trio; `--projects all13` widens to project_number >= 13 for phase 2); records runs in `pipeline.pipeline_runs` as `asset_tasks_inc` (reuse `SupabaseLoader.start_pipeline_run/complete_pipeline_run` pattern but through `db_tx`, copy the two small INSERT/UPDATE statements rather than importing the session-pool loader).
 
 - [ ] **Step 1: Implement main()**
 
@@ -602,7 +618,9 @@ WHERE project_did = ANY($1)
 GROUP BY project_did
 ```
 
-Report per project: rows_current vs rows_inc, hash match yes/no. On mismatch, drill down: `SELECT task_did FROM ... EXCEPT SELECT task_did FROM ...` both directions (LIMIT 20 each) plus a sample of hash-relevant column diffs for shared task_dids. Print an EXPLICIT caveat line: the two pipelines run at different times, so small drift right after either run is expected; persistent same-direction drift is the bug signal.
+Report per project: rows_current vs rows_inc, hash match yes/no. On mismatch, drill down: `SELECT task_did FROM ... EXCEPT SELECT task_did FROM ...` both directions (LIMIT 50 each) plus column-level diffs for shared task_dids (LIMIT 20; at 3-project scale run the full column comparison, not just the hash columns). Print an EXPLICIT caveat line: the two pipelines run at different times, so small drift right after either run is expected; persistent same-direction drift is the bug signal.
+
+EVERY audit run also INSERTs one row per project into `pipeline.inc_audit_results` (Task 2), pass or fail. The test week's expand/fix/abort decision is made by querying this table (e.g. `SELECT project_did, count(*) FILTER (WHERE NOT hash_match) AS mismatched_runs, count(*) AS runs FROM pipeline.inc_audit_results GROUP BY 1`).
 
 - [ ] **Step 2: Run it after Task 6's baseline**
 
@@ -650,9 +668,9 @@ concurrency:
 #   upload pipeline_logs on failure like the other workflows
 ```
 
-No cron and no Apps Script dispatcher yet: pilot runs are manual `gh workflow run`. Wiring the schedule happens AFTER a clean week, per the Apps-Script-for-scheduling convention, as two Apps Script triggers dispatching `pipeline-asset-tasks-inc`:
-- daily incremental (`client_payload.mode = "incremental"`)
-- **Sunday `--full-walk` ghost sweep** (`client_payload.mode = "full-walk"`, Sunday 06:00 PHT = Saturday 6 PM ET, outside the 1-10 PM PHT shift; decided by Jamil 2026-07-09). At TS13+ pilot scale a weekly full walk is cheap insurance. It does NOT scale to GC (15M+ rows); see Task 9 for the GC-scale deletion strategy.
+Scheduling (Apps Script triggers dispatching `pipeline-asset-tasks-inc`, per the Apps-Script-for-scheduling convention):
+- **Test week (TS17-19)**: incremental every 2 hours (3 projects = a few API calls per run; frequent runs generate more watermark cycles = more chances to expose a missed change while the current pipeline is still truth). Wire this after the first 1-2 manual runs look sane.
+- **Sunday `--full-walk` ghost sweep** (`client_payload.mode = "full-walk"`, Sunday 06:00 PHT = Saturday 6 PM ET, outside the 1-10 PM PHT shift; decided by Jamil 2026-07-09). At pilot scale a weekly full walk is cheap insurance. It does NOT scale to GC (15M+ rows); see Task 9 for the GC-scale deletion strategy.
 
 - [ ] **Step 2: Dispatch once and watch it**
 
@@ -679,11 +697,17 @@ git push origin main
 
 README paragraph must state: shadow status, that the current pipeline remains authoritative, the audit command, the force-resync escape hatches (`--baseline`, or `DELETE FROM pipeline.content_watermarks WHERE pipeline_name LIKE 'asset_tasks_inc/%'`), and the pilot exit criteria below.
 
-**Pilot exit criteria (the cutover/GC gate, decided by Jamil, not by this plan):**
-1. 7+ consecutive daily runs green.
-2. Drift audit clean (or explained by run-timing) every day.
-3. Incremental runtime and IO a small fraction of the current pipeline's.
-4. Delete-propagation behavior confirmed and covered (either natively or by the weekly full-walk).
+**Phase gates (decided by Jamil, not by this plan):**
+
+Phase 1 exit (TS17-19 test week → widen to all TS13+):
+1. 7 days of every-2-hour runs green.
+2. `pipeline.inc_audit_results` shows zero unexplained mismatches for the week (run-timing drift that self-corrects on the next audit is explained; anything persistent is a bug to fix before widening).
+3. Delete-propagation behavior confirmed and covered (natively or by the Sunday full-walk).
+
+Phase 2 exit (all TS13+ → restructure current pipeline + build GC on this pattern):
+1. 7+ consecutive days green at full TS13+ scope.
+2. Audit clean at full scope.
+3. Incremental runtime and IO a small fraction of the current pipeline's (record the numbers).
 
 Then: re-structure the current asset-tasks pipeline on this pattern and build gc-asset-tasks the same way (its data is mostly untouched daily, the best case for this design).
 
