@@ -24,9 +24,63 @@ Source: Jamil's manual verification in browser devtools against the live Swift A
 
 One-line rule: trust `lastUpdated` at every level except asset-file-requirements; there, check the count fields instead.
 
-## Still open (Task 1 of the plan verifies these)
+## Probe results (Task 1, verified live 2026-07-09)
 
-- Exact payload key inventories per endpoint for a TS project (field names for the FIELD_MAP constants; the daily-reports pipeline's shapes are the expected default).
-- The asset row field used as the FK by `/api/asset-projects/{id}/asset-tasks` (expected `id`).
-- `id` uniqueness within project for assets and tasks (natural-key requirement for the upserts).
-- DELETE propagation: does deleting an asset-task bump the parent asset-project/project `lastUpdated`? Submits/approvals/cancellations are confirmed to propagate; hard deletes were not tested. Until confirmed, the weekly `--full-walk` safety net stays mandatory.
+Probed with `swift_api_pipeline/probe_inc_asset_tasks.py` against TECH-OPS: TS17
+(5,025 asset rows) and TECH-OPS: TS19 (4,727 asset rows). Both projects returned
+identical shapes; per-key row counts below are TS17's (TS19 differed only in totals).
+Key names only; no payload values recorded (rows contain names/emails).
+
+### (a) Payload key inventories per endpoint
+
+**Project row** (`GET /api/organizations/{org_id}/projects`), all keys present:
+`ETag, collection, createdBy, dateCreated, description, id, isPrivate, lastUpdated, locationOrientation, metrics, name, organization, status, validStatuses`
+
+**Asset-project row** (`GET /api/projects/{project_did}/assets`), 5,025 rows:
+- On every row: `id, org, name, asset, status, metrics, project, createdBy, shortName, collection, dateCreated, lastUpdated, validStatuses, ETag`
+- Sparse: `identifier` (5,022), `completedBy`/`completedOn` (163), `cancelledBy`/`cancelledOn` (86)
+
+**Asset-task row** (`GET /api/asset-projects/{id}/asset-tasks`), 89 rows for the sample asset. The listing MIXES collections; filter on `collection == "asset-tasks"` (the daily-reports pipeline's existing `collection == "milestones"` skip is confirmed necessary):
+- On every row (any collection): `id, name, collection, ETag`
+- On real asset-tasks (78 rows): `org, project, createdBy, dateCreated, lastUpdated, metrics, ast, task, status, useTime, isPrivate, milestone, assetProject, validStatuses, isPinned, calStat` (plus `description` on most)
+- Milestone rows (10) carry `assetSpecific` + `metrics.taskCount` instead; 1 anomalous row (TS17 sample only) carried `scheduledBy` and NO `lastUpdated`/`metrics`/`org`/`project`. Walker must tolerate rows missing `lastUpdated`/`metrics`.
+
+### (b) FK for the asset-tasks endpoint: CONFIRMED `id`
+
+The asset-project row's top-level `id` (NOT `asset.id`) is what
+`/api/asset-projects/{id}/asset-tasks` takes; the probe fetched tasks with it
+successfully on both projects, exactly as `extract_daily_reports.py` does.
+
+### (c) id uniqueness: PASS (with a milestone caveat)
+
+- Asset-project `id`: unique within project. TS17 5,025/5,025; TS19 4,727/4,727.
+- Asset-task `id`: unique within an asset (89/89, 87/87) AND across assets — swept the first 40 assets per project (capped at 40 to keep the one-off probe fast): TS17 3,121/3,121 unique, TS19 3,040/3,040 unique for `collection == "asset-tasks"` rows.
+- CAVEAT: the RAW listing is NOT unique across assets, because the ~11 project-level `milestones` rows repeat under every asset (TS17: 3,561 rows -> 3,132 unique; all 429 duplicates were milestone rows). After the milestone filter, `id` is a safe natural key for upserts.
+
+### (d) Requirement-count field: `metrics.reqCount`
+
+- Asset-project level: `metrics.reqCount` (with per-status splits `reqPending/reqApproved/reqRejected/reqCancelled/reqSubmitted/reqInProgress`).
+- Asset-task level: same `metrics.reqCount` + splits (what the daily-reports pipeline already reads).
+
+### (e) Metrics child-count fields (GC-scale deletion strategy): PRESENT at every level
+
+- **Asset-project `metrics`** (on 100% of rows): `taskCount` + per-status `taskPending/taskApproved/taskRejected/taskCancelled/taskSubmitted/taskInProgress/taskHasRejection`, `milestoneCount`, `reqCount` + splits, and file/form requirement counters (`fileRequirementCurrent/Max/Min/Approved/Rejected/Submitted`, `formRequirementTotal/Current/Approved/Rejected`). A stored-vs-fetched `taskCount` mismatch detects task deletion under an asset WITHOUT descending -> count-based reconcile is viable at GC scale.
+- **Project `metrics`**: counts live in NESTED dicts, not top-level. `metrics.asset` aggregates across all asset-projects: `assetProjectCount` (TS19's matched the fetched row count exactly, 4,727; TS17 reported 5,062 vs 5,025 fetched, a +37 drift — treat project-level aggregates as advisory, not reconciliation-grade), plus `taskCount`, `reqCount`, `milestoneCount` and the same per-status/file/form splits. `metrics.project` carries the same shape for project-level (non-asset) tasks only. `metrics.lastUpdated` and `metrics.status` are the other members.
+- **Asset-task `metrics`**: `reqCount` + splits (see d) — requirement deletion under a task is likewise count-detectable.
+
+### Still open: DELETE propagation (pending-human-test)
+
+Does hard-deleting an asset-task bump the parent asset-project/project
+`lastUpdated`? Submits/approvals/cancellations are confirmed to propagate; hard
+deletes remain UNTESTED (requires a human to delete a task in Swift; not
+scriptable read-only). **Until confirmed, the weekly `--full-walk` safety net
+stays mandatory** (Task 6 wires it behind a flag either way).
+
+Test procedure (Jamil): pick one disposable test task in a pilot project; run
+`python probe_inc_asset_tasks.py --project-did=<did> --project-name "<name>"`
+and note the owning asset's `lastUpdated` (or query it directly); delete the
+task in Swift; re-run and compare the asset-project's and project's
+`lastUpdated` before/after. If they bump, count-based reconcile + lastUpdated
+pruning fully covers deletes and the weekly full-walk can be demoted to a
+paranoia check. Note: the asset's `metrics.taskCount` drop is an independent
+delete signal even if `lastUpdated` does NOT bump.
