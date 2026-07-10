@@ -14,10 +14,18 @@ STG_COL_LIST = [c.strip() for c in STG_COLS.split(",")]
 
 PROJECT = {"project_did": "proj-1", "status": "active", "lastUpdated": 1752076800000}
 
+# Asset-project row shape per the 2026-07-10 audit findings: the export the
+# current pipeline mirrors uses the ASSET-PROJECT's own status (as
+# "Project_Status"), the underlying asset.id (as Asset_DID), and the bare
+# shortName (as Asset_Name). "id" is the asset-project id (walk-scope key
+# only, not a stg column); "name" is project-qualified and unused in stg.
 ASSET = {
-    "id": "asset-1",
+    "id": "asset-core-1proj-1",
+    "asset": {"id": "asset-core-1", "name": "John Smith"},
     "identifier": "EMP-042",
-    "name": "John Smith",
+    "name": "TECH-OPS: TS99 | John Smith",
+    "shortName": "John Smith",
+    "status": "pending",
     "metrics": {"reqCount": 5},
     "lastUpdated": 1752076800000,
 }
@@ -59,8 +67,10 @@ def test_field_values_land_in_the_right_position():
 
     assert by_col["task_did"] == "task-1"
     assert by_col["project_did"] == "proj-1"
-    assert by_col["project_status"] == "active"
-    assert by_col["asset_did"] == "asset-1"
+    # project_status carries the ASSET-PROJECT's status (export semantics),
+    # not the project row's status ("active" above must NOT leak through).
+    assert by_col["project_status"] == "pending"
+    assert by_col["asset_did"] == "asset-core-1"
     assert by_col["asset_id"] == "EMP-042"
     assert by_col["asset_name"] == "John Smith"
     assert by_col["asset_requirement_count"] == 5

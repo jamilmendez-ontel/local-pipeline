@@ -32,11 +32,21 @@ logger = logging.getLogger("pipeline.inc_asset_tasks")
 #
 # Note: there is no "assetId" key on asset-project rows. asset_identifier
 # is sparse (5,022 of 5,025 rows in the probe); missing means None.
+#
+# Audit-driven corrections (first drift audit vs stg_asset_tasks,
+# 2026-07-10): the export the current pipeline loads from names its
+# columns misleadingly. Its "Project_Status" is the ASSET-PROJECT row's
+# own status (varies per row within a project), its Asset_DID is the
+# underlying asset id (asset.id), NOT the asset-project id, and its
+# Asset_Name is the bare shortName, not the project-qualified name.
 FIELD_MAP = {
     "id": "id",
     "last_updated": "lastUpdated",
     "collection": "collection",
     "asset_name": "name",
+    "asset_short_name": "shortName",
+    "asset_ref_id": ("asset", "id"),
+    "asset_status": "status",
     "asset_identifier": "identifier",
     "req_count": ("metrics", "reqCount"),
     "task_count": ("metrics", "taskCount"),
@@ -201,37 +211,22 @@ STG_COLS = (
     "task_cancelled_by_email, task_name_clean, last_updated"
 )
 
-# Guarded upsert: only rewrite when business payload OR last_updated moved.
+# Guarded upsert: only rewrite when something actually moved. The guard
+# covers the FULL business tuple (every column except the keys), not just
+# last_updated: denormalized asset fields (asset_name, asset_did source
+# ref) can change without any task-level lastUpdated bump, and a mapping
+# fix must be able to rewrite rows on the next baseline/full-walk.
+_TASK_UPDATE_COLS = [c.strip() for c in STG_COLS.split(",")
+                     if c.strip() not in ("task_did", "project_did")]
 UPSERT_TASK = f"""
 INSERT INTO data_staging.stg_asset_tasks_inc ({STG_COLS}, loaded_at)
 VALUES ({",".join(f"${i}" for i in range(1, 29))}, now())
 ON CONFLICT (task_did) DO UPDATE SET
-  project_status=EXCLUDED.project_status, asset_id=EXCLUDED.asset_id,
-  asset_name=EXCLUDED.asset_name,
-  asset_requirement_count=EXCLUDED.asset_requirement_count,
-  task_name=EXCLUDED.task_name, task_status=EXCLUDED.task_status,
-  task_scheduled=EXCLUDED.task_scheduled,
-  task_assigned_to_did=EXCLUDED.task_assigned_to_did,
-  task_assigned_to_collection=EXCLUDED.task_assigned_to_collection,
-  task_assigned_to_name=EXCLUDED.task_assigned_to_name,
-  task_assigned_to_email=EXCLUDED.task_assigned_to_email,
-  task_submitted_on=EXCLUDED.task_submitted_on,
-  task_submitted_by_did=EXCLUDED.task_submitted_by_did,
-  task_submitted_by_name=EXCLUDED.task_submitted_by_name,
-  task_submitted_by_email=EXCLUDED.task_submitted_by_email,
-  task_approved_on=EXCLUDED.task_approved_on,
-  task_approved_by_did=EXCLUDED.task_approved_by_did,
-  task_approved_by_name=EXCLUDED.task_approved_by_name,
-  task_approved_by_email=EXCLUDED.task_approved_by_email,
-  task_cancelled_on=EXCLUDED.task_cancelled_on,
-  task_cancelled_by_did=EXCLUDED.task_cancelled_by_did,
-  task_cancelled_by_name=EXCLUDED.task_cancelled_by_name,
-  task_cancelled_by_email=EXCLUDED.task_cancelled_by_email,
-  task_name_clean=EXCLUDED.task_name_clean,
-  last_updated=EXCLUDED.last_updated, loaded_at=now()
-WHERE stg_asset_tasks_inc.last_updated IS DISTINCT FROM EXCLUDED.last_updated
-   OR (stg_asset_tasks_inc.task_status, stg_asset_tasks_inc.task_name)
-      IS DISTINCT FROM (EXCLUDED.task_status, EXCLUDED.task_name)
+  {", ".join(f"{c}=EXCLUDED.{c}" for c in _TASK_UPDATE_COLS)},
+  loaded_at=now()
+WHERE ({", ".join(f"stg_asset_tasks_inc.{c}" for c in _TASK_UPDATE_COLS)})
+  IS DISTINCT FROM
+  ({", ".join(f"EXCLUDED.{c}" for c in _TASK_UPDATE_COLS)})
 """
 
 # Guarded upsert for the asset-level watermark store.
@@ -279,12 +274,14 @@ def task_to_stg_row(project, asset, task):
     """Map (project, asset, task) dicts from the Swift hierarchy API into a
     tuple matching STG_COLS' column order for stg_asset_tasks_inc.
 
-    project: dict with "project_did" (required) and "status" (optional,
-    the project's own status, denormalized onto every task row as
-    project_status).
+    project: dict with "project_did" (required).
     asset: one row from fetch_assets(project_did) (asset-project level);
-    its metrics.reqCount and identifier/name are denormalized onto every
-    task under it, same as the existing stg_asset_tasks pipeline.
+    its status, asset.id, shortName, identifier and metrics.reqCount are
+    denormalized onto every task under it, matching the export payload the
+    current stg_asset_tasks is loaded from (verified by the first drift
+    audit, 2026-07-10): the export's "Project_Status" is the
+    ASSET-PROJECT's status, its Asset_DID is the underlying asset.id (not
+    the asset-project id), and its Asset_Name is the bare shortName.
     task: one row from fetch_tasks(asset_project_id) with
     collection == "asset-tasks" (callers filter via plan_task_writes /
     the same check before calling this).
@@ -298,10 +295,10 @@ def task_to_stg_row(project, asset, task):
     return (
         task.get(FIELD_MAP["id"]),                                    # task_did
         project["project_did"],                                       # project_did
-        project.get("status"),                                        # project_status
-        asset.get(FIELD_MAP["id"]),                                    # asset_did
+        asset.get(FIELD_MAP["asset_status"]),                          # project_status (sic: asset-project status, matching the export)
+        _get_field(asset, FIELD_MAP["asset_ref_id"]),                  # asset_did (underlying asset.id)
         asset.get(FIELD_MAP["asset_identifier"]),                      # asset_id
-        asset.get(FIELD_MAP["asset_name"]),                            # asset_name
+        asset.get(FIELD_MAP["asset_short_name"]),                      # asset_name (bare shortName)
         _get_field(asset, FIELD_MAP["req_count"]),                     # asset_requirement_count
         task.get("name"),                                              # task_name
         task.get("status"),                                           # task_status
@@ -420,8 +417,13 @@ def walk_project(db, project, baseline=False, asset_workers=4):
 
     if missing_assets:
         missing_list = list(missing_assets)
+        # stg_asset_tasks_inc.asset_did stores the underlying asset.id (to
+        # mirror the current pipeline), while walk scopes are keyed by the
+        # ASSET-PROJECT id, so its delete routes through raw (which keeps
+        # the asset-project id) and must run BEFORE raw's own delete.
         for stmt in (
-            "DELETE FROM data_staging.stg_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
+            "DELETE FROM data_staging.stg_asset_tasks_inc WHERE task_did IN "
+            "(SELECT task_did FROM data_raw.raw_asset_tasks_inc WHERE asset_did = ANY($1::text[]))",
             "DELETE FROM data_raw.raw_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
             "DELETE FROM data_staging.stg_assets_inc WHERE asset_did = ANY($1::text[])",
         ):
@@ -454,9 +456,14 @@ def walk_project(db, project, baseline=False, asset_workers=4):
             if raw_lu:
                 local_max = max(local_max, int(raw_lu))
 
+        # Stored-task watermarks come from raw_asset_tasks_inc, the walker's
+        # keying store: it is written for exactly the same task set as stg
+        # and keeps asset_did = the ASSET-PROJECT id this scope is keyed by
+        # (stg's asset_did mirrors the current pipeline's underlying
+        # asset.id instead).
         stored_task_rows = retry_tx_db(
             lambda: db.fetch(
-                "SELECT task_did, last_updated FROM data_staging.stg_asset_tasks_inc WHERE asset_did = $1",
+                "SELECT task_did, last_updated FROM data_raw.raw_asset_tasks_inc WHERE asset_did = $1",
                 asset_did,
             ),
             description=f"[{project_did}] stored tasks",
@@ -741,7 +748,8 @@ def main():
     total_deletes = sum(s["task_deletes"] for s in walked)
     elapsed = time.monotonic() - t0
 
-    status = "completed" if not failed else "failed"
+    # pipeline_runs.status is constrained to running/success/failed (001_raw_tables.sql)
+    status = "success" if not failed else "failed"
     error = f"projects with failed fetches: {', '.join(failed)}" if failed else None
     retry_tx_db(
         lambda: _complete_run(db, run_id, status, total_writes, error),
