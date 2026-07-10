@@ -30,6 +30,11 @@ on:
         description: "Comma list of project tails (default TS17,TS18,TS19), or all13 for phase 2"
         required: false
         type: string
+      strict_audit:
+        description: "Fail the run on audit mismatch. Leave false for daytime runs: the shadow is FRESHER than stg_asset_tasks between nightly reloads, so mid-day mismatch is expected churn. Set true for the post-nightly gate run."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: pipeline-asset-tasks-inc
@@ -56,14 +61,18 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             MODE="${{ inputs.mode }}"
             PROJECTS="${{ inputs.projects }}"
+            STRICT="${{ inputs.strict_audit }}"
           else
             MODE="${{ github.event.client_payload.mode }}"
             PROJECTS="${{ github.event.client_payload.projects }}"
+            STRICT="${{ github.event.client_payload.strict_audit }}"
           fi
           if [ -z "$MODE" ]; then MODE="incremental"; fi
+          if [ "$STRICT" != "true" ]; then STRICT="false"; fi
           echo "mode=$MODE" >> $GITHUB_OUTPUT
           echo "projects=$PROJECTS" >> $GITHUB_OUTPUT
-          echo "Resolved: mode='$MODE', projects='${PROJECTS:-<default pilot trio>}'"
+          echo "strict_audit=$STRICT" >> $GITHUB_OUTPUT
+          echo "Resolved: mode='$MODE', projects='${PROJECTS:-<default pilot trio>}', strict_audit='$STRICT'"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,10 +116,16 @@ jobs:
           echo "Running: extract_asset_tasks_inc.py $FLAGS"
           python -u extract_asset_tasks_inc.py $FLAGS
 
-      # The audit is the point of the pilot: a mismatch fails the run so the
-      # test week's signal is impossible to miss. Results also persist to
-      # pipeline.inc_audit_results either way.
+      # The audit is the point of the pilot, and every result persists to
+      # pipeline.inc_audit_results. But between nightly reloads the shadow
+      # is FRESHER than stg_asset_tasks, so a mid-day mismatch is expected
+      # churn, not a bug — failing every daytime run would train everyone
+      # to ignore red. Default: informational (summary + table). The
+      # post-nightly gate run dispatches with strict_audit=true, where a
+      # mismatch IS the signal and fails the run.
       - name: Drift audit vs current pipeline
+        id: audit
+        continue-on-error: ${{ steps.resolve.outputs.strict_audit != 'true' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
           PROJECTS: ${{ steps.resolve.outputs.projects }}
@@ -118,6 +133,16 @@ jobs:
           FLAGS=""
           if [ -n "$PROJECTS" ]; then FLAGS="--projects $PROJECTS"; fi
           python -u audit_asset_tasks_inc.py $FLAGS
+
+      - name: Audit summary
+        if: always()
+        run: |
+          if [ "${{ steps.audit.outcome }}" = "success" ]; then
+            echo "### ✅ Drift audit: MATCH — shadow == stg_asset_tasks" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ Drift audit: MISMATCH (expected between nightly reloads — the shadow is fresher)" >> $GITHUB_STEP_SUMMARY
+            echo "Evidence: \`SELECT * FROM pipeline.inc_audit_results ORDER BY audited_at DESC\`. The decisive check is the strict_audit run right after the 12:01 AM reload." >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload logs on failure
         if: failure()
