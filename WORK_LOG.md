@@ -1,5 +1,32 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-10 — Incremental asset-tasks shadow: Tasks 6–9 shipped, pilot LIVE on hourly cadence
+
+### What shipped (PRs #9, #10 + hourly-cadence commit, all merged to main)
+- **Runner/CLI** (`extract_asset_tasks_inc.py main()`): TS17–19 default (`--projects all13` = phase 2), `--baseline` / `--full-walk` modes, two worker layers (`--workers` per project × `--asset-workers` per asset), `pipeline_runs` recording via the transaction pooler.
+- **Drift audit** (`audit_asset_tasks_inc.py`): per-project counts + content hash, EXCEPT + full-column drill-downs on mismatch, every result persisted to `pipeline.inc_audit_results`, exit 1 on mismatch.
+- **Workflow** `pipeline-asset-tasks-inc.yml`: manual dispatch + `repository_dispatch` + GHA cron — **hourly incremental** (`20 0-4,6-23 * * *` UTC) and a **05:20 UTC post-nightly STRICT gate** (audit mismatch fails the run only there; daytime audits are informational with a ✅/⚠️ job summary, because the shadow is FRESHER than stg_asset_tasks between nightly reloads and red-every-run trains people to ignore red). Winter note: shift the gate hour before EST returns.
+- **Migration 177** (applied to prod): `raw_asset_tasks_inc(asset_did)` index.
+
+### Measured (the numbers that matter)
+- Baseline seed: **46.9 min** (~1.18M task rows, 3 projects parallel).
+- Incremental: **48.2 s local / 23.6 s on GHA (~58×)** — watermark skip = zero API calls for an untouched project; one run caught a single changed asset (76 task writes) minutes after TA activity.
+- Swift asset-tasks endpoint: 3–7 s/call (evening ~3× slower than 3 AM); full org sweep ~20 min over ~304 orgs → org cache (`asset_tasks_inc/_projects_org` watermark row) lists TECH-OPS in ~6 s.
+
+### Incidents / lessons (all fixed in the shipped code)
+1. Transient pooler `ConnectionDoesNotExistError` killed a whole project walk → `retry_tx_db` around every statement (all idempotent: guarded upserts + keyed deletes).
+2. Serial per-asset fetches would put a baseline into double-digit hours → per-asset worker pool.
+3. `pipeline_runs.status` check constraint wants `success`, not `completed`.
+4. **First audit caught 3 export-semantics mapping errors**: the export's `Project_Status`/`Asset_DID`/`Asset_Name` are really the ASSET-PROJECT's own status / underlying `asset.id` / bare `shortName` (findings doc corrected). Walker keying moved to raw (asset-project id); stg is a pure audit mirror; upsert guard widened to the full business tuple.
+5. That keying move exposed a missing index — raw stored-task lookups seq-scanned 1.2M JSONB rows at 10 s+ `DataFileRead` per asset, starving daily-reports of IO (caught live in `pg_stat_activity`) → migration 177.
+6. Baseline deliberately paused ~11:55 PM–3 AM to stay out of the nightly production window (12:01 AM asset-tasks, 2 AM GC); resumed run finished clean at 3 AM pace.
+
+### State at session end
+- Pilot LIVE: hourly runs accumulating evidence in `pipeline.inc_audit_results`; first green GHA run verified.
+- Mapped-column rewrite pass grinding in background (write-IO-bound, ~342k of 1.18M done as of ~7 AM ET; done well before tonight's gate). Hash columns are unaffected, so the gate doesn't depend on it.
+- **Decisive check: tonight's 05:20 UTC strict gate** (first post-reload audit with churn realigned). Watch: one TS19 row where current had submitted/approved-by and the shadow had null — churn or real, tonight tells.
+- Phase 3 roadmap added to the plan doc (freshness toward minute-level/event-driven): probe ETag/`updatedSince` on list endpoints (kills the 45 s asset-list bottleneck), spike the `firebaseToken` Firebase-realtime path (true push), then a resident worker at 5→1 min cadence. Next session.
+
 ## Session: 2026-06-25 — QA Forms pipeline stalled (trigger fix)
 
 ### Symptom

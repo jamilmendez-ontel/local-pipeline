@@ -13,6 +13,21 @@ name: "Pipeline: Asset Tasks (Incremental Shadow)"
 # Plan: docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md Task 8
 
 on:
+  schedule:
+    # PILOT cadence via GHA cron (UTC). Apps Script is this repo's
+    # production scheduling convention (GHA cron drifts a few minutes at
+    # busy times), but drift is harmless for pilot evidence-gathering and
+    # cron needs no editor-managed trigger. Move to pipeline_trigger.gs
+    # when the pilot exits.
+    #   - Hourly incremental at :20 (skipping hour 05, see below).
+    #   - 05:20 UTC = 1:20 AM EDT: the post-nightly STRICT gate run. The
+    #     12:01 AM ET full reload is done by ~12:45, churn is realigned,
+    #     so a mismatch here is a real bug and fails the run. Any
+    #     scheduled run landing in UTC hour 05 is treated as the gate.
+    #     NOTE: on EST (winter) 05:20 UTC becomes 12:20 AM ET, colliding
+    #     with the reload window — shift before November.
+    - cron: '20 0-4,6-23 * * *'
+    - cron: '20 5 * * *'
   repository_dispatch:
     types: [pipeline-asset-tasks-inc]
   workflow_dispatch:
@@ -62,6 +77,12 @@ jobs:
             MODE="${{ inputs.mode }}"
             PROJECTS="${{ inputs.projects }}"
             STRICT="${{ inputs.strict_audit }}"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            MODE="incremental"
+            PROJECTS=""
+            # Any scheduled run in UTC hour 05 is the post-nightly gate
+            # (see the cron comments above): audit mismatch = real bug.
+            if [ "$(date -u +%H)" = "05" ]; then STRICT="true"; fi
           else
             MODE="${{ github.event.client_payload.mode }}"
             PROJECTS="${{ github.event.client_payload.projects }}"

@@ -737,6 +737,58 @@ Then: re-structure the current asset-tasks pipeline on this pattern and build gc
 
 - [ ] **Step 2: Commit + push** (branch pushed via draft PR instead)
 
+---
+
+## Phase 3 (added 2026-07-10): freshness roadmap — toward minute-level / event-driven sync
+
+**Goal (Jamil, 2026-07-10):** Supabase should hold the latest Swift data as
+soon as possible. Ideal flow: a Swift-side change triggers an event, and
+only that entity is fetched and upserted. Polling cadence (1/5/10/60 min)
+is the fallback, chosen by measured per-cycle cost.
+
+**Measured per-cycle floor (2026-07-10, TS17-19):** auth ~3.5 s (reusable),
+org-cached project listing ~6 s, watermark check ~ms per unchanged project
+(zero API calls), **asset list ~45 s per CHANGED project (the bottleneck:
+5-6 paginated calls just to learn which assets moved)**, then 3-7 s per
+changed asset at 6-way parallelism. Net: quiet cycle ~10 s; active-hours
+cycle ~1-2 min for 3 projects. Write side is negligible (guarded upserts,
+only changed rows).
+
+**Cadence decisions so far:**
+- Pilot runs HOURLY on GHA cron (`20 0-4,6-23 * * *` UTC) + a 05:20 UTC
+  post-nightly STRICT gate run (mismatch = real bug once the 12:01 AM ET
+  reload realigned churn; shift the gate hour before EST returns in
+  November). GHA cron drift is acceptable for evidence-gathering; move to
+  the Apps Script convention (`pipeline_trigger.gs`) when the pilot exits.
+- Daytime audits are informational (`strict_audit=false`): between nightly
+  reloads the shadow is FRESHER than stg_asset_tasks, so mid-day mismatch
+  is expected churn. Every audit still persists to
+  `pipeline.inc_audit_results`.
+- Sub-5-min cadence is NOT a GHA job: ~25 s setup + up-to-a-minute queue
+  latency per run. It needs a RESIDENT worker (small always-on loop, same
+  pattern as the 5-min rolling daily-reports job) with warm token + org
+  cache.
+
+**Ordered next steps (next session):**
+1. **Probe conditional/delta list requests** (one session, read-only):
+   every Swift row carries an `ETag`; test `If-None-Match` on the list
+   endpoints (hoping for cheap 304s) and any `sort=lastUpdated` /
+   `updatedSince`-style parameters. If either works, the 45 s asset-list
+   drops to ~2 s and MINUTE-level polling becomes feasible.
+2. **Spike the `firebaseToken` realtime path** (the ideal flow): the auth
+   response already includes a `firebaseToken` and the payload shapes are
+   Firebase-native, so the Swift web app almost certainly consumes a
+   Firebase Realtime feed. If that token can subscribe to task/asset
+   nodes, changes arrive as PUSH events and the poller demotes to a
+   safety net. Caveats: undocumented surface, fragility, scope unknown.
+3. **Resident worker** once (1) or (2) lands: loop = listen/poll, walk
+   only what moved, sleep; start at 5-min cycles and tighten to 1 min as
+   observed cost allows. GC-scale rollout additionally needs the org
+   listing parallelized/cached per org (serial today).
+4. Audit stays nightly-strict regardless of cadence: hashing ~400k rows x
+   2 tables x 3 projects is a ~2-min read pass with no business running
+   every cycle.
+
 ```bash
 git add README.md docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md
 git commit -m "docs: incremental asset-tasks shadow pilot + exit criteria"
