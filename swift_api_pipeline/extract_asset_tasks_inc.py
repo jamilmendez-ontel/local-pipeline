@@ -7,12 +7,19 @@ changed tasks + keep-list reconcile inside every successfully-fetched
 scope. See docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md
 and the API findings doc for field semantics.
 """
+import argparse
 import json
 import logging
+import sys
 import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from config import SCHEMA_PIPELINE, SCHEMA_REFERENCE, setup_logging
+from db_tx import close_tx_db, get_tx_db, retry_tx_db
 from extract import SwiftAPIExtractor
 from extract_daily_reports import DailyReportsPipeline
 from transform import clean_task_name
@@ -311,13 +318,21 @@ def task_to_stg_row(project, asset, task):
     )
 
 
-def _executemany_batched(db, query, rows):
-    """executemany in batches of BATCH_SIZE; no-op for an empty row list."""
+def _executemany_batched(db, query, rows, description="batch upsert"):
+    """executemany in batches of BATCH_SIZE; no-op for an empty row list.
+
+    Every statement in this module is retry-safe (guarded upserts and
+    keyed deletes are idempotent), so all DB calls in the walk go through
+    retry_tx_db: a transient pooler connection drop must cost a retry, not
+    a whole project's walk (seen live on the 2026-07-09 baseline run:
+    ConnectionDoesNotExistError mid-walk failed all of TS19)."""
     for i in range(0, len(rows), BATCH_SIZE):
-        db.executemany(query, rows[i:i + BATCH_SIZE])
+        batch = rows[i:i + BATCH_SIZE]
+        retry_tx_db(lambda b=batch: db.executemany(query, b),
+                    description=description)
 
 
-def walk_project(db, project, baseline=False):
+def walk_project(db, project, baseline=False, asset_workers=4):
     """Walk one project: watermark skip check -> assets -> per-visited-asset
     tasks, with guarded upserts and keep-list reconcile inside every scope
     whose fetch succeeded. A failed fetch NEVER triggers a reconcile for
@@ -330,6 +345,11 @@ def walk_project(db, project, baseline=False):
     baseline: when True, skip the watermark check and visit/write every
     fetched asset/task regardless of its lastUpdated (still guarded on
     write, so re-running baseline is a no-op for rows that did not change).
+    asset_workers: concurrent per-asset fetch/write workers within this
+    project. Assets are independent scopes (own fetch, own reconcile), and
+    the Swift asset-tasks endpoint takes 3-7s per call (measured
+    2026-07-09), so serial per-asset processing would put a baseline walk
+    of a ~5,000-asset project into double-digit hours.
 
     Returns a stats dict:
       {"skipped": True} -- nothing fetched, watermark unchanged.
@@ -345,9 +365,12 @@ def walk_project(db, project, baseline=False):
     fetcher = _get_fetcher()
 
     if not baseline:
-        prev_row = db.fetchrow(
-            "SELECT content_hash FROM pipeline.content_watermarks WHERE pipeline_name = $1",
-            watermark_name,
+        prev_row = retry_tx_db(
+            lambda: db.fetchrow(
+                "SELECT content_hash FROM pipeline.content_watermarks WHERE pipeline_name = $1",
+                watermark_name,
+            ),
+            description=f"[{project_did}] watermark check",
         )
         prev = int(prev_row["content_hash"]) if prev_row and prev_row["content_hash"] else None
         proj_last_updated = project.get(FIELD_MAP["last_updated"])
@@ -360,9 +383,12 @@ def walk_project(db, project, baseline=False):
         logger.warning(f"[{project_did}] fetch_assets failed: {e}")
         return {"ok": False}
 
-    stored_asset_rows = db.fetch(
-        "SELECT asset_did, last_updated FROM data_staging.stg_assets_inc WHERE project_did = $1",
-        project_did,
+    stored_asset_rows = retry_tx_db(
+        lambda: db.fetch(
+            "SELECT asset_did, last_updated FROM data_staging.stg_assets_inc WHERE project_did = $1",
+            project_did,
+        ),
+        description=f"[{project_did}] stored assets",
     )
     stored_assets = {r["asset_did"]: {"last_updated": r["last_updated"]} for r in stored_asset_rows}
 
@@ -389,51 +415,51 @@ def walk_project(db, project, baseline=False):
             _get_field(a, FIELD_MAP["req_count"]),
             epoch_to_ts(raw_lu),
         ))
-    _executemany_batched(db, UPSERT_ASSET, asset_rows)
+    _executemany_batched(db, UPSERT_ASSET, asset_rows,
+                         description=f"[{project_did}] asset upserts")
 
     if missing_assets:
         missing_list = list(missing_assets)
-        db.execute(
+        for stmt in (
             "DELETE FROM data_staging.stg_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
-            missing_list,
-        )
-        db.execute(
             "DELETE FROM data_raw.raw_asset_tasks_inc WHERE asset_did = ANY($1::text[])",
-            missing_list,
-        )
-        db.execute(
             "DELETE FROM data_staging.stg_assets_inc WHERE asset_did = ANY($1::text[])",
-            missing_list,
-        )
+        ):
+            retry_tx_db(lambda s=stmt: db.execute(s, missing_list),
+                        description=f"[{project_did}] asset reconcile delete")
 
-    # Step 6: per visited asset, fetch tasks and reconcile.
-    task_writes_total = 0
-    task_deletes_total = 0
-    any_task_fetch_failed = False
-
-    for a in visits:
+    # Step 6: per visited asset, fetch tasks and reconcile. Each asset is a
+    # self-contained scope (own fetch, own upserts, own keep-list), so the
+    # per-asset work runs on an inner worker pool; results are reduced from
+    # return values, no shared mutable state between workers.
+    def _process_asset(a):
+        """Returns None (no id), {"failed": True} (fetch failed, scope
+        untouched), or {"failed": False, "max_lu", "writes", "deletes"}."""
         asset_did = a.get(FIELD_MAP["id"])
         if not asset_did:
-            continue
+            return None
         try:
             tasks = fetcher.fetch_tasks(asset_did)
         except Exception as e:
             logger.warning(f"[{project_did}] fetch_tasks failed for asset {asset_did}: {e}")
-            any_task_fetch_failed = True
-            continue  # no reconcile for this asset's tasks
+            return {"failed": True}  # no reconcile for this asset's tasks
 
         # Track the max lastUpdated across every real asset-task row seen
         # (not just written ones), same conservative approach as assets.
+        local_max = 0
         for t in tasks:
             if t.get(FIELD_MAP["collection"]) != "asset-tasks":
                 continue
             raw_lu = t.get(FIELD_MAP["last_updated"])
             if raw_lu:
-                max_last_updated = max(max_last_updated, int(raw_lu))
+                local_max = max(local_max, int(raw_lu))
 
-        stored_task_rows = db.fetch(
-            "SELECT task_did, last_updated FROM data_staging.stg_asset_tasks_inc WHERE asset_did = $1",
-            asset_did,
+        stored_task_rows = retry_tx_db(
+            lambda: db.fetch(
+                "SELECT task_did, last_updated FROM data_staging.stg_asset_tasks_inc WHERE asset_did = $1",
+                asset_did,
+            ),
+            description=f"[{project_did}] stored tasks",
         )
         stored_task_ts = {r["task_did"]: r["last_updated"] for r in stored_task_rows}
 
@@ -450,25 +476,48 @@ def walk_project(db, project, baseline=False):
                 json.dumps(t, default=str),
                 epoch_to_ts(t.get(FIELD_MAP["last_updated"])),
             ))
-        _executemany_batched(db, UPSERT_TASK, stg_rows)
-        _executemany_batched(db, UPSERT_RAW_TASK, raw_rows)
-        task_writes_total += len(writes)
+        _executemany_batched(db, UPSERT_TASK, stg_rows,
+                             description=f"[{project_did}] task upserts")
+        _executemany_batched(db, UPSERT_RAW_TASK, raw_rows,
+                             description=f"[{project_did}] raw task upserts")
 
+        deletes = 0
         if missing:
             missing_list = list(missing)
-            db.execute(
+            for stmt in (
                 "DELETE FROM data_staging.stg_asset_tasks_inc WHERE task_did = ANY($1::text[])",
-                missing_list,
-            )
-            db.execute(
                 "DELETE FROM data_raw.raw_asset_tasks_inc WHERE task_did = ANY($1::text[])",
-                missing_list,
-            )
-            task_deletes_total += len(missing_list)
+            ):
+                retry_tx_db(lambda s=stmt: db.execute(s, missing_list),
+                            description=f"[{project_did}] task reconcile delete")
+            deletes = len(missing_list)
+        return {"failed": False, "max_lu": local_max,
+                "writes": len(writes), "deletes": deletes}
+
+    task_writes_total = 0
+    task_deletes_total = 0
+    any_task_fetch_failed = False
+    done = 0
+    with ThreadPoolExecutor(max_workers=asset_workers) as pool:
+        for res in pool.map(_process_asset, visits):
+            done += 1
+            if done % 500 == 0:
+                logger.info(f"[{project_did}] {done}/{len(visits)} assets processed")
+            if res is None:
+                continue
+            if res["failed"]:
+                any_task_fetch_failed = True
+                continue
+            max_last_updated = max(max_last_updated, res["max_lu"])
+            task_writes_total += res["writes"]
+            task_deletes_total += res["deletes"]
 
     ok = not any_task_fetch_failed
     if ok:
-        db.execute(UPSERT_WATERMARK, watermark_name, str(max_last_updated))
+        retry_tx_db(
+            lambda: db.execute(UPSERT_WATERMARK, watermark_name, str(max_last_updated)),
+            description=f"[{project_did}] watermark advance",
+        )
 
     return {
         "ok": ok,
@@ -477,3 +526,239 @@ def walk_project(db, project, baseline=False):
         "task_writes": task_writes_total,
         "task_deletes": task_deletes_total,
     }
+
+
+# ---------------------------------------------------------------------------
+# Runner: project resolution, worker pool, CLI (Task 6)
+# ---------------------------------------------------------------------------
+
+PIPELINE_NAME = "asset_tasks_inc"
+
+# Phase-1 pilot scope (decided by Jamil 2026-07-09): three active projects.
+# Phase 2 after a clean audit week: pass --projects all13.
+PILOT_PROJECTS = "TS17,TS18,TS19"
+
+
+def _project_tail(project_name):
+    """'TECH-OPS: TS17' -> 'TS17' (the --projects matching token)."""
+    return project_name.split(":")[-1].strip().upper()
+
+
+def resolve_projects(db, projects_arg):
+    """Resolve --projects against reference.ref_ontel_techops_projects.
+
+    projects_arg: comma-separated project-name tails ('TS17,TS18,TS19'),
+    or 'all13' for every project_number >= 13 (phase 2). Unknown tails are
+    an error, not a silent skip: a typo must not quietly shrink the pilot.
+    """
+    rows = db.fetch(
+        f"SELECT project_did, project_name, project_number "
+        f"FROM {SCHEMA_REFERENCE}.ref_ontel_techops_projects "
+        f"WHERE project_number >= 13 ORDER BY project_number"
+    )
+    if projects_arg.strip().lower() == "all13":
+        return [dict(r) for r in rows]
+    wanted = {t.strip().upper() for t in projects_arg.split(",") if t.strip()}
+    selected = [dict(r) for r in rows if _project_tail(r["project_name"]) in wanted]
+    missing = wanted - {_project_tail(r["project_name"]) for r in selected}
+    if missing:
+        raise SystemExit(
+            f"--projects entries not found in ref_ontel_techops_projects "
+            f"(project_number >= 13): {sorted(missing)}"
+        )
+    return selected
+
+
+# content_watermarks row that caches the org owning the walked projects, so
+# recurring runs list ONE org's projects instead of sweeping all ~300 orgs
+# the user can see (the sweep measured ~20 min on 2026-07-09; the pilot org
+# sits late in the listing, so the early-exit alone doesn't help).
+ORG_CACHE_WATERMARK = "asset_tasks_inc/_projects_org"
+
+
+def fetch_project_listing(fetcher, wanted_dids=None, db=None):
+    """One org-projects listing pass: {project id: project row}. The rows
+    carry the project-level lastUpdated (the watermark skip signal) and
+    status (denormalized onto task rows, same as the current pipeline).
+
+    wanted_dids: when given, stop enumerating orgs as soon as every wanted
+    project has been seen; a project the sweep never finds is treated as
+    changed by the caller either way.
+
+    db: when given (with wanted_dids), the single org that owns every
+    wanted project is remembered in pipeline.content_watermarks under
+    ORG_CACHE_WATERMARK, and the next run tries that org first (one API
+    call). Stale or incomplete cache (project moved, scope widened to a
+    project in another org) falls back to the full sweep and re-caches.
+    """
+    wanted = set(wanted_dids) if wanted_dids else None
+
+    def _org_projects(org_id):
+        got = {}
+        for p in fetcher.ext.extract_projects(org_id):
+            pid = p.get(FIELD_MAP["id"])
+            if pid:
+                got[pid] = p
+        return got
+
+    if db is not None and wanted:
+        cached = retry_tx_db(
+            lambda: db.fetchrow(
+                "SELECT content_hash FROM pipeline.content_watermarks WHERE pipeline_name = $1",
+                ORG_CACHE_WATERMARK,
+            ),
+            description="org cache read",
+        )
+        org_id = cached["content_hash"] if cached else None
+        if org_id:
+            try:
+                listing = _org_projects(org_id)
+            except Exception as e:
+                logger.warning(f"org-cache fast path failed, full sweep: {e}")
+                listing = {}
+            if wanted <= listing.keys():
+                return listing
+            logger.info("org cache stale/incomplete; falling back to full org sweep")
+
+    listing = {}
+    contributing_orgs = set()
+    for org in fetcher.ext.extract_organizations():
+        org_projects = _org_projects(org["id"])
+        listing.update(org_projects)
+        if wanted and wanted & org_projects.keys():
+            contributing_orgs.add(org["id"])
+        if wanted and wanted <= listing.keys():
+            break
+    # Only cache when ONE org owns every wanted project; a multi-org scope
+    # can't be served by the single-org fast path, so caching would just
+    # force a stale-detect + re-sweep every run.
+    if db is not None and wanted and wanted <= listing.keys() \
+            and len(contributing_orgs) == 1:
+        org_id = next(iter(contributing_orgs))
+        retry_tx_db(
+            lambda: db.execute(UPSERT_WATERMARK, ORG_CACHE_WATERMARK, org_id),
+            description="org cache write",
+        )
+    return listing
+
+
+def _start_run(db, run_id, metadata):
+    """pipeline_runs INSERT, same shape as base_extractor.start_pipeline_run
+    but through db_tx (copied statement rather than importing the
+    session-pool loader, per the plan)."""
+    db.execute(
+        f"INSERT INTO {SCHEMA_PIPELINE}.pipeline_runs "
+        f"(run_id, pipeline_name, status, started_at, metadata) "
+        f"VALUES ($1, $2, $3, $4, $5)",
+        run_id, PIPELINE_NAME, "running", datetime.now(timezone.utc), metadata,
+    )
+
+
+def _complete_run(db, run_id, status, records=None, error=None):
+    db.execute(
+        f"UPDATE {SCHEMA_PIPELINE}.pipeline_runs "
+        f"SET status = $1, completed_at = $2, records_extracted = $3, "
+        f"error_message = $4 WHERE run_id = $5",
+        status, datetime.now(timezone.utc), records, error, run_id,
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Incremental asset-tasks shadow pipeline (TS13+ pilot)")
+    ap.add_argument("--baseline", action="store_true",
+                    help="Seed run: skip watermark checks, visit every asset, "
+                         "write every task (upserts stay guarded)")
+    ap.add_argument("--full-walk", action="store_true",
+                    help="Weekly ghost sweep: baseline fetch semantics with "
+                         "guards, so unchanged rows are no-ops but deletions "
+                         "are reconciled everywhere")
+    ap.add_argument("--workers", type=int, default=6,
+                    help="Concurrent project walks")
+    ap.add_argument("--asset-workers", type=int, default=4,
+                    help="Concurrent per-asset fetch/write workers within "
+                         "each project walk")
+    ap.add_argument("--projects", default=PILOT_PROJECTS,
+                    help=f"Comma list of project tails (default: "
+                         f"{PILOT_PROJECTS}), or 'all13' for all "
+                         f"project_number >= 13")
+    args = ap.parse_args()
+
+    setup_logging()
+    t0 = time.monotonic()
+    # --full-walk shares baseline's walk semantics; the guarded upserts make
+    # re-writes of unchanged rows no-ops, so the only real work it adds over
+    # an incremental run is fetch volume + reconcile coverage.
+    baseline = args.baseline or args.full_walk
+    mode = ("baseline" if args.baseline
+            else "full-walk" if args.full_walk else "incremental")
+
+    db = get_tx_db()
+    projects = resolve_projects(db, args.projects)
+    tails = [_project_tail(p["project_name"]) for p in projects]
+    logger.info(f"Mode: {mode}; {len(projects)} project(s): {', '.join(tails)}")
+
+    fetcher = _get_fetcher()
+    listing = fetch_project_listing(
+        fetcher, wanted_dids=[p["project_did"] for p in projects], db=db)
+
+    run_id = str(uuid.uuid4())
+    retry_tx_db(
+        lambda: _start_run(db, run_id, {"mode": mode, "projects": tails}),
+        description="insert pipeline_runs",
+    )
+
+    def _walk(proj):
+        row = listing.get(proj["project_did"])
+        # Missing from the org listing -> treat as changed: lastUpdated None
+        # falls through walk_project's skip check and the project is walked.
+        project = {
+            "project_did": proj["project_did"],
+            "status": row.get("status") if row else None,
+            "lastUpdated": row.get(FIELD_MAP["last_updated"]) if row else None,
+        }
+        return walk_project(db, project, baseline=baseline,
+                            asset_workers=args.asset_workers)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(_walk, p): p for p in projects}
+        for fut in as_completed(futures):
+            tail = _project_tail(futures[fut]["project_name"])
+            try:
+                stats = fut.result()
+            except Exception as e:
+                logger.error(f"[{tail}] walk failed: {type(e).__name__}: {e}")
+                stats = {"ok": False}
+            results[tail] = stats
+            logger.info(f"[{tail}] {stats}")
+
+    skipped = sorted(t for t, s in results.items() if s.get("skipped"))
+    failed = sorted(t for t, s in results.items() if s.get("ok") is False)
+    walked = [s for s in results.values() if "assets" in s]
+    total_visited = sum(s["visited"] for s in walked)
+    total_writes = sum(s["task_writes"] for s in walked)
+    total_deletes = sum(s["task_deletes"] for s in walked)
+    elapsed = time.monotonic() - t0
+
+    status = "completed" if not failed else "failed"
+    error = f"projects with failed fetches: {', '.join(failed)}" if failed else None
+    retry_tx_db(
+        lambda: _complete_run(db, run_id, status, total_writes, error),
+        description="update pipeline_runs",
+    )
+
+    logger.info(
+        f"Done in {elapsed:.1f}s: {len(projects)} project(s), "
+        f"{len(skipped)} skipped, {len(walked)} walked, "
+        f"{total_visited} assets visited, {total_writes} task writes, "
+        f"{total_deletes} task deletes"
+        + (f", FAILED: {', '.join(failed)}" if failed else "")
+    )
+    close_tx_db()
+    if failed:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
