@@ -230,6 +230,30 @@ jobs:
             echo "WARN: weekly-compliance dispatch failed; check PAT has report-automation scope"
           fi
 
+      - name: Dispatch weekly-invoicing-po-tasks (Mondays only, cross-repo)
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
+        continue-on-error: true
+        run: |
+          DOW=$(date -u +%u)
+          if [ "$DOW" != "1" ]; then
+            echo "Not Monday (UTC dow=$DOW) - skipping weekly invoicing/PO dispatch"
+            exit 0
+          fi
+          if [ -z "${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" ]; then
+            echo "WARN: DATE_VALIDATOR_DISPATCH_PAT not set - skipping cross-repo dispatch"
+            exit 0
+          fi
+          response=$(curl -sw '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.DATE_VALIDATOR_DISPATCH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/jamilmendez-ontel/report-automation/dispatches" \
+            -d '{"event_type": "weekly-invoicing-po-tasks", "client_payload": {"source": "gha-pipeline-asset-tasks"}}')
+          code=$(echo "$response" | tail -n1)
+          echo "Dispatched weekly-invoicing-po-tasks -> HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "WARN: weekly-invoicing-po-tasks dispatch failed; check PAT has report-automation scope"
+          fi
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
