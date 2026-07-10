@@ -2,6 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**STATUS 2026-07-10:** Tasks 1–7 done and verified live; Task 8's workflow
+file is written but its first dispatch waits on merge to main
+(workflow_dispatch needs the file on the default branch); Task 9 docs done.
+Measured on the TS17–19 pilot: **baseline seed 46.9 min** (three projects in
+parallel, 6 per-asset workers each, ~1.18M task rows), **incremental re-run
+48.2 s** (~58×: 1 project skipped at the watermark, 1 all-pruned after one
+asset-list call, 1 visited exactly the one changed asset). Implementation
+deltas vs this plan, all forced by live findings: statement-level
+`retry_tx_db` everywhere (a pooler drop killed a whole project walk),
+per-asset worker pool inside each project walk (Swift's asset-tasks endpoint
+is 3–7 s/call; serial = double-digit hours), an org cache in
+`content_watermarks` (`asset_tasks_inc/_projects_org`; the account sees ~304
+orgs and a full org sweep cost ~20 min per run), and three FIELD_MAP
+corrections caught by the first audit (the export's Project_Status /
+Asset_DID / Asset_Name are really asset-project status / underlying asset.id
+/ shortName) — see the findings doc's 2026-07-10 correction block. The first
+clean-audit gate is the comparison right after the next nightly full-reload
+run, since intra-day churn keeps the two tables apart until then.
+
 **Goal:** Build a duplicate asset-tasks pipeline for TECH-OPS TS13+ that walks the Swift project/asset/task hierarchy pruned by `lastUpdated`, fetching and writing only what changed, running in parallel with (and never touching) the current full-reload pipeline until a nightly drift audit proves byte-equality.
 
 **Architecture:** First run seeds a full baseline. Every later run fetches the cheap asset list per project, descends only into assets whose `lastUpdated` moved past what's stored, fetches task lists only for those assets, and upserts only tasks whose `lastUpdated` moved. Deletions are handled by keep-list reconcile inside every scope that was actually visited with a successful fetch. The stored rows themselves are the watermark (self-healing); a per-project skip check against `pipeline.content_watermarks` avoids even the asset-list call for untouched projects. All DB access goes through the transaction-mode pooler (port 6543) so N workers hold zero idle session slots.
@@ -41,7 +60,7 @@ This task verifies only what remains open (listed in the findings doc's last sec
 **Interfaces:**
 - Produces: the completed findings doc that Task 4's `FIELD_MAP` constants must match. Open items to answer: (a) exact payload key inventories for a TS project, (b) which asset field is the FK for the asset-tasks endpoint (expected `id`), (c) id uniqueness within project for assets and tasks, (d) which asset field carries the requirement count, (e) does DELETING a task bump the parent lastUpdated (submits/approvals/cancellations confirmed; hard delete untested; the weekly `--full-walk` stays mandatory until confirmed).
 
-- [ ] **Step 1: Write the probe script**
+- [x] **Step 1: Write the probe script**
 
 ```python
 #!/usr/bin/env python3
@@ -112,18 +131,18 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `cd swift_api_pipeline && python probe_inc_asset_tasks.py --project-number 13`
 Expected: key inventories for all three levels, `lastUpdated` present at every level, ids unique. If the asset FK for `fetch_tasks` is not `id`, note the correct field.
 
 ALSO inventory the `metrics` object at project and asset level for child-count fields (e.g. `taskCount`, `assetCount`). If asset metrics expose a task count, deletions become detectable from the parent's count mismatch alone (stored count vs fetched count triggers a descend + reconcile), which replaces the full-walk sweep at GC scale. Record what count fields exist in the findings doc.
 
-- [ ] **Step 3: Fill the findings doc's "Still open" section**
+- [x] **Step 3: Fill the findings doc's "Still open" section**
 
 Record in `docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md`: the three key inventories, the confirmed FK field, id-uniqueness results, requirement-count field name, and the DELETE-propagation test result (procedure: Jamil deletes one disposable test task in Swift; re-run the probe against its asset and compare `lastUpdated` before/after). If delete does NOT propagate, keep "weekly full-walk safety net REQUIRED" in the doc; Task 6 wires it either way behind a flag.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add swift_api_pipeline/probe_inc_asset_tasks.py docs/superpowers/specs/2026-07-09-inc-asset-tasks-api-findings.md
@@ -140,12 +159,12 @@ git commit -m "probe: hierarchy payload shapes + lastUpdated semantics for inc a
 **Interfaces:**
 - Produces: `data_raw.raw_asset_tasks_inc` (task payload archive keyed by task_did), `data_staging.stg_assets_inc` (asset level, the asset watermark store), `data_staging.stg_asset_tasks_inc` (mirror of `stg_asset_tasks` business columns + `last_updated`), used by Tasks 4-7. Watermark rows go in the EXISTING `pipeline.content_watermarks` (migration 175) as `pipeline_name = 'asset_tasks_inc/<project_did>'`, no new watermark table.
 
-- [ ] **Step 1: Check the next free migration number**
+- [x] **Step 1: Check the next free migration number**
 
 Run: `ls swift_api_pipeline/migrations/ | sort -n -t_ -k1 | tail -3`
 Expected: 175 is the highest; this file is 176. If not, renumber.
 
-- [ ] **Step 2: Write the migration**
+- [x] **Step 2: Write the migration**
 
 ```sql
 -- 176: shadow tables for the INCREMENTAL asset-tasks pipeline (TS13+ pilot).
@@ -231,13 +250,13 @@ create table pipeline.inc_audit_results (
 alter table pipeline.inc_audit_results enable row level security;
 ```
 
-- [ ] **Step 3: Apply to prod and verify**
+- [x] **Step 3: Apply to prod and verify**
 
 Apply via the Supabase MCP / SQL editor, then:
 Run: `SELECT relname, relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE relname LIKE '%_inc' AND nspname IN ('data_raw','data_staging');`
 Expected: 3 rows, all `relrowsecurity = true`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add swift_api_pipeline/migrations/176_inc_asset_tasks_shadow_tables.sql
@@ -255,7 +274,7 @@ git commit -m "migration 176: shadow tables for incremental asset-tasks pilot"
 **Interfaces:**
 - Produces: `get_tx_db()` returning the same sync-facade wrapper style as `db.py`'s `get_db()` (methods `fetch`, `fetchrow`, `fetchval`, `execute`, `executemany`), but connected to port 6543 with `statement_cache_size=0`. Consumed by Tasks 4-7. Read `db.py` first and mirror its wrapper class; only the connect kwargs differ:
 
-- [ ] **Step 1: Read db.py and write db_tx.py**
+- [x] **Step 1: Read db.py and write db_tx.py**
 
 Mirror `db.py`'s pool/wrapper structure with these differences (exact kwargs):
 
@@ -280,7 +299,7 @@ pool = await asyncpg.create_pool(
 )
 ```
 
-- [ ] **Step 2: Write the connectivity test**
+- [x] **Step 2: Write the connectivity test**
 
 ```python
 # tests/test_db_tx.py
@@ -297,12 +316,12 @@ def test_tx_roundtrip():
     close_tx_db()
 ```
 
-- [ ] **Step 3: Run the test**
+- [x] **Step 3: Run the test**
 
 Run: `cd swift_api_pipeline && python -m pytest tests/test_db_tx.py -v`
 Expected: PASS (requires Cloudflare WARP on, like all local DB access).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add swift_api_pipeline/db_tx.py swift_api_pipeline/tests/test_db_tx.py
@@ -321,7 +340,7 @@ git commit -m "db_tx: transaction-pooler module for the incremental pipeline wor
 - Produces: `plan_asset_visits(fetched_assets, stored_assets)` and `plan_task_writes(fetched_tasks, stored_tasks)` pure functions consumed by Task 5's walker; `FIELD_MAP` constants matching Task 1's findings doc; `epoch_to_ts(val)` (epoch millis to aware UTC datetime, None-safe).
 - Consumes: nothing from other tasks (pure functions + constants only in this task).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_inc_prune.py
@@ -376,12 +395,12 @@ def test_task_deletion_detected():
     assert writes == [] and missing == {"t1"}
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+- [x] **Step 2: Run tests, verify they fail**
 
 Run: `cd swift_api_pipeline && python -m pytest tests/test_inc_prune.py -v`
 Expected: FAIL, module not found.
 
-- [ ] **Step 3: Implement the pure core**
+- [x] **Step 3: Implement the pure core**
 
 ```python
 #!/usr/bin/env python3
@@ -458,12 +477,12 @@ def plan_task_writes(fetched_tasks, stored_task_ts):
 
 Note the deliberate bias: an entity with a missing/unparseable `lastUpdated` is ALWAYS visited/written. Fail toward extra work, never toward staleness.
 
-- [ ] **Step 4: Run tests, verify they pass**
+- [x] **Step 4: Run tests, verify they pass**
 
 Run: `cd swift_api_pipeline && python -m pytest tests/test_inc_prune.py -v`
 Expected: 7 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift_api_pipeline/extract_asset_tasks_inc.py swift_api_pipeline/tests/test_inc_prune.py
@@ -481,7 +500,7 @@ git commit -m "inc asset tasks: prune planning core (pure functions + tests)"
 - Consumes: `plan_asset_visits`, `plan_task_writes`, `FIELD_MAP`, `epoch_to_ts` (Task 4); `get_tx_db()` (Task 3); `DailyReportsPipeline.fetch_assets/fetch_tasks` request pattern (reuse the auth/_request helpers by importing the class or copying its `_request`, decide while reading, prefer import to copying).
 - Produces: `walk_project(db, project, baseline=False) -> dict` stats consumed by Task 6's runner. Row mapping `task_to_stg_row(project, asset, task) -> tuple` in the exact column order of `stg_asset_tasks_inc`.
 
-- [ ] **Step 1: Implement walk_project**
+- [x] **Step 1: Implement walk_project**
 
 The per-project sequence (all SQL executemany batches of 500):
 
@@ -541,17 +560,17 @@ WHERE stg_asset_tasks_inc.last_updated IS DISTINCT FROM EXCLUDED.last_updated
 7. Advance the project watermark to `max(lastUpdated seen)` ONLY if every fetch in the project succeeded.
 8. Return stats: `{"ok": True, "assets": len(assets), "visited": len(visits), "task_writes": n, "task_deletes": n}`.
 
-- [ ] **Step 2: Validate the SQL against prod (no data written)**
+- [x] **Step 2: Validate the SQL against prod (no data written)**
 
 Run each statement with `EXPLAIN (COSTS OFF)` and dummy literals against the `_inc` tables (same technique as the 2026-07-09 daily-reports guards).
 Expected: `Conflict Filter` visible on both upserts; no errors.
 
-- [ ] **Step 3: Run the pure tests again (regression)**
+- [x] **Step 3: Run the pure tests again (regression)**
 
 Run: `cd swift_api_pipeline && python -m pytest tests/test_inc_prune.py -v`
 Expected: still 7 passed. `python -m py_compile extract_asset_tasks_inc.py` clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add swift_api_pipeline/extract_asset_tasks_inc.py
@@ -569,24 +588,24 @@ git commit -m "inc asset tasks: per-project walker with guarded upserts + keep-l
 - Consumes: `walk_project` (Task 5); `reference.ref_ontel_techops_projects` (project_number >= 13); project `lastUpdated` from `SwiftAPIExtractor.extract_organizations/extract_projects`.
 - Produces: CLI `python extract_asset_tasks_inc.py [--baseline] [--full-walk] [--workers 6] [--projects TS17,TS18,TS19]` (default = the phase-1 trio; `--projects all13` widens to project_number >= 13 for phase 2); records runs in `pipeline.pipeline_runs` as `asset_tasks_inc` (reuse `SupabaseLoader.start_pipeline_run/complete_pipeline_run` pattern but through `db_tx`, copy the two small INSERT/UPDATE statements rather than importing the session-pool loader).
 
-- [ ] **Step 1: Implement main()**
+- [x] **Step 1: Implement main()**
 
 - Resolve projects (>= 13) and join each to its org-projects row for `lastUpdated` (one `extract_organizations` + `extract_projects` pass, same as the orgs pipeline does; if a project is missing from the listing, treat as changed).
 - `--baseline`: pass `baseline=True` to every walk (full fetch + seed watermarks). `--full-walk`: baseline semantics for fetches but keep guards (the weekly ghost-sweep safety net; behavior identical to baseline since guards make re-writes no-ops).
 - `ThreadPoolExecutor(max_workers=args.workers, default 6)`, one future per project, each worker uses the shared `get_tx_db()` facade.
 - Log per-project stats lines and a final summary (projects skipped/walked, assets visited, task writes/deletes, failures). Exit non-zero if any project returned `ok: False`.
 
-- [ ] **Step 2: Baseline run against prod (the pilot's run 1)**
+- [x] **Step 2: Baseline run against prod (the pilot's run 1)**
 
 Run: `cd swift_api_pipeline && python extract_asset_tasks_inc.py --baseline --workers 6`
 Expected: completes; `SELECT count(*) FROM data_staging.stg_asset_tasks_inc` within ~1% of `SELECT count(*) FROM data_staging.stg_asset_tasks` (small drift = in-flight changes; the audit in Task 7 is the real check). Watermark rows exist: `SELECT count(*) FROM pipeline.content_watermarks WHERE pipeline_name LIKE 'asset_tasks_inc/%'` equals the project count.
 
-- [ ] **Step 3: Immediate second run (the skip proof)**
+- [x] **Step 3: Immediate second run (the skip proof)**
 
 Run: `cd swift_api_pipeline && python extract_asset_tasks_inc.py --workers 6`
 Expected: most projects skipped at the watermark check or all-assets-pruned; task_writes near zero; runtime a small fraction of the baseline run. Capture both runtimes in the commit message.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add swift_api_pipeline/extract_asset_tasks_inc.py
@@ -604,7 +623,7 @@ git commit -m "inc asset tasks: runner + workers + baseline/full-walk modes (bas
 - Consumes: `stg_asset_tasks` (current pipeline, read-only) and `stg_asset_tasks_inc` (Tasks 2-6).
 - Produces: exit 0 when aligned, exit 1 with a per-project diff report when not; consumed by Task 8's workflow.
 
-- [ ] **Step 1: Implement the audit**
+- [x] **Step 1: Implement the audit**
 
 Per project, entirely in SQL (one query each side, compare in Python):
 
@@ -622,12 +641,12 @@ Report per project: rows_current vs rows_inc, hash match yes/no. On mismatch, dr
 
 EVERY audit run also INSERTs one row per project into `pipeline.inc_audit_results` (Task 2), pass or fail. The test week's expand/fix/abort decision is made by querying this table (e.g. `SELECT project_did, count(*) FILTER (WHERE NOT hash_match) AS mismatched_runs, count(*) AS runs FROM pipeline.inc_audit_results GROUP BY 1`).
 
-- [ ] **Step 2: Run it after Task 6's baseline**
+- [x] **Step 2: Run it after Task 6's baseline**
 
 Run: `cd swift_api_pipeline && python audit_asset_tasks_inc.py`
 Expected: counts within noise of each other per project; investigate any project off by more than in-flight churn before continuing.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add swift_api_pipeline/audit_asset_tasks_inc.py
@@ -644,7 +663,7 @@ git commit -m "inc asset tasks: drift audit against current pipeline"
 **Interfaces:**
 - Consumes: the CLI (Task 6) and audit (Task 7). Secrets/env identical to `pipeline-asset-tasks.yml` (copy its .env block) PLUS nothing new: `db_tx.py` reads the same SUPABASE_* vars, only the port constant differs.
 
-- [ ] **Step 1: Write the workflow**
+- [x] **Step 1: Write the workflow**
 
 Structure (mirror `pipeline-asset-tasks.yml` boilerplate: checkout, python 3.12, pip cache, .env creation):
 
@@ -672,12 +691,12 @@ Scheduling (Apps Script triggers dispatching `pipeline-asset-tasks-inc`, per the
 - **Test week (TS17-19)**: incremental every 2 hours (3 projects = a few API calls per run; frequent runs generate more watermark cycles = more chances to expose a missed change while the current pipeline is still truth). Wire this after the first 1-2 manual runs look sane.
 - **Sunday `--full-walk` ghost sweep** (`client_payload.mode = "full-walk"`, Sunday 06:00 PHT = Saturday 6 PM ET, outside the 1-10 PM PHT shift; decided by Jamil 2026-07-09). At pilot scale a weekly full walk is cheap insurance. It does NOT scale to GC (15M+ rows); see Task 9 for the GC-scale deletion strategy.
 
-- [ ] **Step 2: Dispatch once and watch it**
+- [ ] **Step 2: Dispatch once and watch it** (pending merge to main)
 
 Run: `gh workflow run pipeline-asset-tasks-inc.yml -f mode=incremental && gh run watch`
 Expected: green; log shows skip/visit stats; audit step passes.
 
-- [ ] **Step 3: Commit + push**
+- [ ] **Step 3: Commit + push** (branch pushed via draft PR instead)
 
 ```bash
 git add .github/workflows/pipeline-asset-tasks-inc.yml
@@ -693,7 +712,7 @@ git push origin main
 - Modify: `README.md` (pipeline inventory section: add the shadow pipeline, one paragraph)
 - Modify: `docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md` (this file: check off tasks, record baseline/incremental runtimes)
 
-- [ ] **Step 1: Document**
+- [x] **Step 1: Document**
 
 README paragraph must state: shadow status, that the current pipeline remains authoritative, the audit command, the force-resync escape hatches (`--baseline`, or `DELETE FROM pipeline.content_watermarks WHERE pipeline_name LIKE 'asset_tasks_inc/%'`), and the pilot exit criteria below.
 
@@ -716,7 +735,7 @@ Then: re-structure the current asset-tasks pipeline on this pattern and build gc
 2. If asset/project `metrics` expose child counts (Task 1 inventories this): detect deletions from count mismatch (stored vs fetched count on the CHEAP parent-list call), descend + reconcile only mismatched scopes. Near-free at any scale.
 3. Fallback only: rotating partial sweep, 1/Nth of assets per night round-robin so full coverage every N days without any single heavy run. The Sunday full walk stays a pilot-scale tool.
 
-- [ ] **Step 2: Commit + push**
+- [ ] **Step 2: Commit + push** (branch pushed via draft PR instead)
 
 ```bash
 git add README.md docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md

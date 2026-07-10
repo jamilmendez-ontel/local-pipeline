@@ -37,6 +37,7 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
 | `pipeline-calendar-events.yml` | Apps Script (6 AM & 6 PM ET) | Google Calendar → `stg_calendar_events` (incremental, AI-normalized; per-kind `analytics.v_calendar_*` views) |
 | `pipeline-asset-tasks.yml` | Nightly Apps Script | Heavy nightly: asset_tasks → MVs → fires downstream dispatches |
+| `pipeline-asset-tasks-inc.yml` | Manual dispatch (pilot) | SHADOW: incremental asset-tasks walker → `*_inc` tables + drift audit (see below) |
 | `pipeline-asset-tasks-gc.yml` | Nightly Apps Script | Parallel GC pipeline (non-Ontel orgs) |
 | `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
@@ -70,6 +71,32 @@ main.py
     ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
     └── analytics.refresh_one_mv() × 3 (mv_project_summary, mv_technician_stats, mv_daily_completion)
 ```
+
+### Incremental asset-tasks shadow (pilot, 2026-07)
+
+`extract_asset_tasks_inc.py` is a SHADOW duplicate of the asset-tasks
+pipeline that walks the project → asset → task hierarchy pruned by
+`lastUpdated`, fetching and writing only what changed (guarded upserts +
+keep-list reconcile; no run_id sweeps). It writes ONLY to
+`raw_asset_tasks_inc` / `stg_assets_inc` / `stg_asset_tasks_inc` and
+namespaced `pipeline.content_watermarks` rows — **the current
+`pipeline-asset-tasks.yml` remains authoritative** until the pilot exits.
+Pilot scope is TS17–19 (`--projects all13` widens to phase 2). Measured
+2026-07-10: baseline seed 46.9 min, incremental re-run 48 s (~58×).
+
+- Audit: `python audit_asset_tasks_inc.py` diffs `stg_asset_tasks_inc`
+  against `stg_asset_tasks` per project and persists every result to
+  `pipeline.inc_audit_results`; the workflow fails on mismatch. Run-timing
+  churn self-corrects by the next audit; persistent drift is a bug.
+- Force resync: `python extract_asset_tasks_inc.py --baseline`, or
+  `DELETE FROM pipeline.content_watermarks WHERE pipeline_name LIKE
+  'asset_tasks_inc/%'` and run incrementally.
+- Pilot exit gates (decided by Jamil, not the code): phase 1 → widen to
+  all TS13+ after 7 days of every-2h runs with zero unexplained audit
+  mismatches and delete-propagation covered (natively or by the Sunday
+  `--full-walk`); phase 2 → restructure the current pipeline on this
+  pattern (and gc-asset-tasks after it) after 7+ clean days at full scope
+  with runtime/IO a small fraction of the full reload's.
 
 ### Targeted extractors (report-driven)
 
