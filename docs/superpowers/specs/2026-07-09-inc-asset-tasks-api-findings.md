@@ -102,14 +102,30 @@ sparse fields were unpopulated. A targeted probe across ~1,200 real
 asset-task rows (`collection == "asset-tasks"`) on TS17 confirmed all of the
 following are top-level keys, not nested under `ast` or `task`:
 
+**CORRECTED 2026-07-10 (first drift audit vs `stg_asset_tasks`):** three of
+the original mappings below did not match the `_export` payload the current
+pipeline loads from, because the export's column names are misleading. The
+export's `Project_Status` is the **asset-project row's own `status`**
+(pending/in_progress/complete/cancelled, varies per row within a project —
+NOT the project's status and NOT `project.metrics.status`, both of which
+read `in_progress` while the export said `pending`). Its `Asset_DID` is the
+**underlying `asset.id`** (the asset-project's `asset` sub-ref), not the
+asset-project's top-level `id` (which is asset.id + project_did
+concatenated). Its `Asset_Name` is the **bare `shortName`**
+("1CH6119A"), not the project-qualified `name` ("TECH-OPS: TS17 | 1CH6119A").
+Consequence for the walker: the asset-project id remains the walk-scope /
+fetch FK and is kept in `raw_asset_tasks_inc.asset_did`, which is therefore
+the walker's stored-task keying table; `stg_asset_tasks_inc` mirrors the
+current pipeline's semantics for the audit.
+
 | stg_asset_tasks_inc column | Source path | Notes |
 |---|---|---|
 | `task_did` | `task["id"]` | |
 | `project_did` | `project["project_did"]` (caller-supplied) | |
-| `project_status` | `project.get("status")` | project row's own status, denormalized onto every task |
-| `asset_did` | `asset["id"]` (asset-project row's top-level id) | |
+| `project_status` | `asset.get("status")` | ASSET-PROJECT's own status (export semantics, see 2026-07-10 correction above) |
+| `asset_did` | `asset["asset"]["id"]` (underlying asset ref) | corrected 2026-07-10; the asset-project's top-level `id` is used only as the fetch FK / raw keying |
 | `asset_id` | `asset.get("identifier")` (`FIELD_MAP["asset_identifier"]`) | sparse per Task 1 findings; None-safe |
-| `asset_name` | `asset.get("name")` | |
+| `asset_name` | `asset.get("shortName")` | corrected 2026-07-10; `name` is project-qualified |
 | `asset_requirement_count` | `asset.get("metrics", {}).get("reqCount")` | from the ASSET's metrics, denormalized onto every task row under it (same design as the existing `stg_asset_tasks`) |
 | `task_name` | `task.get("name")` | |
 | `task_status` | `task.get("status")` | audit-hash column |

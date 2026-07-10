@@ -1,0 +1,129 @@
+name: "Pipeline: Asset Tasks (Incremental Shadow)"
+
+# SHADOW pilot for the incremental asset-tasks pipeline (TS13+; phase 1 =
+# TS17-19). Runs in parallel with "Pipeline: Asset Tasks" and never touches
+# its tables; every run ends with a drift audit against the current
+# pipeline's stg_asset_tasks, persisted to pipeline.inc_audit_results.
+#
+# Manual dispatch only during the pilot. Scheduling (per the Apps-Script-
+# for-scheduling convention, wired after the first manual runs look sane):
+#   - test week: repository_dispatch 'pipeline-asset-tasks-inc' every 2h
+#   - Sunday 06:00 PHT ghost sweep: client_payload.mode = "full-walk"
+#
+# Plan: docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md Task 8
+
+on:
+  repository_dispatch:
+    types: [pipeline-asset-tasks-inc]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "incremental (normal) | baseline (re-seed watermarks) | full-walk (weekly ghost sweep)"
+        required: false
+        type: choice
+        options:
+          - incremental
+          - baseline
+          - full-walk
+        default: incremental
+      projects:
+        description: "Comma list of project tails (default TS17,TS18,TS19), or all13 for phase 2"
+        required: false
+        type: string
+
+concurrency:
+  group: pipeline-asset-tasks-inc
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  asset-tasks-inc:
+    runs-on: ubuntu-latest
+    # Incremental runs are minutes; baseline / full-walk re-fetch every
+    # asset's task list and the Swift asset-tasks endpoint runs 3-7s per
+    # call (measured 2026-07-09), so a pilot-scale full walk is ~2-3h even
+    # with parallel per-asset workers.
+    timeout-minutes: 240
+
+    steps:
+      # Normalize inputs across the two trigger types, same pattern as
+      # pipeline-asset-tasks.yml.
+      - name: Resolve inputs
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+            PROJECTS="${{ inputs.projects }}"
+          else
+            MODE="${{ github.event.client_payload.mode }}"
+            PROJECTS="${{ github.event.client_payload.projects }}"
+          fi
+          if [ -z "$MODE" ]; then MODE="incremental"; fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "projects=$PROJECTS" >> $GITHUB_OUTPUT
+          echo "Resolved: mode='$MODE', projects='${PROJECTS:-<default pilot trio>}'"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Same .env block as pipeline-asset-tasks.yml; db_tx.py reads the same
+      # SUPABASE_* vars and its transaction-pooler host/user/port defaults
+      # are baked into the module, so nothing new is needed here.
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Run incremental walk
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          MODE: ${{ steps.resolve.outputs.mode }}
+          PROJECTS: ${{ steps.resolve.outputs.projects }}
+        run: |
+          FLAGS=""
+          if [ "$MODE" = "baseline" ]; then FLAGS="--baseline"; fi
+          if [ "$MODE" = "full-walk" ]; then FLAGS="--full-walk"; fi
+          if [ -n "$PROJECTS" ]; then FLAGS="$FLAGS --projects $PROJECTS"; fi
+          echo "Running: extract_asset_tasks_inc.py $FLAGS"
+          python -u extract_asset_tasks_inc.py $FLAGS
+
+      # The audit is the point of the pilot: a mismatch fails the run so the
+      # test week's signal is impossible to miss. Results also persist to
+      # pipeline.inc_audit_results either way.
+      - name: Drift audit vs current pipeline
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          PROJECTS: ${{ steps.resolve.outputs.projects }}
+        run: |
+          FLAGS=""
+          if [ -n "$PROJECTS" ]; then FLAGS="--projects $PROJECTS"; fi
+          python -u audit_asset_tasks_inc.py $FLAGS
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-tasks-inc-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7
+          if-no-files-found: ignore
