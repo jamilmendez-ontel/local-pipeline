@@ -1,5 +1,22 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-12 — Shadow audit finds PRODUCTION data loss; remap complete
+
+### Major finding: the persistent audit drift is the CURRENT pipeline's, not the shadow's
+The mismatches that survived multiple nightly reloads decompose into two production-side defects, verified live against Swift:
+- **`_export` silently drops real tasks**: ~99 (TS18) / ~54 (TS19) / ~142 (TS17) tasks that exist in Swift right now — mostly **approved tasks under in_progress assets** (revenue-relevant rows) — never land in `stg_asset_tasks`, reload after reload. The shadow's hierarchy walk sees them all.
+- **`_export` emits tasks of hierarchy-absent assets**: TS17's 154 missing-in-shadow rows trace to asset `-OOgqCUgxootyP0k2sVU`, absent from the project's asset list (deleted/moved); the shadow reconciled it away correctly, the export still produces its 77+ tasks nightly.
+- Consequence: `stg_asset_tasks` ≠ Swift truth, so the strict gate cannot go green while the audit treats current as the baseline. **Doctrine decision needed (Jamil)**: verify shadow against Swift directly (spot-fetch), or exclude the documented known-gap sets.
+
+### Remap complete + verified
+The 2026-07-10 export-semantics remap (asset_did/asset_name/project_status) finished after the interrupted pass was relaunched: **0 of 1,188,135 rows** left in old format (v6 run: 47.4 min, 3 clean walks). Post-remap audit shows those column diffs GONE.
+
+### New narrow pattern (next session)
+A handful of rows where current has `task_submitted/approved/cancelled_by_did` but the shadow has NULL **while name+email match**; the same person ids recur (`-OYZRYEENpsf-sg65SrI`, `-Of02VUB57n2UPgYVQGn`) — likely the personnel ALIAS mechanism (export resolves alias→canonical did; hierarchy API record carries no id).
+
+### Next-session queue (agreed)
+1. Export data-loss investigation (production impact today) 2. Audit-doctrine decision 3. Cloud Run Jobs migration (ACE-aligned, "proper way": Artifact Registry + OIDC + Secret Manager + Cloud Scheduler, asia-southeast1) 4. Alias-did pattern.
+
 ## Session: 2026-07-10 — Incremental asset-tasks shadow: Tasks 6–9 shipped, pilot LIVE on hourly cadence
 
 ### What shipped (PRs #9, #10 + hourly-cadence commit, all merged to main)
