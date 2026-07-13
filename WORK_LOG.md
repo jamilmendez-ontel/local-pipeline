@@ -1,5 +1,35 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-13 — Export data-loss ROOT CAUSE: `_export` returns the task-template matrix only
+
+### Root cause proven (queue item 1 from 2026-07-12)
+Swift's `/assets/_export` does not export task *instances* — it exports the project's
+**task-template matrix** (every template task name × every asset) and nothing else. Tasks
+added ad hoc to a single asset (repeat revision/rejection rounds: "15B. COP Rejections
+Reviewed 2/3/…", "4B. LL COP Revision Complete 2", …) are structurally invisible.
+- Exact math: TS18 = 78 names × 5,481 assets = 427,518 rows_current **exactly**; TS19 =
+  76 × 4,847 = 368,372 **exactly** (TS17 close, template evolved over time).
+- 100% class exclusion: every dropped task *name* has 0 instances in current project-wide
+  and all of them in the shadow — not row-level drops.
+- Not our transform (all dropped task DIDs absent from `data_raw` — API never sent them);
+  not pagination (page-seam hypothesis tested and refuted: 6/40 vs 7.5% base rate).
+- Ghost-asset defect fits the same model: asset left the hierarchy but stays in the
+  export's asset set, so its template rows keep being emitted.
+
+### Impact
+295 real tasks missing across the 3 pilot projects; **146 match the billable filter of
+`analytics.v_weekly_invoice_billable_tasks`** (68 approved in 2026) → approved billable
+revision rounds that never reached the weekly invoice worklist. 16 downstream objects
+read `stg_asset_tasks`. Defect affects ALL `_export`-fed projects, not just the pilot.
+
+### Deliverables
+- `docs/2026-07-13-swift-export-data-loss-root-cause.md` — full evidence + recommendations
+- `out/export_dropped_tasks_2026-07-13.csv` (local-only) — all 295 rows, billable-flagged
+- Audit-doctrine consequence: hash equality vs current is mathematically impossible;
+  recommend asserting `current ⊆ shadow` + the two documented defect classes instead.
+  Doctrine/cutover/vendor-report decisions remain Jamil's (queue item 2).
+
+
 ## Session: 2026-07-12 — Shadow audit finds PRODUCTION data loss; remap complete
 
 ### Major finding: the persistent audit drift is the CURRENT pipeline's, not the shadow's
