@@ -58,8 +58,17 @@ Private repo `jamilmendez-ontel/swift-data-platform` scaffolded and pushed; CI g
   shared auth; quiet channels = zero traffic (30 s keep-alives only).
 - Gotcha captured in code: `iter_lines` default 512-byte buffering starves low-traffic
   SSE streams — `chunk_size=1` required (verified live twice).
-- Next milestone: port the incremental walk (`walk.py`/`upsert.py`) so listener
-  triggers real per-project syncs; then Cloud Run (service+job, Secret Manager, OIDC).
+- **Milestone 2 SHIPPED same session**: walk ported (fields/swift_api/db/walk +
+  walk_once CLI; psycopg3 tx-pooler pool replaces the 400-line asyncpg bridge;
+  guarded-upsert SQL and reconcile semantics preserved verbatim; 19 tests, CI green).
+  Listener now runs real per-project walks (in-flight guard, --dry-run mode).
+  **Live-verified**: TS19 walk = 4,859 assets / 2 visited / 37 task writes in 124 s,
+  row-for-row confirmed in stg_asset_tasks_inc (12:39 UTC). v2 and v1 hourly write
+  the same shadow tables with the same idempotent guards — v1 doubles as reconcile
+  until cutover.
+- Next: Cloud Run (Artifact Registry, listener service min-instances=1, reconcile
+  job, Secret Manager, Scheduler, OIDC deploys); live end-to-end demo (Swift click →
+  Supabase row) with Jamil watching.
 
 ### Direction decided earlier same session: new repo for the v2 platform
 Build the event-driven system in a fresh sibling repo (working name
