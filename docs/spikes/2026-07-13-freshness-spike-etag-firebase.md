@@ -111,3 +111,49 @@ Find the RTDB path the Swift app itself subscribes to for asset/task changes:
 3. Paste them here; the listener subscribes to exactly those nodes.
 
 Re-run anytime: `python swift_api_pipeline/spike_freshness.py`.
+
+## Round 2 (same day): schema discovered, change-signal validated end-to-end
+
+Jamil captured the app's WebSocket frames (DevTools → Network → Socket → Messages;
+initiator `AngularFire-util.js`). The frames revealed the RTDB layout: hyphenated
+top-level collections (`/conversations`, `/file-requirements`, `/asset-file-requirements`,
+`/projects-meta`, `/users-meta`), composite `{parentDid}{childDid}` keys, and per-entity
+`…-meta/{id}/channels/…` cache-invalidation leaves. Probing with known DIDs from our DB
+filled in the rest:
+
+| Node | Access | Notes |
+|---|---|---|
+| `/projects/{did}` | 200 | static-ish; `lastUpdated` does NOT bump on activity |
+| `/assets/{assetDid}` | 200 | global asset; `lastUpdated`=`dateCreated`; has `avc` counter |
+| `/asset-tasks/{taskDid}` | 200 | **full task instance** (status, approvedOn/By, scheduled, assignedTo, milestone, `ast`=asset, `assetProject`) — ground truth per task |
+| `/asset-projects/{assetDid}{projectDid}` | 200 | the asset↔project link. **Composite key = the "old-format composite asset_did"** from the remap saga — mystery solved |
+| `/asset-projects-meta/{comp}/channels/data` | 200 | **epoch-ms leaf that bumps ≤1 min after ANY change on that asset** (validated on 3 recently-active assets: channel = task activity +1 min) |
+| `/projects-meta/{did}/channels` | 200 | `{assets, data, project-milestones, project-tasks}` — **project-level bump leaves**; `data` bumped ~1 min after live activity during testing |
+| roots `/assets`, `/tasks`, `/…-meta/{id}` (non-channel) | 401 | rules block listing/enumeration |
+
+REST cross-check: the REST asset row's `lastUpdated` (the walk's watermark) equals its
+embedded `metrics.lastUpdated` (materialized task counters) — consistent with the
+channel semantics, NOT with the raw `/assets` node. The walk's correctness is intact.
+
+**Live SSE proof (TS18 project channel):** `Accept: text/event-stream` on
+`/projects-meta/{did}/channels/data.json?auth=<firebaseToken>` → HTTP 200, initial
+`put` with current value at +0.6 s, keep-alive every 30 s, zero cost while idle.
+
+### Validated listener design (3 subscriptions, not 15k)
+
+```
+per project: SSE stream /projects-meta/{P}/channels/data
+   put event → debounce ~60s → run existing inc walk for THAT project only
+             → guarded upserts (already idempotent)
+hourly reconcile + nightly strict audit stay as the safety net
+```
+
+- End-to-end freshness ≈ 1–2 min (channel bumps ≤1 min + one project walk).
+- Quiet cost: three idle HTTP streams. No WebSocket protocol needed, no per-asset fan-out.
+- Per-asset channels (`/asset-projects-meta/{comp}/channels/data`) remain available to
+  skip even the 45 s asset-list walk later (subscribe per hot asset, or read the asset
+  list once per bump as now).
+- Token: `firebaseToken` (72 h TTL) from the normal auth call; re-auth on stream 401.
+
+Next build step: resident listener prototype locally → containerize → Cloud Run
+service (`min-instances=1`) + Secret Manager + deploy via OIDC, per the migration plan.
