@@ -70,6 +70,28 @@ Private repo `jamilmendez-ontel/swift-data-platform` scaffolded and pushed; CI g
   job, Secret Manager, Scheduler, OIDC deploys); live end-to-end demo (Swift click →
   Supabase row) with Jamil watching.
 
+### Milestone 3 in progress: guided GCP build (Jamil driving, Console-first)
+- Prep shipped to swift-data-platform: `infra/setup.md` (9-phase gcloud runbook with
+  ACE notes + per-phase verify steps), `.github/workflows/deploy.yml` (WIF/OIDC,
+  dormant until repo vars set), listener health stub for Cloud Run's $PORT probe.
+- Google Cloud SDK 575.0.1 installed (winget); Jamil authenticated as
+  jamil.mendez@ontel.co. Teaching mode agreed: Jamil clicks each phase in the
+  Console, agent verifies from CLI after each phase.
+- **Discovered**: ontel.co GCP org exists (id 1089071409905) with ~10 projects;
+  active company billing account `01B47E-5BAE30-EEB7E8` (funds aitf-tools) that
+  Jamil cannot list/link — lacks Billing Account User on it.
+- **Decision (Jamil)**: proceed on his own free-trial billing ($300/90d, eligible),
+  project parented under the ontel.co org, switch to company billing when the
+  admin grants access (re-link is zero-downtime). Request to admin sent in parallel.
+- **Cost analysis corrected + communicated**: pilot ~$45–60/mo (listener at 1 vCPU
+  always-on is ~$40–50 — earlier "$10–15" was wrong, that's VM pricing); full
+  end-state incl. GC ~$70–120/mo. GC 20M rows: architecture unchanged (one
+  listener), one-time parallel baseline job ($10–30), but history must NOT live
+  hot in Supabase (IO pressure, compute-upgrade trap) — hot/cold split with
+  BigQuery/Parquet attic (~$1–5/mo); Supabase stays the team's main database.
+- Status at log time: waiting on Jamil creating project `ontel-data-platform`
+  (org-parented) + trial billing link in the Console; then Phase 2 (enable APIs).
+
 ### Direction decided earlier same session: new repo for the v2 platform
 Build the event-driven system in a fresh sibling repo (working name
 `swift-data-platform`): proper package layout (`src/swift_sync/`), tests, Dockerfile,
