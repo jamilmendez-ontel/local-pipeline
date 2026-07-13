@@ -29,6 +29,33 @@ read `stg_asset_tasks`. Defect affects ALL `_export`-fed projects, not just the 
   recommend asserting `current ⊆ shadow` + the two documented defect classes instead.
   Doctrine/cutover/vendor-report decisions remain Jamil's (queue item 2).
 
+### Freshness spike (same session): event-driven sync is PROVEN — Firebase RTDB channels
+Phase-3 roadmap steps 1+2 executed (`swift_api_pipeline/spike_freshness.py`, committed):
+- **Spike A (REST delta) DEAD**: no ETag header (no 304s); `updatedSince`/`sort`
+  params silently ignored. REST cannot cheapen change discovery.
+- **Spike B (Firebase) WON**: the `firebaseToken` from our normal auth call (Auth0 JWT,
+  72 h TTL, no exchange needed) reads Swift's RTDB at `swift-projects.firebaseio.com`.
+  Jamil captured the app's WS frames (AngularFire) → schema mapped by probing with
+  known DIDs: `/asset-tasks/{taskDid}` = full live task instance;
+  `/asset-projects/{assetDid}{projectDid}` composite key = the old-format composite
+  asset_did (remap mystery explained); `…-meta/{id}/channels/data` = epoch-ms
+  cache-invalidation leaves.
+- **Validated change signal**: `/projects-meta/{P}/channels/data` bumps ≤1 min after
+  ANY project activity (checked against 3 recently-active assets) and streams over
+  SSE (live test: put at +0.6 s, 30 s keep-alives, idle-free).
+- **Listener design locked**: 3 SSE subs (one per project) → debounce → per-project
+  inc walk → guarded upserts; hourly reconcile + nightly strict audit stay as safety
+  net. ~1-2 min Swift→Supabase freshness at zero quiet cost.
+- Full evidence + node access table: `docs/spikes/2026-07-13-freshness-spike-etag-firebase.md`.
+
+### Direction discussed (pending Jamil's read): new repo for the v2 platform
+Build the event-driven system in a fresh sibling repo (working name
+`swift-data-platform`): proper package layout (`src/swift_sync/`), tests, Dockerfile,
+OIDC deploys, Cloud Run service (listener, min-instances=1) + Job (reconcile/audit).
+Port (don't copy) proven walk/upsert logic. Old repo stays authoritative until per-
+pipeline cutover, audited the same way the shadow was. DB schema = the contract
+between repos. This doubles as the template for the full-system restructure.
+
 
 ## Session: 2026-07-12 — Shadow audit finds PRODUCTION data loss; remap complete
 
