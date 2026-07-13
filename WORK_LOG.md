@@ -48,7 +48,20 @@ Phase-3 roadmap steps 1+2 executed (`swift_api_pipeline/spike_freshness.py`, com
   net. ~1-2 min Swift→Supabase freshness at zero quiet cost.
 - Full evidence + node access table: `docs/spikes/2026-07-13-freshness-spike-etag-firebase.md`.
 
-### Direction discussed (pending Jamil's read): new repo for the v2 platform
+### v2 platform repo CREATED (same session, after Jamil's go): `swift-data-platform`
+Private repo `jamilmendez-ontel/swift-data-platform` scaffolded and pushed; CI green.
+- src-layout package `swift_sync`: config (env-driven), auth (shared token cache,
+  JWT-exp-aware refresh), rtdb (SSE channel listener with reconnect/re-auth),
+  debounce, listen entrypoint. 11 offline unit tests, Dockerfile, GHA CI, ADRs
+  0001 (separate repo) + 0002 (RTDB channels listener).
+- **Milestone 1 smoke-tested live**: 3 project-channel subscriptions up in ~3 s on one
+  shared auth; quiet channels = zero traffic (30 s keep-alives only).
+- Gotcha captured in code: `iter_lines` default 512-byte buffering starves low-traffic
+  SSE streams — `chunk_size=1` required (verified live twice).
+- Next milestone: port the incremental walk (`walk.py`/`upsert.py`) so listener
+  triggers real per-project syncs; then Cloud Run (service+job, Secret Manager, OIDC).
+
+### Direction decided earlier same session: new repo for the v2 platform
 Build the event-driven system in a fresh sibling repo (working name
 `swift-data-platform`): proper package layout (`src/swift_sync/`), tests, Dockerfile,
 OIDC deploys, Cloud Run service (listener, min-instances=1) + Job (reconcile/audit).
