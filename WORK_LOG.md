@@ -1,5 +1,45 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-14 — GCP guided build: phases 0–5 DONE, pipeline ran green in the cloud
+
+Jamil drove every step in the Console (teaching mode, What/Why per step — now a
+standing memory rule); agent verified each phase via gcloud. All on project
+`ontel-data-platform` (org ontel.co), region asia-southeast1.
+
+- **Phase 0–1**: SDK 575.0.1 installed; auth as jamil.mendez@ontel.co; project
+  created org-parented; billing = company account `003EF0-AA40F3-4B4F1F` linked
+  by the admin (NOT Jamil's trial — he can't view the account; that's fine,
+  only `billingEnabled: true` matters). Ask pending: trial-or-paid? + Billing
+  Account Viewer for Jamil.
+- **Phase 2**: six APIs enabled (run, artifactregistry, secretmanager,
+  cloudscheduler, cloudbuild, iamcredentials) + auto-deps.
+- **Phase 3**: Artifact Registry `images` repo; first Cloud Build: 43 s,
+  `swift-sync:v0.2.0`, digest `a4d97…` (56 MB).
+- **Phase 4**: secrets swift-email/swift-password/supabase-password; runtime SA
+  `swift-sync-runtime`. **Teaching gold**: first grant accidentally landed at
+  PROJECT level (works silently, over-broad) — diagnosed via empty per-secret
+  policies + project IAM filter; fixed to per-secret grants. IAM-inheritance
+  lesson captured in the vault journal.
+- **Phase 5**: reconcile job deployed via Console (image by digest, SA set, 3
+  secret env refs + SYNC_PROJECT_DIDS, 512Mi/1800s/1 retry) and ran GREEN:
+  auth OK, 3 projects walked (~15k assets), 2 changed rows written — verified
+  in stg_asset_tasks_inc to the second (10:08:49 UTC). Job recreated as
+  `swift-sync-reconcile` (jobs can't be renamed; naming is load-bearing), old
+  `swift-sync` deleted. Cloud run was FASTER than local (~70 s vs 124 s).
+- **Learning journal created** (Jamil's request): vault `Learning/GCP/` — hub +
+  Journal/Concepts/Patterns (14 notes seeded, stubs fill per phase). Standing
+  memory: maintain it every session; every step gets What/Why.
+
+**NEXT SESSION — Phase 6 (instructions to be re-given, Jamil hasn't started):**
+(1) create `scheduler-invoker` SA (no project roles); (2) grant Cloud Run
+Invoker ON the job (checkbox → info panel, not IAM page); (3) Scheduler job
+`swift-sync-reconcile-hourly`, cron `50 * * * *` UTC (offset from v1's :20),
+HTTP POST to
+`https://asia-southeast1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/ontel-data-platform/jobs/swift-sync-reconcile:run`
+with OAuth token as scheduler-invoker; (4) Force run + verify execution.
+Then Phase 7 (listener service — event-driven goes live), 8 (OIDC deploys,
+CLI-recommended), 9 (log-based alerts incl. staleness).
+
 ## Session: 2026-07-13 — Export data-loss ROOT CAUSE: `_export` returns the task-template matrix only
 
 ### Root cause proven (queue item 1 from 2026-07-12)
