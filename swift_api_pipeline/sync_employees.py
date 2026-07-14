@@ -52,6 +52,31 @@ HEADER_MAP = {
     "immediate supervisor": "immediate_supervisor",
 }
 DATE_FIELDS = ("hire_date", "regularization_date")
+# HR's approver-assignment columns (added to the sheet 2026-07-14). These land in
+# reference.ref_employee_approvers (migration 182), NOT ref_employees. Keys are
+# underscore-prefixed so they can never collide with a ref_employees column.
+APPROVER_HEADERS = {
+    "approvers": "_approver_group",           # the member's DR queue label
+    "dr approvers individuals": "_appr_dr",   # comma-separated people
+    "leave approvers": "_appr_leave",
+    "leave cc": "_appr_leave_cc",
+}
+APPROVER_KINDS = (("_appr_dr", "dr"), ("_appr_leave", "leave"), ("_appr_leave_cc", "leave_cc"))
+# Generational suffixes stripped before name matching ("Joaquin Marco III" ->
+# "joaquin marco"; the roster's last_name is just "Marco").
+NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+# Approvers who are NOT on the PH roster sheet (management). name (normalized)
+# -> app email, or None for known non-roster people with no app account (their
+# rows land with NULL email and are simply never matched by the app RPC).
+NON_ROSTER_APPROVERS = {
+    "justin bailey": "justin@ontel.co",
+    "kris kerr": "kris@ontel.co",
+    "darren zammit": None,
+    "colin zammit": None,
+}
+# Safety: skip the assignment prune if the parsed rows collapse to under half of
+# what's already stored (guards a partial sheet read from wiping assignments).
+ASSIGNMENT_MIN_FRACTION = 0.5
 # Derive the short carrier from carrier_group for new-employee inserts.
 CARRIER_FROM_GROUP = {"CG1 - Verizon": "Verizon", "CG2 - AT&T/DISH": "AT&T/DISH",
                       "CG3 - TMO/USCC": "TMO/USCC"}
@@ -114,7 +139,7 @@ def read_sheet():
     for row in rows[header_idx + 1:]:
         rec = {}
         for i, h in enumerate(headers):
-            col = HEADER_MAP.get(h)
+            col = HEADER_MAP.get(h) or APPROVER_HEADERS.get(h)
             if not col:
                 continue
             # Collapse stray tabs/newlines/repeated spaces (the sheet has e.g. a tab
@@ -351,6 +376,144 @@ def sync(db, sheet_employees, effective_date, apply=False):
     return summary
 
 
+def _normalize_approver_name(name):
+    """Lowercase, collapse whitespace, and strip generational suffixes."""
+    tokens = [t for t in name.lower().split()]
+    while tokens and tokens[-1].rstrip(".,") in NAME_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _build_name_index(current):
+    """Map name keys -> {(emp_id, email)} over ACTIVE employees, using the same
+    nickname/first + last keys as analytics.approver_groups_for_email, plus a
+    first-token variant so 'Czarina Sanchez' finds first_name 'Czarina Joy' and
+    'Mikaela Patolot' finds 'Mikaela Louise'."""
+    idx = {}
+    for emp in current.values():
+        if not emp.get("is_active"):
+            continue
+        last = str(emp.get("last_name") or "").strip().lower()
+        if not last:
+            continue
+        keys = set()
+        for f in (emp.get("nickname"), emp.get("first_name")):
+            f = str(f or "").strip().lower()
+            if not f:
+                continue
+            keys.add(f"{f} {last}")
+            keys.add(f"{f.split()[0]} {last}")
+        email = str(emp.get("email") or "").strip().lower() or None
+        for k in keys:
+            idx.setdefault(k, set()).add((str(emp["emp_id"]), email))
+    return idx
+
+
+def sync_approver_assignments(db, sheet_employees, apply=False):
+    """Land the sheet's approver columns in reference.ref_employee_approvers
+    (migration 182). Upsert + prune (never a moment with an empty table) so the
+    app's "Members you approve" tile always has data. Approver names resolve to
+    roster emp_id/email via the name index, or NON_ROSTER_APPROVERS for
+    management; anything else lands with NULLs and is reported."""
+    current = get_current_employees(db)
+    idx = _build_name_index(current)
+
+    rows = []          # (emp_id, kind, approver_name, approver_emp_id, approver_email, approver_group, rank)
+    unresolved = {}    # normalized name -> count
+    ambiguous = {}
+    for emp in sheet_employees:
+        group = (emp.get("_approver_group") or "").strip() or None
+        for key, kind in APPROVER_KINDS:
+            cell = emp.get(key) or ""
+            if cell in ("#VALUE!", "FALSE", "-"):
+                continue
+            seen = set()
+            rank = 0
+            for raw in cell.split(","):
+                name = " ".join(raw.split()).strip()
+                norm = _normalize_approver_name(name)
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                rank += 1
+                a_emp_id = a_email = None
+                if "@" in name:  # cell carries an email directly
+                    a_email = name.lower()
+                else:
+                    cands = idx.get(norm, set())
+                    if len({c[0] for c in cands}) == 1:
+                        a_emp_id, a_email = next(iter(cands))
+                    elif len(cands) > 1:
+                        ambiguous[norm] = ambiguous.get(norm, 0) + 1
+                    elif norm in NON_ROSTER_APPROVERS:
+                        a_email = NON_ROSTER_APPROVERS[norm]
+                    else:
+                        unresolved[norm] = unresolved.get(norm, 0) + 1
+                rows.append((emp["emp_id"], kind, name, a_emp_id, a_email, group, rank))
+
+    existing = retry_db(
+        lambda: db.fetch("SELECT emp_id, kind, approver_name FROM reference.ref_employee_approvers"),
+        description="current approver assignments",
+    ) or []
+    existing_keys = {(str(r["emp_id"]), r["kind"], r["approver_name"]) for r in existing}
+    new_keys = {(r[0], r[1], r[2]) for r in rows}
+
+    print(f"\n=== Approver Assignments (ref_employee_approvers) ===")
+    for _, kind in APPROVER_KINDS:
+        print(f"  {kind}: {sum(1 for r in rows if r[1] == kind)} rows")
+    print(f"  to add: {len(new_keys - existing_keys)}, to remove: {len(existing_keys - new_keys)}, "
+          f"total {len(rows)} (was {len(existing_keys)})")
+    if ambiguous:
+        print(f"  [!] ambiguous names (matched 2+ active employees; left unresolved): "
+              f"{', '.join(sorted(ambiguous))}")
+    if unresolved:
+        print(f"  [!] unresolved names (no roster match, not in NON_ROSTER_APPROVERS): "
+              f"{', '.join(sorted(unresolved))}")
+        logger.warning(f"Approver names unresolved: {sorted(unresolved)}")
+
+    if not apply:
+        return
+
+    if existing_keys and len(rows) < ASSIGNMENT_MIN_FRACTION * len(existing_keys):
+        print(f"  [!] SKIPPING assignment sync: parsed {len(rows)} rows vs {len(existing_keys)} "
+              f"stored - likely a partial sheet read.")
+        logger.warning("Assignment sync skipped: row count below safety threshold")
+        return
+
+    if rows:
+        cols = list(zip(*rows))
+        retry_db(
+            lambda: db.execute(
+                "INSERT INTO reference.ref_employee_approvers "
+                "  (emp_id, kind, approver_name, approver_emp_id, approver_email, approver_group, rank) "
+                "SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], "
+                "                     $6::text[], $7::smallint[]) "
+                "ON CONFLICT (emp_id, kind, approver_name) DO UPDATE SET "
+                "  approver_emp_id = excluded.approver_emp_id, "
+                "  approver_email  = excluded.approver_email, "
+                "  approver_group  = excluded.approver_group, "
+                "  rank            = excluded.rank, "
+                "  synced_at       = now()",
+                list(cols[0]), list(cols[1]), list(cols[2]), list(cols[3]),
+                list(cols[4]), list(cols[5]), [int(r) for r in cols[6]],
+            ),
+            description="upsert approver assignments",
+        )
+    stale = existing_keys - new_keys
+    if stale:
+        s_cols = list(zip(*stale))
+        retry_db(
+            lambda: db.execute(
+                "DELETE FROM reference.ref_employee_approvers t "
+                "USING unnest($1::text[], $2::text[], $3::text[]) AS s(emp_id, kind, approver_name) "
+                "WHERE t.emp_id = s.emp_id AND t.kind = s.kind AND t.approver_name = s.approver_name",
+                list(s_cols[0]), list(s_cols[1]), list(s_cols[2]),
+            ),
+            description="prune stale approver assignments",
+        )
+    print(f"  Applied: {len(rows)} upserted, {len(stale)} pruned")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply changes to Supabase")
@@ -369,6 +532,9 @@ def main():
 
     db = get_db()
     sync(db, sheet_employees, effective_date, apply=args.apply)
+    # After the roster sync so approver names can resolve against employees the
+    # roster pass just inserted/updated.
+    sync_approver_assignments(db, sheet_employees, apply=args.apply)
     close_db()
 
 
