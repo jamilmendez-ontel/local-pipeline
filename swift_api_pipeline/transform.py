@@ -228,86 +228,84 @@ def transform_projects(db, run_id: str):
 
 
 def transform_user_priorities(db, run_id: str):
-    """Transform raw_user_priorities to stg_user_priorities"""
+    """Transform raw_user_priorities to stg_user_priorities using server-side SQL.
+
+    The full-refresh clear is folded into the INSERT as a data-modifying CTE so
+    the clear and the reload run as ONE atomic statement (same pattern as
+    stg_asset_tasks / stg_invoicing_form). The previous Python version ran the
+    DELETE as its own auto-committed call followed by batched INSERTs, leaving
+    the table empty or partial for several seconds on every 5-minute reload;
+    readers hitting that window saw "missing" data (observed 2026-07-14).
+
+    DISTINCT ON de-duplicates report rows: a status the extract filter does not
+    know about passes through more than one per-status pull (has_rejection rows
+    were double-inserted until 2026-07-14), and page drift can repeat a row
+    within one pull.
+    """
     print(f"[{datetime.now():%H:%M:%S}] Transforming user priorities...")
 
-    # Clear ALL existing staging data (full refresh)
-    db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_user_priorities')
-    print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_user_priorities")
+    def _ts(field):
+        """Parse the report's ISO-8601 string (empty string -> NULL)."""
+        return f"NULLIF(r.data->>'{field}', '')::timestamptz"
 
-    # Fetch all raw data — single query
-    result = db.fetch(
-        f'SELECT * FROM {SCHEMA_RAW}.raw_user_priorities WHERE run_id = $1',
-        run_id
+    # SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
+    # Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
+    clean_expr = (
+        "TRIM(REGEXP_REPLACE("
+        "  REGEXP_REPLACE(r.data->>'Task Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
+        "  '\\s+[0-9]+$', ''))"
+    )
+    dedupe_key = "COALESCE(r.data->>'Task DID', r.id::text)"
+
+    sql = (
+        # Data-modifying CTE: clear the table, then reload -- atomically.
+        f"WITH cleared AS (DELETE FROM {SCHEMA_STAGING}.stg_user_priorities RETURNING 1), "
+        f"ins AS ("
+        f"INSERT INTO {SCHEMA_STAGING}.stg_user_priorities "
+        f"(task_did, asset_did, org_did, project_did, task_name, task_name_clean, "
+        f"milestone, status, calendar_status, assigned_to, scheduled, scheduled_by, "
+        f"display_date, duration, pin_type, submitted_by, submitted_on, approved_by, "
+        f"approved_on, rejected_by, rejected_on, cancelled_by, cancelled_on, "
+        f"organization, project, asset_id, asset_name, run_id) "
+        f"SELECT DISTINCT ON ({dedupe_key}) "
+        f"  r.data->>'Task DID', "
+        f"  r.data->>'Asset DID', "
+        f"  r.data->>'Organization DID', "
+        f"  r.data->>'Project DID', "
+        f"  r.data->>'Task Name', "
+        f"  {clean_expr}, "
+        f"  r.data->>'Milestone', "
+        f"  r.data->>'Status', "
+        f"  r.data->>'Calendar Status', "
+        f"  r.data->>'Assigned To', "
+        f"  {_ts('Scheduled')}, "
+        f"  r.data->>'Scheduled By', "
+        f"  {_ts('Display Date')}, "
+        f"  r.data->>'Duration', "
+        f"  r.data->>'Pin Type', "
+        f"  NULLIF(r.data->>'Submitted By', ''), "
+        f"  {_ts('Submitted On')}, "
+        f"  NULLIF(r.data->>'Approved By', ''), "
+        f"  {_ts('Approved On')}, "
+        f"  NULLIF(r.data->>'Rejected By', ''), "
+        f"  {_ts('Rejected On')}, "
+        f"  NULLIF(r.data->>'Cancelled By', ''), "
+        f"  {_ts('Cancelled On')}, "
+        f"  r.data->>'Organization', "
+        f"  r.data->>'Project', "
+        f"  r.data->>'Asset Id', "
+        f"  r.data->>'Asset Name', "
+        f"  $1 "
+        f"FROM {SCHEMA_RAW}.raw_user_priorities r "
+        f"WHERE r.run_id = $1 "
+        f"ORDER BY {dedupe_key} "
+        f"RETURNING 1) "
+        f"SELECT COUNT(*) FROM ins"
     )
 
-    if not result:
-        print(f"[{datetime.now():%H:%M:%S}] No user priorities to transform")
-        return 0
-
-    def parse_ts(val):
-        """Parse ISO datetime string to timezone-aware datetime in ET."""
-        if not val:
-            return None
-        try:
-            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-            return dt.astimezone(TZ_ET)
-        except Exception:
-            return None
-
-    rows = []
-    for record in result:
-        data = record["data"]
-
-        task_name = data.get("Task Name")
-        rows.append((
-            data.get("Task DID"),
-            data.get("Asset DID"),
-            data.get("Organization DID"),
-            data.get("Project DID"),
-            task_name,
-            clean_task_name(task_name),
-            data.get("Milestone"),
-            data.get("Status"),
-            data.get("Calendar Status"),
-            data.get("Assigned To"),
-            parse_ts(data.get("Scheduled")),
-            data.get("Scheduled By"),
-            parse_ts(data.get("Display Date")),
-            data.get("Duration"),
-            data.get("Pin Type"),
-            data.get("Submitted By") or None,
-            parse_ts(data.get("Submitted On")),
-            data.get("Approved By") or None,
-            parse_ts(data.get("Approved On")),
-            data.get("Rejected By") or None,
-            parse_ts(data.get("Rejected On")),
-            data.get("Cancelled By") or None,
-            parse_ts(data.get("Cancelled On")),
-            data.get("Organization"),
-            data.get("Project"),
-            data.get("Asset Id"),
-            data.get("Asset Name"),
-            run_id
-        ))
-
-    # Insert in batches via executemany
-    batch_size = 5000
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        db.executemany(
-            f'INSERT INTO {SCHEMA_STAGING}.stg_user_priorities '
-            f'(task_did, asset_did, org_did, project_did, task_name, task_name_clean, '
-            f'milestone, status, calendar_status, assigned_to, scheduled, scheduled_by, '
-            f'display_date, duration, pin_type, submitted_by, submitted_on, approved_by, '
-            f'approved_on, rejected_by, rejected_on, cancelled_by, cancelled_on, '
-            f'organization, project, asset_id, asset_name, run_id) '
-            f'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)',
-            batch
-        )
-
-    total = len(rows)
-    print(f"[{datetime.now():%H:%M:%S}] Total user priorities transformed: {total:,}")
+    total = db.fetchval(sql, run_id)
+    print(f"[{datetime.now():%H:%M:%S}] Total user priorities transformed: {total:,} "
+          f"(atomic clear+reload, duplicates dropped)")
     return total
 
 

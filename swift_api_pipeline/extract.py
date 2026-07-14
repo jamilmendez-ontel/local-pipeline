@@ -58,13 +58,18 @@ class SwiftAPIExtractor:
     def extract_user_priorities(self) -> List[Dict]:
         """Extract user priorities by status to avoid API 10K row cap.
 
-        Queries one status at a time (pending, in_progress) with a filter that
-        excludes all other statuses, then combines results.
+        Queries one status at a time with a filter that excludes all other
+        KNOWN statuses, then combines results. Because the filter is
+        exclusion-based, a status missing from ALL_STATUSES leaks into EVERY
+        per-status pull (has_rejection rows were double-pulled until
+        2026-07-14) -- keep ALL_STATUSES in sync with Swift's status
+        vocabulary, and add active statuses to TARGET_STATUSES.
         """
         self._ensure_valid_token()
 
-        ALL_STATUSES = ["pending", "in_progress", "submitted", "approved", "rejected", "cancelled"]
-        TARGET_STATUSES = ["pending", "in_progress"]
+        ALL_STATUSES = ["pending", "in_progress", "has_rejection",
+                        "submitted", "approved", "rejected", "cancelled"]
+        TARGET_STATUSES = ["pending", "in_progress", "has_rejection"]
 
         all_records = []
 
