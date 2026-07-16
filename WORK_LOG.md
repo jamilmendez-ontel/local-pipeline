@@ -1,5 +1,57 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-16 — GCP Phase 6 DONE (reconcile autonomous); Phase 7 instructed, deploy pending
+
+Same guided format (Jamil drives, What/Why per step, agent verifies via gcloud).
+
+- **Phase 6 COMPLETE, verified via gcloud**: `scheduler-invoker` SA created with
+  **zero project roles** (least-privilege right on the first pass this time);
+  single `roles/run.invoker` binding granted ON the job resource (checkbox →
+  info panel, not the IAM page) — project IAM filter for the SA returns empty,
+  job policy shows exactly one binding. Cloud Scheduler job
+  `swift-sync-reconcile-hourly`: cron `50 * * * *` UTC (offset from v1's :20),
+  POST to the jobs:run Admin API URL, **OAuth** token as scheduler-invoker
+  (OAuth because target is a `*.googleapis.com` API; OIDC is for our own URLs —
+  new vault concept note). Force run: Scheduler attempt 09:25:58Z → execution
+  `swift-sync-reconcile-zns49` completed 09:27:19Z, SUCCEEDED=1 (~81 s). The
+  reconcile leg is now fully autonomous. Cosmetic leftover: Scheduler job
+  description contains a pasted tutorial paragraph — suggest one operator line.
+- **Jamil asked why the hourly survives the listener** → taught the three-layer
+  model: listener = freshness (~1–2 min), hourly reconcile = consistency
+  (bounds a missed event to ≤1 h; near-free via guarded upserts), nightly
+  audit = proof. Anti-entropy: relax later maybe, never delete. Captured in
+  vault journal 2026-07-16.
+- **Phase 7 STARTED — NOT deployed yet.** Preconditions verified: image default
+  CMD is the listener (`python -m swift_sync.listen`; the job works because it
+  overrides to `walk_once`), health stub answers $PORT. Full deploy
+  instructions delivered twice — CLI (`gcloud run deploy swift-sync-listener`,
+  runbook Phase 7) and Console version at Jamil's request. Critical flags
+  explained: **CPU always allocated** (default request-only throttling would
+  silently starve the SSE listener), min=max=1, require auth, same runtime SA +
+  secrets as the job, container command left empty, SYNC_PROJECT_DIDS pinned.
+  Cost note given: this step turns on the always-on ~$40–50/mo line.
+- **Jamil raised the pinned-project-list problem** (TS20 will appear someday;
+  env var is a silent blind spot). Decision: pinned list is CORRECT for the
+  shadow pilot (explicit scope during per-project cutover); production answer
+  recorded as milestone-4 item = `reference.ref_sync_projects` config table
+  (INSERT, not redeploy) + nightly discovery-diff alert vs Swift's actual
+  project list (Phase 9). Rejected: pure auto-discovery (no control), pure
+  redeploys (humans forget). Logged in project memory.
+- Vault updated + pushed: journal `2026-07-16 — Scheduler, and why the timer
+  survives the listener`, new concept `OAuth vs OIDC tokens in GCP`, hub
+  progress line (Phase 6 ✅), swift-data-platform project log.
+
+**NEXT SESSION — resume Phase 7 (Jamil will deploy via Console):** re-give the
+Console steps (Deploy container → image `swift-sync:v0.2.0` → name
+`swift-sync-listener`, asia-southeast1, require auth, **CPU always allocated**,
+min/max instances 1/1, 512Mi, env SYNC_PROJECT_DIDS + 3 secret refs, SA
+swift-sync-runtime, command EMPTY, port 8080). Then agent verifies: service
+config (the two silent-fail settings: CPU allocation + min instances), logs
+show health stub + "3 project channels" subscribed, then LIVE DEMO — Jamil
+touches an asset in Swift, watch the walk fire and the row land in
+`stg_asset_tasks_inc` with no cron involved. Then Phase 8 (OIDC deploys, CLI
+per runbook), Phase 9 (log alerts incl. staleness + the discovery-diff alert).
+
 ## Session: 2026-07-14 — GCP guided build: phases 0–5 DONE, pipeline ran green in the cloud
 
 Jamil drove every step in the Console (teaching mode, What/Why per step — now a
