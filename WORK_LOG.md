@@ -38,12 +38,36 @@ the cutover.
   timing skew that self-corrects. Decision: gate stays strict; cutover
   judged on consecutive quiet-window (05:20) nightly PASSes.
 
-**NEXT:** Jamil merges PR #2 (auto-deploys via Phase 8) + PR #13 (doctrine
-goes nightly) → collect consecutive DOCTRINE PASS nights → C4 union-view
-migration (repoint 19 readers) + C6 finance heads-up (the 146 recovered
-billable rows surface in the worklist at C4 — review MUST land first) →
-C5 retire v1 hourly per project. Jamil still owes: triggers list, ideal
-downstream run times (team), and the go on the revenue worksheet.
+**Session finale (same day):**
+- **Revenue worksheet BUILT**: out/revenue_recovery_worksheet_2026-07-20.csv
+  (local-only). 146 billable dropped tasks triaged via Invoiced-twin tasks
+  in v2's table (v1 can't audit its own blind spot): **92 LIKELY_NEVER_BILLED
+  (51×2025 + 41×2026)**, 52 POSSIBLY_BILLED_LATER_INVOICE_ON_ASSET, 2 under
+  base task. Spot-check found Complete↔Invoiced families don't share base
+  names reliably → every row carries full per-asset invoice evidence +
+  reviewer_decision/notes columns, sorted worst-first. Jamil hands to
+  finance; review gates C4.
+- **Both PRs MERGED by Jamil's instruction and verified**: swift-data-platform
+  #2 (attr-heal — merge auto-deployed via Phase 8, listener re-subscribed
+  09:21Z on the new revision) and local-pipeline #13 (doctrine gate — live
+  for tonight's 05:20 run). swift-data-platform local checkout synced;
+  **local-pipeline main has Jamil's unpushed 7bd45b3 (timer_correction_review
+  fix) diverged from origin — he should `git pull --rebase` + push.**
+- **Expansion question answered** (Jamil: can v2 match current volume?):
+  yes, trivially — the other 4 projects are TS13–16 (~1.5M rows). TS16
+  still ACTIVE (last submission 07-15, accumulating the same unbilled-ad-hoc
+  exposure) → add first; TS13–15 dormant → fold into the ref_sync_projects
+  config-table build after the pilot streak. Walk self-baselines new
+  projects; reconcile grows ~80s → ~4-5 min; audit default list must
+  extend when projects are added ('all13' option exists).
+
+**NEXT SESSION (agreed): open with tonight's 05:20 doctrine results**
+(query pipeline.inc_audit_results, notes LIKE 'DOCTRINE%') — expect PASS
+or near-PASS (residue was 1/13/437 pure v1-lag after the 20,473-row heal).
+Based on results: add TS16 (env var + baseline + audit list), keep
+collecting the streak, then C4 union view (19 readers; inc for pilot DIDs,
+current for the rest) once finance review lands. Jamil still owes: triggers
+list, team's ideal downstream run times, worksheet handoff.
 
 ## Session: 2026-07-20 (evening) — GCP Phase 9 DONE: alerts live — MILESTONE 3 BUILD COMPLETE (phases 0–9)
 
