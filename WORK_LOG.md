@@ -1,5 +1,43 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-20 — GCP Phase 7 DONE: listener LIVE, event-driven sync proven by real users
+
+Guided format as before. Milestone 3's core promise delivered this session.
+
+- **Phase 7 deployed via Console** (Jamil's choice over CLI): service
+  `swift-sync-listener`, image `swift-sync:v0.2.0` by digest, min=max=1,
+  **Billing: Instance-based** (the renamed "CPU always allocated" — Jamil
+  couldn't find step 5 until the new label was mapped; gotcha in vault),
+  require auth, 512Mi, same runtime SA + 3 secret refs + SYNC_PROJECT_DIDS,
+  container command EMPTY (image default CMD is the listener). Verified via
+  gcloud: `cpu-throttling: 'false'`, minScale/maxScale '1', empty service IAM
+  policy (no public access), logs: health stub on :8080 → probe OK →
+  "Listening on 3 project channels" → auth (tokens 4320 min) → 3 subscribed.
+- **Demo ran itself — organic prod traffic** (Jamil declined synthetic changes
+  in production; right call). Within 8 min of deploy: two CHANGE events on
+  TS19's channel → 60 s debounce → walks (19–21 s, 5,044 assets, 2–5 visited)
+  → 9 + 2 rows in `stg_asset_tasks_inc` ~20 s after debounce, proven by
+  `loaded_at`. Same query showed reconcile batches (00:50, 01:50 — Phase 6
+  Scheduler firing autonomously, confirmed) carrying changes up to **58 min
+  stale** vs the listener's **seconds**. Bonus: a walk swept up a straggler
+  row from the previous day — guarded upserts converging as designed.
+- Freshness end-to-end: Swift click → Supabase in ~80 s (60 s of that is the
+  deliberate debounce). Always-on cost line (~$40–50/mo) now active.
+- Vault updated + pushed: journal `2026-07-20 — The listener goes live, real
+  users run the demo`; `Cloud Run services vs jobs` concept note's service
+  half filled (three viability settings, two silent-fail); hub Phase 7 ✅;
+  project log. Project memory advanced to Phase 8.
+- Date note: local clock disagreed; GCP + DB timestamps and Jamil confirm
+  2026-07-20.
+
+**NEXT: Phase 8 — OIDC deploys from GitHub** (WIF pool `github` + provider
+`github-oidc` pinned to jamilmendez-ontel/swift-data-platform; `github-deployer`
+SA with run.developer + artifactregistry.writer + cloudbuild.builds.editor +
+serviceAccountUser on swift-sync-runtime; principalSet binding; repo vars
+GCP_WIF_PROVIDER/GCP_PROJECT_ID activate deploy.yml; PROJECT_NUMBER=449812402892).
+Runbook Phase 8 has all commands (bash — adapt to PowerShell). Then Phase 9
+alerts (staleness + milestone-4 discovery-diff).
+
 ## Session: 2026-07-16 — GCP Phase 6 DONE (reconcile autonomous); Phase 7 instructed, deploy pending
 
 Same guided format (Jamil drives, What/Why per step, agent verifies via gcloud).
