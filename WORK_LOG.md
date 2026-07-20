@@ -1,5 +1,50 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-20 (later) — GCP Phase 8 DONE: OIDC deploys live, merge-to-main = deploy
+
+Same session continued after Phase 7. WIF reference material added to vault
+first (Console visual path + "where every value comes from" three-bucket
+guide) at Jamil's request — he's a visual learner.
+
+- **Setup (chunks 1–4)**: WIF pool `github` + provider `github-oidc` (issuer
+  token.actions.githubusercontent.com, condition pins repo), `github-deployer`
+  SA (run.developer + artifactregistry.writer + cloudbuild.editor project-level
+  — scope fits need; Console's "Cloud Build Editor" = cloudbuild.editor, a
+  near-twin of the runbook's cloudbuild.builds.editor, verified adequate via
+  roles describe), actAs on swift-sync-runtime, principalSet bridge, 2 GitHub
+  repo VARIABLES. Jamil: chunk 1 CLI, rest Console. All verified via gcloud.
+- **First deploy run: five distinct root causes behind ONE unchanging error**
+  ("forbidden from accessing the bucket … serviceusage.services.use"):
+  (1) missing serviceUsageConsumer (project); (2) objectAdmin has NO
+  buckets.get → +legacyBucketReader on gs://…_cloudbuild; (3) default-bucket
+  ownership check needs project-wide buckets.list → `--gcs-source-staging-dir`
+  skips it (privilege avoided, not granted); (4) build RUNS AS default compute
+  SA → third actAs grant of the project; (5) log streaming requires project
+  Viewer, `--suppress-logs` insufficient → `--async` + poll builds describe.
+- **Debugging toolkit used** (now a vault pattern note "Debugging IAM
+  failures"): roles describe to read actual permissions; impersonation
+  (temp TokenCreator grant, removed after); `gcloud policy-troubleshoot iam`
+  (said GRANTED while CLI failed → context clue); diagnostic branch printing
+  identity + raw curl error body (proved raw GET worked → gcloud-internal
+  check was the failer); IAM propagation patience (a grant "broken" at 60 s
+  worked at 10 min).
+- **Shipped**: branch `wif-debug` → PR #1 (fix: staging-dir + async-poll;
+  runbook Phase 8 addendum with the 3 extra grants). Jamil merged → the merge
+  push itself triggered the first fully automatic deploy: build → push →
+  listener revision 00003 → reconcile job image updated, zero stored keys,
+  listener re-subscribed to 3 channels in seconds. Local checkout
+  fast-forwarded; debug branch deleted both ends.
+- Vault: journal extended (Phase 8 safari), new pattern note, hub Phase 8 ✅.
+
+**NEXT: Phase 9 — log-based alerts (FINAL phase):** runbook has the
+walk-crash log metric command; design alerts for (a) walk crash, (b)
+staleness (no listener walk in N hours while channels active — catches dead
+listener), (c) reconcile-job failure, (d) later at milestone 4: the
+project-discovery diff alert. Alert policies quicker in Console per runbook.
+Then milestone 3 GCP build is COMPLETE; remaining queue: audit-doctrine
+decision + revenue-recovery review (146 billable rows, urgent, manual),
+v1→v2 cutover after audit parity, milestone-4 discovery table.
+
 ## Session: 2026-07-20 — GCP Phase 7 DONE: listener LIVE, event-driven sync proven by real users
 
 Guided format as before. Milestone 3's core promise delivered this session.
