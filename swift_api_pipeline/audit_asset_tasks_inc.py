@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-"""Drift audit: stg_asset_tasks (current pipeline, authoritative) vs
-stg_asset_tasks_inc (incremental shadow pilot).
+"""Doctrine audit: stg_asset_tasks (export-fed CURRENT) vs
+stg_asset_tasks_inc (walk-fed INC).
 
-Per project: row counts + an order-independent content hash over the audit
-columns (task_did, task_status, task_scheduled, task_name_clean). On any
-mismatch, drills down: task_dids present on only one side (LIMIT 50 each
-direction) and full-column diffs for shared task_dids (LIMIT 20; at pilot
-scale every shared business column is compared, not just the hash columns).
+DOCTRINE (approved by Jamil 2026-07-20): the export is NOT the standard of
+truth — it has two proven defect classes (see
+docs/2026-07-13-swift-export-data-loss-root-cause.md). The audit therefore
+does not require equality; it requires every difference to be EXPLAINED:
 
-EVERY run inserts one row per project into pipeline.inc_audit_results, pass
-or fail; the test week's expand/fix/abort decision is made from that table.
+  1. Rows in CURRENT missing from INC pass only if attributable to a GHOST
+     ASSET — an asset with zero rows in INC (the walk cannot see it because
+     it left the live hierarchy; the export keeps emitting its template
+     rows). A missing row whose asset IS in INC = UNEXPLAINED -> FAIL.
+  2. Rows in INC absent from CURRENT are the ad-hoc-task class (the export
+     structurally drops them): allowed, counted, reported. Never a failure.
+  3. Column diffs on shared rows are tolerated only when the ONLY differing
+     columns are task_submitted_by_did / task_approved_by_did AND the
+     corresponding *_by_name is NULL on both sides (dangling user reference
+     in the export). Any other differing column = UNEXPLAINED -> FAIL.
 
-Exit 0 when every project matches, 1 otherwise.
+Hash match remains the trivial-pass fast path. EVERY run still inserts one
+row per project into pipeline.inc_audit_results (samples LIMIT 50/20 as
+before); notes now carries the doctrine verdict with TRUE counts.
+
+Exit 0 when every project passes the doctrine, 1 otherwise.
 
 CAVEAT (also printed on every run): the two pipelines run at different
 times, so small drift right after either run is expected and self-corrects
-by the next audit. Persistent same-direction drift is the bug signal.
-
-See docs/superpowers/plans/2026-07-09-incremental-asset-tasks-shadow.md
-(Task 7) for context.
+by the next audit (timing drift shows up as UNEXPLAINED for one audit and
+clears on the next; only persistent unexplained drift is the bug signal).
 """
 import argparse
 import json
@@ -68,6 +77,46 @@ SELECT task_did FROM (
 ) d ORDER BY task_did LIMIT 50
 """
 
+# Doctrine rule 1: classify EVERY current-only row by whether its asset is
+# visible to the walk at all. ghost = asset has zero INC rows.
+MISSING_CLASSIFY_SQL = f"""
+WITH missing AS (
+  SELECT task_did FROM {CURRENT} WHERE project_did = $1
+  EXCEPT
+  SELECT task_did FROM {INC} WHERE project_did = $1
+)
+SELECT
+  count(*) AS missing_total,
+  count(*) FILTER (WHERE NOT asset_in_inc) AS ghost_rows,
+  count(DISTINCT asset_did) FILTER (WHERE NOT asset_in_inc) AS ghost_assets,
+  count(*) FILTER (WHERE asset_in_inc) AS unexplained_missing
+FROM (
+  SELECT c.asset_did,
+         EXISTS (SELECT 1 FROM {INC} i
+                 WHERE i.project_did = $1 AND i.asset_did = c.asset_did)
+           AS asset_in_inc
+  FROM {CURRENT} c JOIN missing m USING (task_did)
+  WHERE c.project_did = $1
+) x
+"""
+
+EXTRA_COUNT_SQL = f"""
+SELECT count(*) AS extra_total FROM (
+  SELECT task_did FROM {INC} WHERE project_did = $1
+  EXCEPT
+  SELECT task_did FROM {CURRENT} WHERE project_did = $1
+) d
+"""
+
+# Doctrine rule 3: the only tolerated column-diff shape. All three *_by_did
+# columns show the same export defect (dangling user DID that resolves to no
+# name); the name-NULL-both-sides guard keeps this tolerance honest.
+DANGLING_DID_COLS = {"task_submitted_by_did", "task_approved_by_did",
+                     "task_cancelled_by_did"}
+NAME_FOR_DID = {"task_submitted_by_did": "task_submitted_by_name",
+                "task_approved_by_did": "task_approved_by_name",
+                "task_cancelled_by_did": "task_cancelled_by_name"}
+
 
 def _column_diffs(db, project_did, limit=20):
     """Full-column comparison for task_dids present on both sides. Returns
@@ -96,10 +145,50 @@ def _column_diffs(db, project_did, limit=20):
     return diffs
 
 
+def _classify_column_diffs(db, project_did):
+    """Doctrine rule 3 over ALL shared-row diffs (no LIMIT). A diff row is a
+    tolerated dangling-DID row when every differing column is in
+    DANGLING_DID_COLS and its paired *_by_name is NULL on BOTH sides.
+    Returns (dangling_rows, unexplained_rows, unexplained_sample)."""
+    c_cols = ", ".join(f"c.{col} AS c_{col}" for col in COMPARE_COLS)
+    i_cols = ", ".join(f"i.{col} AS i_{col}" for col in COMPARE_COLS)
+    c_tuple = ", ".join(f"c.{col}" for col in COMPARE_COLS)
+    i_tuple = ", ".join(f"i.{col}" for col in COMPARE_COLS)
+    rows = db.fetch(
+        f"SELECT c.task_did, {c_cols}, {i_cols} "
+        f"FROM {CURRENT} c JOIN {INC} i USING (task_did) "
+        f"WHERE c.project_did = $1 "
+        f"AND ({c_tuple}) IS DISTINCT FROM ({i_tuple})",
+        project_did,
+    )
+    dangling = 0
+    unexplained = 0
+    unexplained_sample = {}
+    for r in rows:
+        diff_cols = [col for col in COMPARE_COLS
+                     if r[f"c_{col}"] != r[f"i_{col}"]]
+        tolerated = bool(diff_cols) and all(
+            col in DANGLING_DID_COLS
+            and r[f"c_{NAME_FOR_DID[col]}"] is None
+            and r[f"i_{NAME_FOR_DID[col]}"] is None
+            for col in diff_cols
+        )
+        if tolerated:
+            dangling += 1
+        else:
+            unexplained += 1
+            if len(unexplained_sample) < 20:
+                unexplained_sample[r["task_did"]] = {
+                    col: [str(r[f"c_{col}"]) if r[f"c_{col}"] is not None else None,
+                          str(r[f"i_{col}"]) if r[f"i_{col}"] is not None else None]
+                    for col in diff_cols}
+    return dangling, unexplained, unexplained_sample
+
+
 def audit_project(db, project_did, current_side, inc_side):
-    """Compare one project's two sides (rows from HASH_SQL, possibly None
-    when a side has no rows at all). Returns the inc_audit_results row as a
-    dict (without id/audited_at)."""
+    """Compare one project's two sides under the doctrine. Returns the
+    inc_audit_results row as a dict (without id/audited_at) plus a
+    'doctrine_pass' key (not persisted as a column; encoded in notes)."""
     rows_current = current_side["rows"] if current_side else 0
     rows_inc = inc_side["rows"] if inc_side else 0
     hash_match = bool(
@@ -115,21 +204,41 @@ def audit_project(db, project_did, current_side, inc_side):
         "extra_in_inc": None,
         "column_diffs": None,
         "notes": None,
+        "doctrine_pass": True,
     }
     if hash_match:
+        result["notes"] = "DOCTRINE PASS (hash match)"
         return result
 
-    missing = [r["task_did"] for r in db.fetch(
+    # True counts under the doctrine (samples below stay LIMIT 50/20).
+    m = db.fetch(MISSING_CLASSIFY_SQL, project_did)[0]
+    extra_total = db.fetch(EXTRA_COUNT_SQL, project_did)[0]["extra_total"]
+    dangling, unexplained_diffs, unexplained_sample = _classify_column_diffs(
+        db, project_did)
+
+    doctrine_pass = (m["unexplained_missing"] == 0 and unexplained_diffs == 0)
+
+    missing_sample = [r["task_did"] for r in db.fetch(
         ONLY_IN_SQL.format(a=CURRENT, b=INC), project_did)]
-    extra = [r["task_did"] for r in db.fetch(
+    extra_sample = [r["task_did"] for r in db.fetch(
         ONLY_IN_SQL.format(a=INC, b=CURRENT), project_did)]
-    diffs = _column_diffs(db, project_did)
+    # Persist the UNEXPLAINED diff sample when doctrine fails (that's what a
+    # human must look at); otherwise keep the legacy any-diff sample.
+    diffs_sample = unexplained_sample or _column_diffs(db, project_did)
+
+    verdict = "PASS" if doctrine_pass else "FAIL"
     result.update(
-        missing_in_inc=missing or None,
-        extra_in_inc=extra or None,
-        column_diffs=diffs or None,
-        notes=(f"{len(missing)} missing / {len(extra)} extra shown (LIMIT 50 "
-               f"each); {len(diffs)} column-diff rows shown (LIMIT 20)"),
+        missing_in_inc=missing_sample or None,
+        extra_in_inc=extra_sample or None,
+        column_diffs=diffs_sample or None,
+        doctrine_pass=doctrine_pass,
+        notes=(f"DOCTRINE {verdict}: "
+               f"missing={m['missing_total']} "
+               f"(ghost={m['ghost_rows']} on {m['ghost_assets']} assets, "
+               f"UNEXPLAINED={m['unexplained_missing']}); "
+               f"adhoc_extra={extra_total}; "
+               f"col_diffs(dangling_did={dangling}, "
+               f"UNEXPLAINED={unexplained_diffs}); samples LIMIT 50/20"),
     )
     return result
 
@@ -143,7 +252,7 @@ def persist_result(db, result):
         result["project_did"], result["rows_current"], result["rows_inc"],
         result["hash_match"], result["missing_in_inc"], result["extra_in_inc"],
         result["column_diffs"], result["notes"],
-    )
+    )  # doctrine_pass is encoded in notes ("DOCTRINE PASS/FAIL: ..."), no schema change
 
 
 def main():
@@ -170,34 +279,30 @@ def main():
                 "drift right after either run is expected; persistent "
                 "same-direction drift is the bug signal.")
 
-    any_mismatch = False
+    any_fail = False
     for did in dids:
         tail = tail_by_did[did]
         result = audit_project(db, did, current_rows.get(did), inc_rows.get(did))
         retry_tx_db(lambda r=result: persist_result(db, r),
                     description=f"insert inc_audit_results [{tail}]")
-        if result["hash_match"]:
-            logger.info(f"[{tail}] MATCH: {result['rows_current']} rows both sides")
+        if result["doctrine_pass"]:
+            logger.info(f"[{tail}] {result['notes']} "
+                        f"(rows {result['rows_current']} vs {result['rows_inc']})")
             continue
-        any_mismatch = True
+        any_fail = True
         logger.warning(
-            f"[{tail}] MISMATCH: rows_current={result['rows_current']} "
-            f"rows_inc={result['rows_inc']}; "
-            f"missing_in_inc={len(result['missing_in_inc'] or [])} "
-            f"extra_in_inc={len(result['extra_in_inc'] or [])} (LIMIT 50 each)"
+            f"[{tail}] {result['notes']} "
+            f"(rows_current={result['rows_current']} rows_inc={result['rows_inc']})"
         )
         if result["missing_in_inc"]:
             logger.warning(f"[{tail}]   missing_in_inc sample: "
                            f"{result['missing_in_inc'][:10]}")
-        if result["extra_in_inc"]:
-            logger.warning(f"[{tail}]   extra_in_inc sample: "
-                           f"{result['extra_in_inc'][:10]}")
         if result["column_diffs"]:
-            logger.warning(f"[{tail}]   column diffs (LIMIT 20): "
+            logger.warning(f"[{tail}]   UNEXPLAINED column diffs sample: "
                            f"{json.dumps(result['column_diffs'], default=str)[:2000]}")
 
     close_tx_db()
-    sys.exit(1 if any_mismatch else 0)
+    sys.exit(1 if any_fail else 0)
 
 
 if __name__ == "__main__":
