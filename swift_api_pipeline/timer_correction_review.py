@@ -1265,6 +1265,43 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
                      for e in entries if e["label"] != selected_label]
 
+    # Any entry this resolution rejects beyond the one the user actually acted
+    # on (matched_label) has no other write path to app_timer.entry_removals —
+    # write it here so entry_removals and duplicate_reviews.rejected_entries
+    # can never drift apart. (2026-07-20 Milton Frank incident: a 3-way group
+    # auto-resolved here with 2 rejected entries, but only 1 ever got a real
+    # entry_removals row; a later unrelated removal against the surviving
+    # entry then silently emptied the whole group to zero.)
+    for e in entries:
+        if e["label"] in (matched_label, selected_label):
+            continue
+        e_end = e.get("end_time")
+        e_end_dt = datetime.fromisoformat(e_end) if isinstance(e_end, str) else e_end
+        if e_end_dt and e_end_dt.tzinfo is None:
+            e_end_dt = e_end_dt.replace(tzinfo=timezone.utc)
+        e_dur = e.get("duration_min")
+        sibling_id = _make_entry_id(
+            entry["project_did"], entry["user_email"], entry["start_time"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+            e_end_dt, e_dur,
+        )
+        retry_db(
+            lambda eid=sibling_id, et=e_end_dt, dur=e_dur: db.execute(
+                f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
+                    (entry_id, project_did, project, user_email, start_time,
+                     site_name, site_id, task, end_time, duration_min,
+                     reason, removed_at, created_at, updated_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$12)
+                    ON CONFLICT (entry_id) DO NOTHING
+                """,
+                eid, entry["project_did"], entry.get("project"), entry["user_email"],
+                entry["start_time"], entry.get("site_name"), entry.get("site_id"),
+                entry.get("task"), et, dur,
+                "auto_resolved_sibling", now,
+            ),
+            description=f"backfill sibling removal {sibling_id} for group {group_id}",
+        )
+
     retry_db(
         lambda gid=group_id, sel=selected_label, rej=rejected: db.execute(
             f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
@@ -1456,8 +1493,162 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
     return applied_changes
 
 
+def _reconcile_resolved_group_stragglers(db, now: datetime) -> int:
+    """Catch raw entries that show up for an already-resolved duplicate
+    group's natural key after the fact — most commonly a still-running timer
+    that gets re-polled with a larger duration once it finally closes, or a
+    late/backfilled Swift re-import — and were never part of the review's
+    original `entries` snapshot.
+
+    Without this, such a straggler has no removal record anywhere (it isn't
+    in the old `rejected_entries`, it isn't in `entry_removals`) and slips
+    through rebuild_timer_clean() as a second survivor for a group that
+    should only ever have exactly one. (2026-07-20: found 34 groups stuck
+    this way — Milton Frank's own repair surfaced the pattern.)
+
+    The candidate (existing selected entry or any straggler) with the latest
+    end_time wins and becomes the new selected_entry; every other candidate,
+    including a superseded former selected_entry, gets a real entry_removals
+    row so it can never reappear either.
+    """
+    import string
+
+    rows = retry_db(
+        lambda: db.fetch(
+            f"""
+            SELECT r.group_id, r.project_did, r.project, r.user_email, r.start_time,
+                   r.site_name, r.site_id, r.task, r.entries, r.rejected_entries, r.selected_entry,
+                   t.end_time AS s_end_time, t.duration_min AS s_duration_min
+            FROM {SCHEMA_TIMER}.duplicate_reviews r
+            JOIN {SCHEMA_STAGING}.stg_timer_activities t
+              ON t.project_did = r.project_did AND t.user_email = r.user_email
+             AND t.start_time = r.start_time
+             AND t.site_name IS NOT DISTINCT FROM r.site_name
+             AND t.site_id IS NOT DISTINCT FROM r.site_id
+             AND t.task IS NOT DISTINCT FROM r.task
+            WHERE r.status IN ('resolved', 'auto_resolved')
+              AND NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(r.entries) e
+                  WHERE (e->>'end_time')::timestamptz IS NOT DISTINCT FROM t.end_time
+                    AND (e->>'duration_min')::numeric IS NOT DISTINCT FROM t.duration_min
+              )
+              -- Already handled by a prior reconciliation pass (or any other
+              -- removal) — without this, an already-superseded straggler
+              -- would never leave the scan and entries[] would grow forever.
+              AND NOT EXISTS (
+                  SELECT 1 FROM {SCHEMA_TIMER}.entry_removals rm
+                  WHERE rm.project_did = r.project_did AND rm.user_email = r.user_email
+                    AND rm.start_time = r.start_time
+                    AND rm.site_name IS NOT DISTINCT FROM r.site_name
+                    AND rm.site_id IS NOT DISTINCT FROM r.site_id
+                    AND rm.task IS NOT DISTINCT FROM r.task
+                    AND rm.end_time IS NOT DISTINCT FROM t.end_time
+                    AND rm.duration_min IS NOT DISTINCT FROM t.duration_min
+                    AND rm.reason IS DISTINCT FROM 'REVERTED'
+              )
+            """,
+        ),
+        description="scan resolved duplicate groups for post-resolution stragglers",
+    )
+    if not rows:
+        return 0
+
+    def _end(e):
+        v = e.get("end_time")
+        if isinstance(v, str):
+            v = datetime.fromisoformat(v)
+        if v and v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v or datetime.min.replace(tzinfo=timezone.utc)
+
+    by_group: dict[str, dict] = {}
+    for row in rows:
+        g = by_group.setdefault(row["group_id"], {"meta": row, "stragglers": []})
+        g["stragglers"].append({"end_time": row["s_end_time"], "duration_min": row["s_duration_min"]})
+
+    reconciled = 0
+    for group_id, g in by_group.items():
+        meta = g["meta"]
+        entries = meta["entries"] if isinstance(meta["entries"], list) else json.loads(meta["entries"])
+        rejected = meta["rejected_entries"] if isinstance(meta["rejected_entries"], list) \
+            else json.loads(meta["rejected_entries"] or "[]")
+        selected_label = meta["selected_entry"]
+
+        used_labels = {e["label"] for e in entries}
+        available_labels = [l for l in string.ascii_uppercase if l not in used_labels]
+        if len(available_labels) < len(g["stragglers"]):
+            logger.warning(f"Duplicate group {group_id} has too many entries to label every "
+                            f"straggler — skipping automatic reconciliation, needs manual review")
+            continue
+
+        current = next((e for e in entries if e["label"] == selected_label), None)
+        if current is None:
+            continue
+
+        winner = max([current] + g["stragglers"], key=_end)
+        labeled_stragglers = list(zip(available_labels, g["stragglers"]))
+        new_entries = entries + [
+            {"label": label, "start_time": meta["start_time"], **s} for label, s in labeled_stragglers
+        ]
+        losers = [s for _, s in labeled_stragglers if s is not winner]
+        if winner is not current:
+            losers.append(current)
+            new_selected_label = next(label for label, s in labeled_stragglers if s is winner)
+        else:
+            new_selected_label = selected_label
+
+        new_rejected = rejected + [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
+                                    for e in losers]
+
+        for loser in losers:
+            l_end, l_dur = _end(loser), loser.get("duration_min")
+            loser_id = _make_entry_id(
+                meta["project_did"], meta["user_email"], meta["start_time"],
+                meta.get("site_name"), meta.get("site_id"), meta.get("task"),
+                l_end, l_dur,
+            )
+            retry_db(
+                lambda eid=loser_id, et=l_end, dur=l_dur: db.execute(
+                    f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
+                        (entry_id, project_did, project, user_email, start_time,
+                         site_name, site_id, task, end_time, duration_min,
+                         reason, removed_at, created_at, updated_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$12)
+                        ON CONFLICT (entry_id) DO UPDATE SET
+                            reason = 'straggler_reconcile', updated_at = $12
+                        WHERE {SCHEMA_TIMER}.entry_removals.reason = 'REVERTED'
+                    """,
+                    eid, meta["project_did"], meta.get("project"), meta["user_email"],
+                    meta["start_time"], meta.get("site_name"), meta.get("site_id"),
+                    meta.get("task"), et, dur,
+                    "straggler_reconcile", now,
+                ),
+                description=f"remove superseded straggler {loser_id} for group {group_id}",
+            )
+
+        retry_db(
+            lambda gid=group_id, sel=new_selected_label, ent=_entries_to_jsonb(new_entries),
+                   rej=_entries_to_jsonb(new_rejected): db.execute(
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET selected_entry = $1, entries = $2, rejected_entries = $3,
+                        resolved_at = $4, resolved_by = 'straggler_reconcile', updated_at = $4
+                    WHERE group_id = $5
+                """,
+                sel, ent, rej, now, gid,
+            ),
+            description=f"reconcile duplicate group {group_id} with post-resolution straggler(s)",
+        )
+        reconciled += 1
+
+    if reconciled:
+        logger.info(f"Reconciled {reconciled} duplicate group(s) with post-resolution stragglers")
+    return reconciled
+
+
 def rebuild_clean_table(db):
     """Rebuild stg_timer_activities_clean via the database RPC."""
+    now = datetime.now(timezone.utc)
+    _reconcile_resolved_group_stragglers(db, now)
     logger.info("Rebuilding stg_timer_activities_clean...")
     retry_db(
         lambda: db.execute(f"SELECT {SCHEMA_STAGING}.rebuild_timer_clean()"),
