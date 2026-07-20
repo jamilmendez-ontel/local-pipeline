@@ -1,5 +1,50 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-20 (cont.) — Cutover track opened: doctrine audit live-tested, v2's one real gap found and fixed same day
+
+Jamil's call: proceed with asset-tasks v1→v2 cutover NOW, using the existing
+10-day audit history as parity evidence instead of a fresh monitoring week.
+Queue re-pinned: #1 revenue review + #2 daily-reports-goes-live (Jamil will
+self-build with guidance, flow R0–R6 recorded in memory) both parked behind
+the cutover.
+
+- **C0 doctrine APPROVED + implemented** (draft PR local-pipeline #13):
+  audit gate = explained-differences, not hash equality. Ghost-attributable
+  missing OK (auto-verified: asset has zero inc rows), ad-hoc extras OK
+  (counted), dangling *_by_did OK (submitted/approved/cancelled, names NULL
+  both sides), else FAIL; true counts in notes as "DOCTRINE PASS/FAIL".
+- **C1 evidence**: 10 days clean — TS18/TS19 zero missing throughout; TS17's
+  154 missing = exactly 2 ghost assets (template math). C2 census: 10 views
+  + 9 matviews read stg_asset_tasks, ZERO db triggers/functions (Jamil's
+  "triggers" = downstream jobs chained on daily completion; his plan: move
+  to fixed times after cutover, confirming ideal times with team). C3
+  agreed: union view — inc for explicit pilot DIDs, current for everything
+  else, so future TS20 auto-flows the old path.
+- **Doctrine's first live run caught v2's one real gap** (my earlier
+  "harmless" census verdict was wrong — it sampled 10 of 25 columns):
+  denormalized attrs (asset shortName, asset-project status, asset_id,
+  reqCount) stale on untouched task rows — guarded upserts only rewrite
+  moved TASKS; TS19 alone had 9.5k stale project_status + 18k total
+  unexplained. Root cause proven via 3-way evidence (v1 vs v2 vs
+  stg_assets_inc vs raw): renames/status flips from before rows' last task
+  touch.
+- **Fix shipped same session**: migration 185 (applied; stg_assets_inc +
+  asset_short_name/asset_status — the exact values task rows denormalize)
+  + swift-data-platform draft PR #2: UPSERT_ASSET writes+guards the new
+  cols; SYNC_TASK_ATTRS (guarded, project-scoped bulk UPDATE) at the end
+  of every walk; attr_syncs stat; 23 tests green (4 new pin the SQL
+  contract). **Live-verified: healed 20,473 rows; audit UNEXPLAINED
+  collapsed 375/1,897/18,078 → 1/13/437** — residue is v1-hourly-lag
+  timing skew that self-corrects. Decision: gate stays strict; cutover
+  judged on consecutive quiet-window (05:20) nightly PASSes.
+
+**NEXT:** Jamil merges PR #2 (auto-deploys via Phase 8) + PR #13 (doctrine
+goes nightly) → collect consecutive DOCTRINE PASS nights → C4 union-view
+migration (repoint 19 readers) + C6 finance heads-up (the 146 recovered
+billable rows surface in the worklist at C4 — review MUST land first) →
+C5 retire v1 hourly per project. Jamil still owes: triggers list, ideal
+downstream run times (team), and the go on the revenue worksheet.
+
 ## Session: 2026-07-20 (evening) — GCP Phase 9 DONE: alerts live — MILESTONE 3 BUILD COMPLETE (phases 0–9)
 
 Final phase, same day. The platform now tells us when it breaks — loudly OR
