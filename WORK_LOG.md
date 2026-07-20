@@ -1,5 +1,49 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-20 (evening) — GCP Phase 9 DONE: alerts live — MILESTONE 3 BUILD COMPLETE (phases 0–9)
+
+Final phase, same day. The platform now tells us when it breaks — loudly OR
+silently.
+
+- **Design check first**: read the code for actual log strings before writing
+  filters. Found: success = `walk done in Xs` (listener) / `done in Xs`
+  (reconcile — DIFFERENT string), crash = `walk crashed`, plus
+  `listener thread for X died` which the runbook's draft filter would have
+  MISSED. Lesson: alert filters are contracts with log lines — verify against
+  code, not memory.
+- **Key design decision**: the heartbeat for the absence alert is the
+  RECONCILE, not the listener — listener silence is legitimate (quiet
+  weekend = no events = no walks = false 3am alarms); the reconcile runs
+  hourly no matter what, so its silence always means breakage.
+- **Built** (Jamil in Console for metrics — Preview-logs validated the
+  heartbeat filter against real lines; agent via Monitoring REST API for
+  policies after the Console wizard fought back twice: metric picker hides
+  data-less metrics [workaround: Log-based Metrics → ⋮ → Create alert from
+  metric], then the rolling-window-function dropdown refused all input):
+  - metrics `swift_sync_errors` (severity>=ERROR, listener OR reconcile job)
+    and `swift_sync_reconcile_heartbeat` (`done in` lines from the job)
+  - email channel (jamil.mendez@ontel.co)
+  - policy "swift-sync: pipeline error" — threshold >0, 5-min sum, 2
+    conditions (cloud_run_revision + cloud_run_job), runbook-style docs in
+    the alert body
+  - policy "swift-sync: reconcile heartbeat missing" — **metric absence 3 h**
+    (dead-man's switch), remediation steps in the alert body
+  - JSON policy definitions preserved in the session job tmp
+- **Verified end-to-end**: heartbeat metric ticked at 04:51:59 UTC right
+  after the 04:50 scheduled reconcile → absence alert ARMED. Both policies
+  enabled with the email channel attached (confirmed via API list).
+
+**MILESTONE 3 GCP BUILD: phases 0–9 ALL COMPLETE (2026-07-14 → 2026-07-20).**
+End state: event-driven sync ~20 s freshness · hourly reconcile self-correction
+· nightly strict audit · merge-to-main auto-deploy via WIF, zero stored keys ·
+alerts for loud AND silent failure. Cost line: pilot ~$45–60/mo as planned.
+
+**NEXT (queue, Jamil's priority call):** (1) audit-doctrine decision +
+revenue-recovery review of the 146 billable rows (manual, URGENT); (2) v1→v2
+cutover per project after audit parity (v1 hourly then retires per pipeline);
+(3) milestone 4: `reference.ref_sync_projects` discovery table + nightly
+discovery-diff alert; (4) then widen beyond TS17–19 / GC scale plan.
+
 ## Session: 2026-07-20 (later) — GCP Phase 8 DONE: OIDC deploys live, merge-to-main = deploy
 
 Same session continued after Phase 7. WIF reference material added to vault
