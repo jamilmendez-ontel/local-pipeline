@@ -41,7 +41,7 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-asset-tasks-gc.yml` | Nightly Apps Script | Parallel GC pipeline (non-Ontel orgs) |
 | `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
-| `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time |
+| `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
 | `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 
 Exact trigger times live in `scripts/pipeline_trigger.gs`. The
