@@ -34,6 +34,13 @@ var COORDINATION_SHEET_ID = '1l1L8YfZZryRLlaGaQKVU2fLGU5PfOYf6vWHb8ejMkc8';
 
 var DEBOUNCE_MINUTES = 10;
 
+// Retry policy for failed dispatches: the debounced batch is NOT lost on a
+// single failed GitHub call — the fire function retries every RETRY_MINUTES
+// up to MAX_RETRY_ATTEMPTS (B1 of the coordination sheet counts attempts),
+// then gives up and leaves the batch to the nightly Pipeline: Timer apply.
+var RETRY_MINUTES = 5;
+var MAX_RETRY_ATTEMPTS = 6;
+
 
 function onFormSubmit(e) {
   var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
@@ -77,16 +84,11 @@ function onFormSubmit(e) {
 
 /**
  * Triggered by the scheduled time-based trigger created in onFormSubmit.
- * Clears the shared coordination cell, deletes its own trigger, and fires
- * the repository_dispatch.
+ * Deletes its own trigger, fires the repository_dispatch, and clears the
+ * shared coordination cell ONLY on success (failures retry, bounded).
  */
 function firePendingRemovalDispatch() {
-  try {
-    SpreadsheetApp.openById(COORDINATION_SHEET_ID).getSheets()[0].getRange('A1').clearContent();
-  } catch (err) {
-    Logger.log('WARNING: Failed to clear coordination cell: ' + err);
-  }
-
+  // Delete our own scheduled trigger(s) first — there should only be one
   var triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function (t) {
     if (t.getHandlerFunction() === 'firePendingRemovalDispatch') {
@@ -100,10 +102,48 @@ function firePendingRemovalDispatch() {
     return;
   }
 
-  var success = fireRemovalDispatch(token);
-  if (success) {
-    Logger.log('Removal apply workflow triggered successfully (debounced batch)');
+  // Fire FIRST; only clear the coordination cell on success. The old order
+  // (clear, then fire) would silently lose the whole debounced batch if the
+  // single dispatch call failed (non-204 or a thrown fetch) — the responses
+  // would sit unprocessed until the nightly apply. Latent fragility found in
+  // review 2026-07-21, not an observed incident. On failure, schedule a
+  // bounded retry instead.
+  var success = false;
+  try {
+    success = fireRemovalDispatch(token);
+  } catch (err) {
+    Logger.log('ERROR: dispatch threw: ' + err);
   }
+
+  var sheet;
+  try {
+    sheet = SpreadsheetApp.openById(COORDINATION_SHEET_ID).getSheets()[0];
+  } catch (err) {
+    Logger.log('WARNING: Failed to open coordination sheet: ' + err);
+    return;
+  }
+
+  if (success) {
+    sheet.getRange('A1').clearContent();
+    sheet.getRange('B1').clearContent();
+    Logger.log('Removal apply workflow triggered successfully (debounced batch)');
+    return;
+  }
+
+  var attempts = Number(sheet.getRange('B1').getValue()) || 0;
+  if (attempts >= MAX_RETRY_ATTEMPTS) {
+    Logger.log('ERROR: dispatch failed after ' + attempts + ' retries — giving up; '
+             + 'the nightly Pipeline: Timer apply will pick this batch up.');
+    sheet.getRange('A1').clearContent();
+    sheet.getRange('B1').clearContent();
+    return;
+  }
+  var retryAt = new Date(new Date().getTime() + RETRY_MINUTES * 60 * 1000);
+  sheet.getRange('A1').setValue(retryAt);
+  sheet.getRange('B1').setValue(attempts + 1);
+  ScriptApp.newTrigger('firePendingRemovalDispatch').timeBased().at(retryAt).create();
+  Logger.log('Dispatch failed — retry ' + (attempts + 1) + '/' + MAX_RETRY_ATTEMPTS
+           + ' scheduled for ' + retryAt.toString());
 }
 
 
