@@ -42,6 +42,14 @@ logger = get_logger("audit_asset_tasks_inc")
 CURRENT = f"{SCHEMA_STAGING}.stg_asset_tasks"
 INC = f"{SCHEMA_STAGING}.stg_asset_tasks_inc"
 
+# The tx-pooler pool's default command_timeout (300 s) killed every audit
+# between 18:23 and 23:27 UTC on 2026-07-20 while heavy walk UPDATEs had
+# the instance IO-throttled: TimeoutError on the first HASH_SQL fetch, zero
+# rows persisted — and non-strict runs stayed green (continue-on-error), so
+# the outage was invisible. These comparisons legitimately take minutes on
+# a busy instance; give them explicit headroom instead of the pool default.
+AUDIT_QUERY_TIMEOUT = 900
+
 # Business columns shared by both tables (everything except each side's
 # bookkeeping: run_id/loaded_at/last_updated) minus the join/filter keys
 # (task_did, project_did). Compared in full on mismatch drill-down.
@@ -131,7 +139,7 @@ def _column_diffs(db, project_did, limit=20):
         f"WHERE c.project_did = $1 "
         f"AND ({c_tuple}) IS DISTINCT FROM ({i_tuple}) "
         f"ORDER BY c.task_did LIMIT {int(limit)}",
-        project_did,
+        project_did, timeout=AUDIT_QUERY_TIMEOUT,
     )
     diffs = {}
     for r in rows:
@@ -159,7 +167,7 @@ def _classify_column_diffs(db, project_did):
         f"FROM {CURRENT} c JOIN {INC} i USING (task_did) "
         f"WHERE c.project_did = $1 "
         f"AND ({c_tuple}) IS DISTINCT FROM ({i_tuple})",
-        project_did,
+        project_did, timeout=AUDIT_QUERY_TIMEOUT,
     )
     dangling = 0
     unexplained = 0
@@ -211,17 +219,21 @@ def audit_project(db, project_did, current_side, inc_side):
         return result
 
     # True counts under the doctrine (samples below stay LIMIT 50/20).
-    m = db.fetch(MISSING_CLASSIFY_SQL, project_did)[0]
-    extra_total = db.fetch(EXTRA_COUNT_SQL, project_did)[0]["extra_total"]
+    m = db.fetch(MISSING_CLASSIFY_SQL, project_did,
+                 timeout=AUDIT_QUERY_TIMEOUT)[0]
+    extra_total = db.fetch(EXTRA_COUNT_SQL, project_did,
+                           timeout=AUDIT_QUERY_TIMEOUT)[0]["extra_total"]
     dangling, unexplained_diffs, unexplained_sample = _classify_column_diffs(
         db, project_did)
 
     doctrine_pass = (m["unexplained_missing"] == 0 and unexplained_diffs == 0)
 
     missing_sample = [r["task_did"] for r in db.fetch(
-        ONLY_IN_SQL.format(a=CURRENT, b=INC), project_did)]
+        ONLY_IN_SQL.format(a=CURRENT, b=INC), project_did,
+        timeout=AUDIT_QUERY_TIMEOUT)]
     extra_sample = [r["task_did"] for r in db.fetch(
-        ONLY_IN_SQL.format(a=INC, b=CURRENT), project_did)]
+        ONLY_IN_SQL.format(a=INC, b=CURRENT), project_did,
+        timeout=AUDIT_QUERY_TIMEOUT)]
     # Persist the UNEXPLAINED diff sample when doctrine fails (that's what a
     # human must look at); otherwise keep the legacy any-diff sample.
     diffs_sample = unexplained_sample or _column_diffs(db, project_did)
@@ -271,9 +283,9 @@ def main():
                    for p in projects}
 
     current_rows = {r["project_did"]: r for r in db.fetch(
-        HASH_SQL.format(table=CURRENT), dids)}
+        HASH_SQL.format(table=CURRENT), dids, timeout=AUDIT_QUERY_TIMEOUT)}
     inc_rows = {r["project_did"]: r for r in db.fetch(
-        HASH_SQL.format(table=INC), dids)}
+        HASH_SQL.format(table=INC), dids, timeout=AUDIT_QUERY_TIMEOUT)}
 
     logger.info("CAVEAT: the two pipelines run at different times, so small "
                 "drift right after either run is expected; persistent "
