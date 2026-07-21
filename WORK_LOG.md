@@ -1,5 +1,70 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-21 — Disk-IO recovery: attr-sync was the burner, the strict gate never existed, platform paused for refill
+
+Session opened to check tonight's doctrine verdict; found infrastructure
+instead. Everything below measured against prod pg_stat_statements, not
+assumed (snapshot-diff method).
+
+- **The audit had been crashing silently since 18:23 UTC Jul 20** — the
+  tx-pooler's 300 s command_timeout fired on HASH_SQL while the instance
+  was IO-throttled; `continue-on-error` kept every run green. 9-hour
+  evidence gap, invisible from GHA.
+- **SYNC_TASK_ATTRS post-heal is NOT near-no-op** (watch item (a) from the
+  disk-IO memory — expectation was wrong): one call = **2.4 GB read /
+  692 s / 0 rows updated**. Guard stops writes, not the scan — the join
+  routes through raw_asset_tasks_inc (jsonb) because s.asset_did is the
+  underlying asset.id while stg_assets_inc keys on the asset-project
+  composite. ~10 calls/h ≈ 600 GB/day = the main driver of Jul 20's 100%
+  Disk IO Budget depletion (and it was re-depleting Jul 21's budget live:
+  caught two concurrent calls at 10-12 min with a User Priorities COPY
+  stuck 7.5 min behind them).
+- **Fix: swift-data-platform PR #3** (MERGED, deployed 02:20 UTC):
+  plan_attr_sync() diffs the 4 sync-source values in Python against the
+  stored assets the walk already fetches; quiet walk = sync skipped
+  entirely; changed assets = SYNC_TASK_ATTRS_SCOPED via
+  idx_raw_asset_tasks_inc_asset; baseline/>1000 = original full sweep.
+  27 tests green (4 new).
+- **The 05:20 strict gate NEVER armed**: zero hour-05 UTC runs in 10 days.
+  GHA coalesces the hour-05 cron into the hourly cron's delayed
+  ~06:2x-06:45 firing, which resolves `date -u +%H` = 06 → non-strict.
+  Every "gate" run in the pilot's history was informational.
+- **Fix: local-pipeline PR #14** (MERGED 02:20 UTC): gate = UTC hour 05 OR
+  06; scheduled runs audit ONLY at the gate (doctrine audit measured
+  6-9 GB/run × ~10 runs/day = 60-90 GB/day of noise — daytime audits only
+  ever show v1-lag skew); 900 s audit query timeouts; **migration 186**
+  (applied + verified index-only): loaded_at indexes on stg_qa_form /
+  stg_timer_activities / _clean / stg_assets for the 7-way freshness probe
+  (~708 MB/call × 12/day). NOTE: stg_asset_tasks was already indexed — the
+  memory's attribution was stale.
+- Maintenance: VACUUM ANALYZE stg_asset_tasks_inc (230k dead tuples, stats
+  stale since Jul 12); killed a leftover attr-sync mid-flight.
+- **Recovery pauses (Jamil's calls, resume 5 PM PHT / 09:00 UTC Jul 21):**
+  (1) GCP: scheduler swift-sync-reconcile-hourly paused; listener
+  min-instances=0 (instance confirmed down 02:02 UTC; pause update reset
+  maxScale 1→100 — restore min=1/max=1 on resume); heartbeat alert policy
+  9044170417556237719 disabled. (2) GHA: daily-reports-rolling +
+  pipeline-priorities workflows DISABLED, in-flight runs cancelled, DB
+  queries killed — both verified self-healing (UP = full-snapshot swap,
+  DR = rolling 30-day window; first run after re-enable collects the gap).
+  Jamil knowingly overrode the night-shift freshness constraint for the
+  window. v1 nightly reload + inc shadow + tonight's gate audit kept
+  (production + cutover evidence).
+- **Numbers**: structural burn ~700 GB/day → ~40 GB/day after fixes
+  (attr-sync ~600→<2, audits 60-90→6-9, probe 8.5→~0); v1's ~33 GB/night
+  full reload is the remaining item and retires at cutover (~7-10 GB/day
+  end state). IOwait explained (measures presence-of-waiters, not volume);
+  per-IO latency still ~50 ms/block at 03:25 UTC — refill takes hours.
+- Monitors armed: nightly-window + gate-verdict watcher; 4:50 PM PHT
+  resume reminder. Learning: journal "The IO bill — reads are the cost,
+  not writes" + new pattern note "Incremental writes are not incremental
+  reads"; recurring-query IO checklist saved to agent memory (measure
+  per-call GB × calls/day; no silent evidence failures; verify cron gates
+  actually fire).
+
+**NEXT: tonight's gate (~06:2x UTC) = first REAL strict doctrine verdict.**
+Then: resume checklist at 5 PM PHT → PASS streak → TS16 → C4 union view.
+
 ## Session: 2026-07-20 (cont.) — Cutover track opened: doctrine audit live-tested, v2's one real gap found and fixed same day
 
 Jamil's call: proceed with asset-tasks v1→v2 cutover NOW, using the existing
