@@ -240,6 +240,75 @@ def _make_group_id(project_did: str, user_email: str, start_time: datetime,
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
+# --------------------------------------------------------------------------
+# Stale-response fallback (entry changed after the review email was sent)
+#
+# The form response carries the entry_id hash computed at email-generation
+# time. If the entry changed since (a running timer completed, a re-extract
+# nudged end/duration), that hash matches nothing at --apply time and the
+# response used to be silently skipped. The form ALSO prefills an
+# "Entry Details" field (project | site | task | date | duration), which is
+# enough to resolve the response to the entry's stable start-key group.
+# --------------------------------------------------------------------------
+
+def _parse_entry_details(details: str) -> dict | None:
+    """Parse the form's 'Entry Details' prefill back into matchable fields.
+
+    Format (built in _build_entries_table): project | site | task | date | duration,
+    with '(no site)' / '(no task)' / '(no project)' placeholders for NULLs.
+    A site name containing ' | ' splits into extra parts; everything between
+    the first (project) and the last three (task, date, duration) is the site.
+    Returns None when the string can't be parsed.
+    """
+    if not details:
+        return None
+    parts = details.split(" | ")
+    if len(parts) < 5:
+        return None
+    project = parts[0].strip()
+    date_str = parts[-2].strip()
+    task = parts[-3].strip()
+    site = " | ".join(parts[1:-3]).strip()
+    try:
+        start_date = datetime.strptime(date_str, "%b %d, %Y").date()
+    except ValueError:
+        return None
+    return {
+        "project": None if project in ("", "(no project)") else project,
+        "site": None if site in ("", "(no site)") else site,
+        "task": None if task in ("", "(no task)") else task,
+        "start_date": start_date,  # Eastern calendar date of start_time
+    }
+
+
+def _group_rows(rows: list[dict]) -> dict:
+    """Group raw rows by their stable start-key. Rows sharing a start-key are
+    snapshots/duplicates of the same physical timer."""
+    groups: dict = {}
+    for r in rows:
+        key = (r["project_did"], r["user_email"], r["start_time"],
+               r.get("site_name"), r.get("site_id"), r.get("task"))
+        groups.setdefault(key, []).append(r)
+    return groups
+
+
+def _pick_group(groups: dict, respondent_email: str | None) -> list[dict] | None:
+    """Choose the start-key group a stale response refers to.
+
+    One group = unambiguous. Multiple groups (e.g. '(no site)' admin tasks
+    match several members, or the same member ran the task twice that day):
+    the respondent's email disambiguates only if it selects exactly one group.
+    Ambiguity returns None — the caller skips with a warning rather than guess.
+    """
+    if len(groups) == 1:
+        return next(iter(groups.values()))
+    if not respondent_email:
+        return None
+    resp = respondent_email.strip().lower()
+    matches = [g for k, g in groups.items() if (k[1] or "").strip().lower() == resp]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _fmt_time(dt) -> str:
     """Format a datetime to Eastern Time string."""
     if dt is None:
@@ -1042,6 +1111,10 @@ def read_form_responses() -> list[dict]:
                 "action": "correct",
                 "corrected_duration_min": duration_min,
                 "reason": reason or None,
+                # Carried for the stale-hash fallback (entry changed after the
+                # review email): the prefilled details + who submitted the form.
+                "details": row_dict.get("entry details", ""),
+                "respondent": row_dict.get("email address", ""),
             }
 
     # --- Removal responses ---
@@ -1069,6 +1142,8 @@ def read_form_responses() -> list[dict]:
                 "action": "remove",
                 "corrected_duration_min": None,
                 "reason": None,
+                "details": row_dict.get("entry details", ""),
+                "respondent": row_dict.get("email address", ""),
             }
 
     results = list(by_entry.values())
@@ -1115,6 +1190,90 @@ def lookup_entries_by_hash(db, entry_ids: list[str]) -> dict[str, dict]:
         h = d.pop("_entry_id_hash")
         result.setdefault(h, d)
     return result
+
+
+def _resolve_stale_response(db, resp: dict) -> list[dict] | None:
+    """Resolve a response whose entry_id hash matches nothing in raw.
+
+    Uses the form's prefilled Entry Details (project | site | task | ET date)
+    to find the entry's start-key group among CURRENT raw rows. The date-range
+    predicate is sargable (start_time is indexed) — no full-table scans, the
+    failure mode that used to blow the apply job's timeout. Whitespace-
+    insensitive matching (btrim) because site/task names carry stray spaces.
+    Returns the group's rows, or None when unparseable/no match/ambiguous.
+    """
+    parsed = _parse_entry_details(resp.get("details") or "")
+    if not parsed:
+        return None
+    day_start = datetime(parsed["start_date"].year, parsed["start_date"].month,
+                         parsed["start_date"].day, tzinfo=TZ_EASTERN)
+    day_end = day_start + timedelta(days=1)
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            SELECT project_did, project, user_email, start_time, site_name,
+                   site_id, task, end_time, duration_min
+            FROM {SCHEMA_STAGING}.stg_timer_activities
+            WHERE start_time >= $1 AND start_time < $2
+              AND btrim(coalesce(task, ''))      = $3
+              AND btrim(coalesce(site_name, '')) = $4
+              AND btrim(coalesce(project, ''))   = $5
+        """, day_start, day_end,
+            (parsed["task"] or "").strip(),
+            (parsed["site"] or "").strip(),
+            (parsed["project"] or "").strip()),
+        description=f"stale-fallback candidate lookup {resp['entry_id']}",
+    )
+    if not rows:
+        return None
+    groups = _group_rows([dict(r) for r in rows])
+    return _pick_group(groups, resp.get("respondent"))
+
+
+def _uncovered_rows(db, rows: list[dict]) -> list[dict]:
+    """Rows of a start-key group not already accounted for by a correction or
+    an active removal (exact natural-key match, same predicates as
+    rebuild_timer_clean). Correction-covered rows are deliberately KEPT — the
+    member corrected that snapshot, so 'correction wins' extends to fallback
+    removals. Exact values always come from the source row, never literals
+    (float-precision gotcha)."""
+    out = []
+    seen = set()
+    for r in rows:
+        covered = retry_db(
+            lambda row=r: db.fetchval(f"""
+                SELECT EXISTS (
+                    SELECT 1 FROM {SCHEMA_TIMER}.corrections c
+                    WHERE c.project_did = $1 AND c.user_email = $2 AND c.start_time = $3
+                      AND c.site_name IS NOT DISTINCT FROM $4
+                      AND c.site_id   IS NOT DISTINCT FROM $5
+                      AND c.task      IS NOT DISTINCT FROM $6
+                      AND c.end_time IS NOT DISTINCT FROM $7
+                      AND c.original_duration_min IS NOT DISTINCT FROM $8
+                ) OR EXISTS (
+                    SELECT 1 FROM {SCHEMA_TIMER}.entry_removals rm
+                    WHERE rm.project_did = $1 AND rm.user_email = $2 AND rm.start_time = $3
+                      AND rm.site_name IS NOT DISTINCT FROM $4
+                      AND rm.site_id   IS NOT DISTINCT FROM $5
+                      AND rm.task      IS NOT DISTINCT FROM $6
+                      AND rm.end_time IS NOT DISTINCT FROM $7
+                      AND rm.duration_min IS NOT DISTINCT FROM $8
+                      AND rm.reason IS DISTINCT FROM 'REVERTED'
+                )
+            """, row["project_did"], row["user_email"], row["start_time"],
+                row.get("site_name"), row.get("site_id"), row.get("task"),
+                row.get("end_time"), row.get("duration_min")),
+            description="stale-fallback coverage check",
+        )
+        if covered:
+            continue
+        # Exact-twin raw rows (same end + duration) would hash to the same
+        # removal entry_id; one removal covers them all.
+        key = (r.get("end_time"), str(r.get("duration_min")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
 
 
 def lookup_entry_by_id(db, entry_id: str, hash_map: dict[str, dict] | None = None) -> dict | None:
@@ -1397,8 +1556,78 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
 
         entry = lookup_entry_by_id(db, entry_id, hash_map=hash_map)
         if not entry:
-            logger.warning(f"No timer entry found for entry_id={entry_id}, skipping")
-            continue
+            # Stale-hash fallback: the entry changed after the review email
+            # (running timer completed / re-extract drift), so the response's
+            # hash matches nothing. Resolve via the form's Entry Details to
+            # the entry's start-key group instead of silently skipping.
+            group = _resolve_stale_response(db, resp)
+            if group is None:
+                logger.warning(f"No timer entry found for entry_id={entry_id} "
+                               f"(details fallback: unparseable/no match/ambiguous), skipping")
+                continue
+            uncovered = _uncovered_rows(db, group)
+
+            if action == "remove":
+                if not uncovered:
+                    logger.info(f"Stale removal {entry_id}: start-key group already "
+                                f"fully covered by corrections/removals, nothing to do")
+                    continue
+                # Remove every drifted snapshot of the timer that isn't already
+                # accounted for. The FIRST row is stored under the response's
+                # own stale entry_id so the response is marked processed and is
+                # never re-resolved on later runs; siblings get their real hash.
+                for i, row in enumerate(uncovered):
+                    row_eid = entry_id if i == 0 else _make_entry_id(
+                        row["project_did"], row["user_email"], row["start_time"],
+                        row.get("site_name"), row.get("site_id"), row.get("task"),
+                        row.get("end_time"), row.get("duration_min"),
+                    )
+                    retry_db(
+                        lambda eid=row_eid, e=row: db.execute(
+                            f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
+                                (entry_id, project_did, project, user_email, start_time,
+                                 site_name, site_id, task, end_time, duration_min,
+                                 reason, removed_at, created_at, updated_at)
+                                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$12)
+                                ON CONFLICT (entry_id) DO UPDATE SET
+                                    reason = EXCLUDED.reason,
+                                    removed_at = EXCLUDED.removed_at,
+                                    updated_at = EXCLUDED.updated_at
+                            """,
+                            eid, e["project_did"], e.get("project"), e["user_email"],
+                            e["start_time"], e.get("site_name"), e.get("site_id"),
+                            e.get("task"), e.get("end_time"), e.get("duration_min"),
+                            f"stale-hash fallback (response {entry_id})", now,
+                        ),
+                        description=f"upsert fallback removal {row_eid}",
+                    )
+                    logger.info(f"Stale removal {entry_id}: stored fallback removal {row_eid} "
+                                f"for {row.get('site_name') or '(no site)'} / "
+                                f"{row.get('task') or '(no task)'} "
+                                f"({_fmt_duration(row.get('duration_min'))})")
+                    applied_changes.append({
+                        "entry_id": row_eid,
+                        "action": "remove",
+                        "user_email": row["user_email"],
+                        "entry_date": _entry_date_et(row["start_time"]),
+                        "entry": row,
+                        "original_duration_min": row.get("duration_min"),
+                        "corrected_duration_min": None,
+                    })
+                    _resolve_duplicate_for_action(db, row, "remove", now)
+                applied += 1
+                continue
+
+            # Correction: only safe when exactly one row of the group is still
+            # unaccounted for — that row is what the member's edit refers to.
+            if len(uncovered) != 1:
+                logger.warning(f"Stale correction {entry_id}: "
+                               f"{len(uncovered)} uncovered rows in start-key group, "
+                               f"cannot resolve unambiguously, skipping")
+                continue
+            entry = uncovered[0]
+            logger.info(f"Stale correction {entry_id}: resolved via details fallback "
+                        f"to current row ({_fmt_duration(entry.get('duration_min'))})")
 
         start_time = entry["start_time"]
         if start_time.tzinfo is None:
