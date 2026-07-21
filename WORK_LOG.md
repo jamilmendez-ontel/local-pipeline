@@ -1,5 +1,476 @@
 # AI Projects - Work Log
 
+## Session: 2026-07-21 — Disk-IO recovery: attr-sync was the burner, the strict gate never existed, platform paused for refill
+
+Session opened to check tonight's doctrine verdict; found infrastructure
+instead. Everything below measured against prod pg_stat_statements, not
+assumed (snapshot-diff method).
+
+- **The audit had been crashing silently since 18:23 UTC Jul 20** — the
+  tx-pooler's 300 s command_timeout fired on HASH_SQL while the instance
+  was IO-throttled; `continue-on-error` kept every run green. 9-hour
+  evidence gap, invisible from GHA.
+- **SYNC_TASK_ATTRS post-heal is NOT near-no-op** (watch item (a) from the
+  disk-IO memory — expectation was wrong): one call = **2.4 GB read /
+  692 s / 0 rows updated**. Guard stops writes, not the scan — the join
+  routes through raw_asset_tasks_inc (jsonb) because s.asset_did is the
+  underlying asset.id while stg_assets_inc keys on the asset-project
+  composite. ~10 calls/h ≈ 600 GB/day = the main driver of Jul 20's 100%
+  Disk IO Budget depletion (and it was re-depleting Jul 21's budget live:
+  caught two concurrent calls at 10-12 min with a User Priorities COPY
+  stuck 7.5 min behind them).
+- **Fix: swift-data-platform PR #3** (MERGED, deployed 02:20 UTC):
+  plan_attr_sync() diffs the 4 sync-source values in Python against the
+  stored assets the walk already fetches; quiet walk = sync skipped
+  entirely; changed assets = SYNC_TASK_ATTRS_SCOPED via
+  idx_raw_asset_tasks_inc_asset; baseline/>1000 = original full sweep.
+  27 tests green (4 new).
+- **The 05:20 strict gate NEVER armed**: zero hour-05 UTC runs in 10 days.
+  GHA coalesces the hour-05 cron into the hourly cron's delayed
+  ~06:2x-06:45 firing, which resolves `date -u +%H` = 06 → non-strict.
+  Every "gate" run in the pilot's history was informational.
+- **Fix: local-pipeline PR #14** (MERGED 02:20 UTC): gate = UTC hour 05 OR
+  06; scheduled runs audit ONLY at the gate (doctrine audit measured
+  6-9 GB/run × ~10 runs/day = 60-90 GB/day of noise — daytime audits only
+  ever show v1-lag skew); 900 s audit query timeouts; **migration 186**
+  (applied + verified index-only): loaded_at indexes on stg_qa_form /
+  stg_timer_activities / _clean / stg_assets for the 7-way freshness probe
+  (~708 MB/call × 12/day). NOTE: stg_asset_tasks was already indexed — the
+  memory's attribution was stale.
+- Maintenance: VACUUM ANALYZE stg_asset_tasks_inc (230k dead tuples, stats
+  stale since Jul 12); killed a leftover attr-sync mid-flight.
+- **Recovery pauses (Jamil's calls, resume 5 PM PHT / 09:00 UTC Jul 21):**
+  (1) GCP: scheduler swift-sync-reconcile-hourly paused; listener
+  min-instances=0 (instance confirmed down 02:02 UTC; pause update reset
+  maxScale 1→100 — restore min=1/max=1 on resume); heartbeat alert policy
+  9044170417556237719 disabled. (2) GHA: daily-reports-rolling +
+  pipeline-priorities workflows DISABLED, in-flight runs cancelled, DB
+  queries killed — both verified self-healing (UP = full-snapshot swap,
+  DR = rolling 30-day window; first run after re-enable collects the gap).
+  Jamil knowingly overrode the night-shift freshness constraint for the
+  window. v1 nightly reload + inc shadow + tonight's gate audit kept
+  (production + cutover evidence).
+- **Numbers**: structural burn ~700 GB/day → ~40 GB/day after fixes
+  (attr-sync ~600→<2, audits 60-90→6-9, probe 8.5→~0); v1's ~33 GB/night
+  full reload is the remaining item and retires at cutover (~7-10 GB/day
+  end state). IOwait explained (measures presence-of-waiters, not volume);
+  per-IO latency still ~50 ms/block at 03:25 UTC — refill takes hours.
+- Monitors armed: nightly-window + gate-verdict watcher; 4:50 PM PHT
+  resume reminder. Learning: journal "The IO bill — reads are the cost,
+  not writes" + new pattern note "Incremental writes are not incremental
+  reads"; recurring-query IO checklist saved to agent memory (measure
+  per-call GB × calls/day; no silent evidence failures; verify cron gates
+  actually fire).
+
+**NEXT: tonight's gate (~06:2x UTC) = first REAL strict doctrine verdict.**
+Then: resume checklist at 5 PM PHT → PASS streak → TS16 → C4 union view.
+
+## Session: 2026-07-20 (cont.) — Cutover track opened: doctrine audit live-tested, v2's one real gap found and fixed same day
+
+Jamil's call: proceed with asset-tasks v1→v2 cutover NOW, using the existing
+10-day audit history as parity evidence instead of a fresh monitoring week.
+Queue re-pinned: #1 revenue review + #2 daily-reports-goes-live (Jamil will
+self-build with guidance, flow R0–R6 recorded in memory) both parked behind
+the cutover.
+
+- **C0 doctrine APPROVED + implemented** (draft PR local-pipeline #13):
+  audit gate = explained-differences, not hash equality. Ghost-attributable
+  missing OK (auto-verified: asset has zero inc rows), ad-hoc extras OK
+  (counted), dangling *_by_did OK (submitted/approved/cancelled, names NULL
+  both sides), else FAIL; true counts in notes as "DOCTRINE PASS/FAIL".
+- **C1 evidence**: 10 days clean — TS18/TS19 zero missing throughout; TS17's
+  154 missing = exactly 2 ghost assets (template math). C2 census: 10 views
+  + 9 matviews read stg_asset_tasks, ZERO db triggers/functions (Jamil's
+  "triggers" = downstream jobs chained on daily completion; his plan: move
+  to fixed times after cutover, confirming ideal times with team). C3
+  agreed: union view — inc for explicit pilot DIDs, current for everything
+  else, so future TS20 auto-flows the old path.
+- **Doctrine's first live run caught v2's one real gap** (my earlier
+  "harmless" census verdict was wrong — it sampled 10 of 25 columns):
+  denormalized attrs (asset shortName, asset-project status, asset_id,
+  reqCount) stale on untouched task rows — guarded upserts only rewrite
+  moved TASKS; TS19 alone had 9.5k stale project_status + 18k total
+  unexplained. Root cause proven via 3-way evidence (v1 vs v2 vs
+  stg_assets_inc vs raw): renames/status flips from before rows' last task
+  touch.
+- **Fix shipped same session**: migration 185 (applied; stg_assets_inc +
+  asset_short_name/asset_status — the exact values task rows denormalize)
+  + swift-data-platform draft PR #2: UPSERT_ASSET writes+guards the new
+  cols; SYNC_TASK_ATTRS (guarded, project-scoped bulk UPDATE) at the end
+  of every walk; attr_syncs stat; 23 tests green (4 new pin the SQL
+  contract). **Live-verified: healed 20,473 rows; audit UNEXPLAINED
+  collapsed 375/1,897/18,078 → 1/13/437** — residue is v1-hourly-lag
+  timing skew that self-corrects. Decision: gate stays strict; cutover
+  judged on consecutive quiet-window (05:20) nightly PASSes.
+
+**Session finale (same day):**
+- **Revenue worksheet BUILT**: out/revenue_recovery_worksheet_2026-07-20.csv
+  (local-only). 146 billable dropped tasks triaged via Invoiced-twin tasks
+  in v2's table (v1 can't audit its own blind spot): **92 LIKELY_NEVER_BILLED
+  (51×2025 + 41×2026)**, 52 POSSIBLY_BILLED_LATER_INVOICE_ON_ASSET, 2 under
+  base task. Spot-check found Complete↔Invoiced families don't share base
+  names reliably → every row carries full per-asset invoice evidence +
+  reviewer_decision/notes columns, sorted worst-first. Jamil hands to
+  finance; review gates C4.
+- **Both PRs MERGED by Jamil's instruction and verified**: swift-data-platform
+  #2 (attr-heal — merge auto-deployed via Phase 8, listener re-subscribed
+  09:21Z on the new revision) and local-pipeline #13 (doctrine gate — live
+  for tonight's 05:20 run). swift-data-platform local checkout synced;
+  **local-pipeline main has Jamil's unpushed 7bd45b3 (timer_correction_review
+  fix) diverged from origin — he should `git pull --rebase` + push.**
+- **Expansion question answered** (Jamil: can v2 match current volume?):
+  yes, trivially — the other 4 projects are TS13–16 (~1.5M rows). TS16
+  still ACTIVE (last submission 07-15, accumulating the same unbilled-ad-hoc
+  exposure) → add first; TS13–15 dormant → fold into the ref_sync_projects
+  config-table build after the pilot streak. Walk self-baselines new
+  projects; reconcile grows ~80s → ~4-5 min; audit default list must
+  extend when projects are added ('all13' option exists).
+
+**NEXT SESSION (agreed): open with tonight's 05:20 doctrine results**
+(query pipeline.inc_audit_results, notes LIKE 'DOCTRINE%') — expect PASS
+or near-PASS (residue was 1/13/437 pure v1-lag after the 20,473-row heal).
+Based on results: add TS16 (env var + baseline + audit list), keep
+collecting the streak, then C4 union view (19 readers; inc for pilot DIDs,
+current for the rest) once finance review lands. Jamil still owes: triggers
+list, team's ideal downstream run times, worksheet handoff.
+
+## Session: 2026-07-20 (evening) — GCP Phase 9 DONE: alerts live — MILESTONE 3 BUILD COMPLETE (phases 0–9)
+
+Final phase, same day. The platform now tells us when it breaks — loudly OR
+silently.
+
+- **Design check first**: read the code for actual log strings before writing
+  filters. Found: success = `walk done in Xs` (listener) / `done in Xs`
+  (reconcile — DIFFERENT string), crash = `walk crashed`, plus
+  `listener thread for X died` which the runbook's draft filter would have
+  MISSED. Lesson: alert filters are contracts with log lines — verify against
+  code, not memory.
+- **Key design decision**: the heartbeat for the absence alert is the
+  RECONCILE, not the listener — listener silence is legitimate (quiet
+  weekend = no events = no walks = false 3am alarms); the reconcile runs
+  hourly no matter what, so its silence always means breakage.
+- **Built** (Jamil in Console for metrics — Preview-logs validated the
+  heartbeat filter against real lines; agent via Monitoring REST API for
+  policies after the Console wizard fought back twice: metric picker hides
+  data-less metrics [workaround: Log-based Metrics → ⋮ → Create alert from
+  metric], then the rolling-window-function dropdown refused all input):
+  - metrics `swift_sync_errors` (severity>=ERROR, listener OR reconcile job)
+    and `swift_sync_reconcile_heartbeat` (`done in` lines from the job)
+  - email channel (jamil.mendez@ontel.co)
+  - policy "swift-sync: pipeline error" — threshold >0, 5-min sum, 2
+    conditions (cloud_run_revision + cloud_run_job), runbook-style docs in
+    the alert body
+  - policy "swift-sync: reconcile heartbeat missing" — **metric absence 3 h**
+    (dead-man's switch), remediation steps in the alert body
+  - JSON policy definitions preserved in the session job tmp
+- **Verified end-to-end**: heartbeat metric ticked at 04:51:59 UTC right
+  after the 04:50 scheduled reconcile → absence alert ARMED. Both policies
+  enabled with the email channel attached (confirmed via API list).
+
+**MILESTONE 3 GCP BUILD: phases 0–9 ALL COMPLETE (2026-07-14 → 2026-07-20).**
+End state: event-driven sync ~20 s freshness · hourly reconcile self-correction
+· nightly strict audit · merge-to-main auto-deploy via WIF, zero stored keys ·
+alerts for loud AND silent failure. Cost line: pilot ~$45–60/mo as planned.
+
+**NEXT (queue, Jamil's priority call):** (1) audit-doctrine decision +
+revenue-recovery review of the 146 billable rows (manual, URGENT); (2) v1→v2
+cutover per project after audit parity (v1 hourly then retires per pipeline);
+(3) milestone 4: `reference.ref_sync_projects` discovery table + nightly
+discovery-diff alert; (4) then widen beyond TS17–19 / GC scale plan.
+
+## Session: 2026-07-20 (later) — GCP Phase 8 DONE: OIDC deploys live, merge-to-main = deploy
+
+Same session continued after Phase 7. WIF reference material added to vault
+first (Console visual path + "where every value comes from" three-bucket
+guide) at Jamil's request — he's a visual learner.
+
+- **Setup (chunks 1–4)**: WIF pool `github` + provider `github-oidc` (issuer
+  token.actions.githubusercontent.com, condition pins repo), `github-deployer`
+  SA (run.developer + artifactregistry.writer + cloudbuild.editor project-level
+  — scope fits need; Console's "Cloud Build Editor" = cloudbuild.editor, a
+  near-twin of the runbook's cloudbuild.builds.editor, verified adequate via
+  roles describe), actAs on swift-sync-runtime, principalSet bridge, 2 GitHub
+  repo VARIABLES. Jamil: chunk 1 CLI, rest Console. All verified via gcloud.
+- **First deploy run: five distinct root causes behind ONE unchanging error**
+  ("forbidden from accessing the bucket … serviceusage.services.use"):
+  (1) missing serviceUsageConsumer (project); (2) objectAdmin has NO
+  buckets.get → +legacyBucketReader on gs://…_cloudbuild; (3) default-bucket
+  ownership check needs project-wide buckets.list → `--gcs-source-staging-dir`
+  skips it (privilege avoided, not granted); (4) build RUNS AS default compute
+  SA → third actAs grant of the project; (5) log streaming requires project
+  Viewer, `--suppress-logs` insufficient → `--async` + poll builds describe.
+- **Debugging toolkit used** (now a vault pattern note "Debugging IAM
+  failures"): roles describe to read actual permissions; impersonation
+  (temp TokenCreator grant, removed after); `gcloud policy-troubleshoot iam`
+  (said GRANTED while CLI failed → context clue); diagnostic branch printing
+  identity + raw curl error body (proved raw GET worked → gcloud-internal
+  check was the failer); IAM propagation patience (a grant "broken" at 60 s
+  worked at 10 min).
+- **Shipped**: branch `wif-debug` → PR #1 (fix: staging-dir + async-poll;
+  runbook Phase 8 addendum with the 3 extra grants). Jamil merged → the merge
+  push itself triggered the first fully automatic deploy: build → push →
+  listener revision 00003 → reconcile job image updated, zero stored keys,
+  listener re-subscribed to 3 channels in seconds. Local checkout
+  fast-forwarded; debug branch deleted both ends.
+- Vault: journal extended (Phase 8 safari), new pattern note, hub Phase 8 ✅.
+
+**NEXT: Phase 9 — log-based alerts (FINAL phase):** runbook has the
+walk-crash log metric command; design alerts for (a) walk crash, (b)
+staleness (no listener walk in N hours while channels active — catches dead
+listener), (c) reconcile-job failure, (d) later at milestone 4: the
+project-discovery diff alert. Alert policies quicker in Console per runbook.
+Then milestone 3 GCP build is COMPLETE; remaining queue: audit-doctrine
+decision + revenue-recovery review (146 billable rows, urgent, manual),
+v1→v2 cutover after audit parity, milestone-4 discovery table.
+
+## Session: 2026-07-20 — GCP Phase 7 DONE: listener LIVE, event-driven sync proven by real users
+
+Guided format as before. Milestone 3's core promise delivered this session.
+
+- **Phase 7 deployed via Console** (Jamil's choice over CLI): service
+  `swift-sync-listener`, image `swift-sync:v0.2.0` by digest, min=max=1,
+  **Billing: Instance-based** (the renamed "CPU always allocated" — Jamil
+  couldn't find step 5 until the new label was mapped; gotcha in vault),
+  require auth, 512Mi, same runtime SA + 3 secret refs + SYNC_PROJECT_DIDS,
+  container command EMPTY (image default CMD is the listener). Verified via
+  gcloud: `cpu-throttling: 'false'`, minScale/maxScale '1', empty service IAM
+  policy (no public access), logs: health stub on :8080 → probe OK →
+  "Listening on 3 project channels" → auth (tokens 4320 min) → 3 subscribed.
+- **Demo ran itself — organic prod traffic** (Jamil declined synthetic changes
+  in production; right call). Within 8 min of deploy: two CHANGE events on
+  TS19's channel → 60 s debounce → walks (19–21 s, 5,044 assets, 2–5 visited)
+  → 9 + 2 rows in `stg_asset_tasks_inc` ~20 s after debounce, proven by
+  `loaded_at`. Same query showed reconcile batches (00:50, 01:50 — Phase 6
+  Scheduler firing autonomously, confirmed) carrying changes up to **58 min
+  stale** vs the listener's **seconds**. Bonus: a walk swept up a straggler
+  row from the previous day — guarded upserts converging as designed.
+- Freshness end-to-end: Swift click → Supabase in ~80 s (60 s of that is the
+  deliberate debounce). Always-on cost line (~$40–50/mo) now active.
+- Vault updated + pushed: journal `2026-07-20 — The listener goes live, real
+  users run the demo`; `Cloud Run services vs jobs` concept note's service
+  half filled (three viability settings, two silent-fail); hub Phase 7 ✅;
+  project log. Project memory advanced to Phase 8.
+- Date note: local clock disagreed; GCP + DB timestamps and Jamil confirm
+  2026-07-20.
+
+**NEXT: Phase 8 — OIDC deploys from GitHub** (WIF pool `github` + provider
+`github-oidc` pinned to jamilmendez-ontel/swift-data-platform; `github-deployer`
+SA with run.developer + artifactregistry.writer + cloudbuild.builds.editor +
+serviceAccountUser on swift-sync-runtime; principalSet binding; repo vars
+GCP_WIF_PROVIDER/GCP_PROJECT_ID activate deploy.yml; PROJECT_NUMBER=449812402892).
+Runbook Phase 8 has all commands (bash — adapt to PowerShell). Then Phase 9
+alerts (staleness + milestone-4 discovery-diff).
+
+## Session: 2026-07-16 — GCP Phase 6 DONE (reconcile autonomous); Phase 7 instructed, deploy pending
+
+Same guided format (Jamil drives, What/Why per step, agent verifies via gcloud).
+
+- **Phase 6 COMPLETE, verified via gcloud**: `scheduler-invoker` SA created with
+  **zero project roles** (least-privilege right on the first pass this time);
+  single `roles/run.invoker` binding granted ON the job resource (checkbox →
+  info panel, not the IAM page) — project IAM filter for the SA returns empty,
+  job policy shows exactly one binding. Cloud Scheduler job
+  `swift-sync-reconcile-hourly`: cron `50 * * * *` UTC (offset from v1's :20),
+  POST to the jobs:run Admin API URL, **OAuth** token as scheduler-invoker
+  (OAuth because target is a `*.googleapis.com` API; OIDC is for our own URLs —
+  new vault concept note). Force run: Scheduler attempt 09:25:58Z → execution
+  `swift-sync-reconcile-zns49` completed 09:27:19Z, SUCCEEDED=1 (~81 s). The
+  reconcile leg is now fully autonomous. Cosmetic leftover: Scheduler job
+  description contains a pasted tutorial paragraph — suggest one operator line.
+- **Jamil asked why the hourly survives the listener** → taught the three-layer
+  model: listener = freshness (~1–2 min), hourly reconcile = consistency
+  (bounds a missed event to ≤1 h; near-free via guarded upserts), nightly
+  audit = proof. Anti-entropy: relax later maybe, never delete. Captured in
+  vault journal 2026-07-16.
+- **Phase 7 STARTED — NOT deployed yet.** Preconditions verified: image default
+  CMD is the listener (`python -m swift_sync.listen`; the job works because it
+  overrides to `walk_once`), health stub answers $PORT. Full deploy
+  instructions delivered twice — CLI (`gcloud run deploy swift-sync-listener`,
+  runbook Phase 7) and Console version at Jamil's request. Critical flags
+  explained: **CPU always allocated** (default request-only throttling would
+  silently starve the SSE listener), min=max=1, require auth, same runtime SA +
+  secrets as the job, container command left empty, SYNC_PROJECT_DIDS pinned.
+  Cost note given: this step turns on the always-on ~$40–50/mo line.
+- **Jamil raised the pinned-project-list problem** (TS20 will appear someday;
+  env var is a silent blind spot). Decision: pinned list is CORRECT for the
+  shadow pilot (explicit scope during per-project cutover); production answer
+  recorded as milestone-4 item = `reference.ref_sync_projects` config table
+  (INSERT, not redeploy) + nightly discovery-diff alert vs Swift's actual
+  project list (Phase 9). Rejected: pure auto-discovery (no control), pure
+  redeploys (humans forget). Logged in project memory.
+- Vault updated + pushed: journal `2026-07-16 — Scheduler, and why the timer
+  survives the listener`, new concept `OAuth vs OIDC tokens in GCP`, hub
+  progress line (Phase 6 ✅), swift-data-platform project log.
+
+**NEXT SESSION — resume Phase 7 (Jamil will deploy via Console):** re-give the
+Console steps (Deploy container → image `swift-sync:v0.2.0` → name
+`swift-sync-listener`, asia-southeast1, require auth, **CPU always allocated**,
+min/max instances 1/1, 512Mi, env SYNC_PROJECT_DIDS + 3 secret refs, SA
+swift-sync-runtime, command EMPTY, port 8080). Then agent verifies: service
+config (the two silent-fail settings: CPU allocation + min instances), logs
+show health stub + "3 project channels" subscribed, then LIVE DEMO — Jamil
+touches an asset in Swift, watch the walk fire and the row land in
+`stg_asset_tasks_inc` with no cron involved. Then Phase 8 (OIDC deploys, CLI
+per runbook), Phase 9 (log alerts incl. staleness + the discovery-diff alert).
+
+## Session: 2026-07-14 — GCP guided build: phases 0–5 DONE, pipeline ran green in the cloud
+
+Jamil drove every step in the Console (teaching mode, What/Why per step — now a
+standing memory rule); agent verified each phase via gcloud. All on project
+`ontel-data-platform` (org ontel.co), region asia-southeast1.
+
+- **Phase 0–1**: SDK 575.0.1 installed; auth as jamil.mendez@ontel.co; project
+  created org-parented; billing = company account `003EF0-AA40F3-4B4F1F` linked
+  by the admin (NOT Jamil's trial — he can't view the account; that's fine,
+  only `billingEnabled: true` matters). Ask pending: trial-or-paid? + Billing
+  Account Viewer for Jamil.
+- **Phase 2**: six APIs enabled (run, artifactregistry, secretmanager,
+  cloudscheduler, cloudbuild, iamcredentials) + auto-deps.
+- **Phase 3**: Artifact Registry `images` repo; first Cloud Build: 43 s,
+  `swift-sync:v0.2.0`, digest `a4d97…` (56 MB).
+- **Phase 4**: secrets swift-email/swift-password/supabase-password; runtime SA
+  `swift-sync-runtime`. **Teaching gold**: first grant accidentally landed at
+  PROJECT level (works silently, over-broad) — diagnosed via empty per-secret
+  policies + project IAM filter; fixed to per-secret grants. IAM-inheritance
+  lesson captured in the vault journal.
+- **Phase 5**: reconcile job deployed via Console (image by digest, SA set, 3
+  secret env refs + SYNC_PROJECT_DIDS, 512Mi/1800s/1 retry) and ran GREEN:
+  auth OK, 3 projects walked (~15k assets), 2 changed rows written — verified
+  in stg_asset_tasks_inc to the second (10:08:49 UTC). Job recreated as
+  `swift-sync-reconcile` (jobs can't be renamed; naming is load-bearing), old
+  `swift-sync` deleted. Cloud run was FASTER than local (~70 s vs 124 s).
+- **Learning journal created** (Jamil's request): vault `Learning/GCP/` — hub +
+  Journal/Concepts/Patterns (14 notes seeded, stubs fill per phase). Standing
+  memory: maintain it every session; every step gets What/Why.
+
+**NEXT SESSION — Phase 6 (instructions to be re-given, Jamil hasn't started):**
+(1) create `scheduler-invoker` SA (no project roles); (2) grant Cloud Run
+Invoker ON the job (checkbox → info panel, not IAM page); (3) Scheduler job
+`swift-sync-reconcile-hourly`, cron `50 * * * *` UTC (offset from v1's :20),
+HTTP POST to
+`https://asia-southeast1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/ontel-data-platform/jobs/swift-sync-reconcile:run`
+with OAuth token as scheduler-invoker; (4) Force run + verify execution.
+Then Phase 7 (listener service — event-driven goes live), 8 (OIDC deploys,
+CLI-recommended), 9 (log-based alerts incl. staleness).
+
+## Session: 2026-07-13 — Export data-loss ROOT CAUSE: `_export` returns the task-template matrix only
+
+### Root cause proven (queue item 1 from 2026-07-12)
+Swift's `/assets/_export` does not export task *instances* — it exports the project's
+**task-template matrix** (every template task name × every asset) and nothing else. Tasks
+added ad hoc to a single asset (repeat revision/rejection rounds: "15B. COP Rejections
+Reviewed 2/3/…", "4B. LL COP Revision Complete 2", …) are structurally invisible.
+- Exact math: TS18 = 78 names × 5,481 assets = 427,518 rows_current **exactly**; TS19 =
+  76 × 4,847 = 368,372 **exactly** (TS17 close, template evolved over time).
+- 100% class exclusion: every dropped task *name* has 0 instances in current project-wide
+  and all of them in the shadow — not row-level drops.
+- Not our transform (all dropped task DIDs absent from `data_raw` — API never sent them);
+  not pagination (page-seam hypothesis tested and refuted: 6/40 vs 7.5% base rate).
+- Ghost-asset defect fits the same model: asset left the hierarchy but stays in the
+  export's asset set, so its template rows keep being emitted.
+
+### Impact
+295 real tasks missing across the 3 pilot projects; **146 match the billable filter of
+`analytics.v_weekly_invoice_billable_tasks`** (68 approved in 2026) → approved billable
+revision rounds that never reached the weekly invoice worklist. 16 downstream objects
+read `stg_asset_tasks`. Defect affects ALL `_export`-fed projects, not just the pilot.
+
+### Deliverables
+- `docs/2026-07-13-swift-export-data-loss-root-cause.md` — full evidence + recommendations
+- `out/export_dropped_tasks_2026-07-13.csv` (local-only) — all 295 rows, billable-flagged
+- Audit-doctrine consequence: hash equality vs current is mathematically impossible;
+  recommend asserting `current ⊆ shadow` + the two documented defect classes instead.
+  Doctrine/cutover/vendor-report decisions remain Jamil's (queue item 2).
+
+### Freshness spike (same session): event-driven sync is PROVEN — Firebase RTDB channels
+Phase-3 roadmap steps 1+2 executed (`swift_api_pipeline/spike_freshness.py`, committed):
+- **Spike A (REST delta) DEAD**: no ETag header (no 304s); `updatedSince`/`sort`
+  params silently ignored. REST cannot cheapen change discovery.
+- **Spike B (Firebase) WON**: the `firebaseToken` from our normal auth call (Auth0 JWT,
+  72 h TTL, no exchange needed) reads Swift's RTDB at `swift-projects.firebaseio.com`.
+  Jamil captured the app's WS frames (AngularFire) → schema mapped by probing with
+  known DIDs: `/asset-tasks/{taskDid}` = full live task instance;
+  `/asset-projects/{assetDid}{projectDid}` composite key = the old-format composite
+  asset_did (remap mystery explained); `…-meta/{id}/channels/data` = epoch-ms
+  cache-invalidation leaves.
+- **Validated change signal**: `/projects-meta/{P}/channels/data` bumps ≤1 min after
+  ANY project activity (checked against 3 recently-active assets) and streams over
+  SSE (live test: put at +0.6 s, 30 s keep-alives, idle-free).
+- **Listener design locked**: 3 SSE subs (one per project) → debounce → per-project
+  inc walk → guarded upserts; hourly reconcile + nightly strict audit stay as safety
+  net. ~1-2 min Swift→Supabase freshness at zero quiet cost.
+- Full evidence + node access table: `docs/spikes/2026-07-13-freshness-spike-etag-firebase.md`.
+
+### v2 platform repo CREATED (same session, after Jamil's go): `swift-data-platform`
+Private repo `jamilmendez-ontel/swift-data-platform` scaffolded and pushed; CI green.
+- src-layout package `swift_sync`: config (env-driven), auth (shared token cache,
+  JWT-exp-aware refresh), rtdb (SSE channel listener with reconnect/re-auth),
+  debounce, listen entrypoint. 11 offline unit tests, Dockerfile, GHA CI, ADRs
+  0001 (separate repo) + 0002 (RTDB channels listener).
+- **Milestone 1 smoke-tested live**: 3 project-channel subscriptions up in ~3 s on one
+  shared auth; quiet channels = zero traffic (30 s keep-alives only).
+- Gotcha captured in code: `iter_lines` default 512-byte buffering starves low-traffic
+  SSE streams — `chunk_size=1` required (verified live twice).
+- **Milestone 2 SHIPPED same session**: walk ported (fields/swift_api/db/walk +
+  walk_once CLI; psycopg3 tx-pooler pool replaces the 400-line asyncpg bridge;
+  guarded-upsert SQL and reconcile semantics preserved verbatim; 19 tests, CI green).
+  Listener now runs real per-project walks (in-flight guard, --dry-run mode).
+  **Live-verified**: TS19 walk = 4,859 assets / 2 visited / 37 task writes in 124 s,
+  row-for-row confirmed in stg_asset_tasks_inc (12:39 UTC). v2 and v1 hourly write
+  the same shadow tables with the same idempotent guards — v1 doubles as reconcile
+  until cutover.
+- Next: Cloud Run (Artifact Registry, listener service min-instances=1, reconcile
+  job, Secret Manager, Scheduler, OIDC deploys); live end-to-end demo (Swift click →
+  Supabase row) with Jamil watching.
+
+### Milestone 3 in progress: guided GCP build (Jamil driving, Console-first)
+- Prep shipped to swift-data-platform: `infra/setup.md` (9-phase gcloud runbook with
+  ACE notes + per-phase verify steps), `.github/workflows/deploy.yml` (WIF/OIDC,
+  dormant until repo vars set), listener health stub for Cloud Run's $PORT probe.
+- Google Cloud SDK 575.0.1 installed (winget); Jamil authenticated as
+  jamil.mendez@ontel.co. Teaching mode agreed: Jamil clicks each phase in the
+  Console, agent verifies from CLI after each phase.
+- **Discovered**: ontel.co GCP org exists (id 1089071409905) with ~10 projects;
+  active company billing account `01B47E-5BAE30-EEB7E8` (funds aitf-tools) that
+  Jamil cannot list/link — lacks Billing Account User on it.
+- **Decision (Jamil)**: proceed on his own free-trial billing ($300/90d, eligible),
+  project parented under the ontel.co org, switch to company billing when the
+  admin grants access (re-link is zero-downtime). Request to admin sent in parallel.
+- **Cost analysis corrected + communicated**: pilot ~$45–60/mo (listener at 1 vCPU
+  always-on is ~$40–50 — earlier "$10–15" was wrong, that's VM pricing); full
+  end-state incl. GC ~$70–120/mo. GC 20M rows: architecture unchanged (one
+  listener), one-time parallel baseline job ($10–30), but history must NOT live
+  hot in Supabase (IO pressure, compute-upgrade trap) — hot/cold split with
+  BigQuery/Parquet attic (~$1–5/mo); Supabase stays the team's main database.
+- Status at log time: waiting on Jamil creating project `ontel-data-platform`
+  (org-parented) + trial billing link in the Console; then Phase 2 (enable APIs).
+
+### Direction decided earlier same session: new repo for the v2 platform
+Build the event-driven system in a fresh sibling repo (working name
+`swift-data-platform`): proper package layout (`src/swift_sync/`), tests, Dockerfile,
+OIDC deploys, Cloud Run service (listener, min-instances=1) + Job (reconcile/audit).
+Port (don't copy) proven walk/upsert logic. Old repo stays authoritative until per-
+pipeline cutover, audited the same way the shadow was. DB schema = the contract
+between repos. This doubles as the template for the full-system restructure.
+
+
+## Session: 2026-07-12 — Shadow audit finds PRODUCTION data loss; remap complete
+
+### Major finding: the persistent audit drift is the CURRENT pipeline's, not the shadow's
+The mismatches that survived multiple nightly reloads decompose into two production-side defects, verified live against Swift:
+- **`_export` silently drops real tasks**: ~99 (TS18) / ~54 (TS19) / ~142 (TS17) tasks that exist in Swift right now — mostly **approved tasks under in_progress assets** (revenue-relevant rows) — never land in `stg_asset_tasks`, reload after reload. The shadow's hierarchy walk sees them all.
+- **`_export` emits tasks of hierarchy-absent assets**: TS17's 154 missing-in-shadow rows trace to asset `-OOgqCUgxootyP0k2sVU`, absent from the project's asset list (deleted/moved); the shadow reconciled it away correctly, the export still produces its 77+ tasks nightly.
+- Consequence: `stg_asset_tasks` ≠ Swift truth, so the strict gate cannot go green while the audit treats current as the baseline. **Doctrine decision needed (Jamil)**: verify shadow against Swift directly (spot-fetch), or exclude the documented known-gap sets.
+
+### Remap complete + verified
+The 2026-07-10 export-semantics remap (asset_did/asset_name/project_status) finished after the interrupted pass was relaunched: **0 of 1,188,135 rows** left in old format (v6 run: 47.4 min, 3 clean walks). Post-remap audit shows those column diffs GONE.
+
+### New narrow pattern (next session)
+A handful of rows where current has `task_submitted/approved/cancelled_by_did` but the shadow has NULL **while name+email match**; the same person ids recur (`-OYZRYEENpsf-sg65SrI`, `-Of02VUB57n2UPgYVQGn`) — likely the personnel ALIAS mechanism (export resolves alias→canonical did; hierarchy API record carries no id).
+
+### Next-session queue (agreed)
+1. Export data-loss investigation (production impact today) 2. Audit-doctrine decision 3. Cloud Run Jobs migration (ACE-aligned, "proper way": Artifact Registry + OIDC + Secret Manager + Cloud Scheduler, asia-southeast1) 4. Alias-did pattern.
+
 ## Session: 2026-07-10 — Incremental asset-tasks shadow: Tasks 6–9 shipped, pilot LIVE on hourly cadence
 
 ### What shipped (PRs #9, #10 + hourly-cadence commit, all merged to main)
