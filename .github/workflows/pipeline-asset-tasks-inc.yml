@@ -80,9 +80,16 @@ jobs:
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             MODE="incremental"
             PROJECTS=""
-            # Any scheduled run in UTC hour 05 is the post-nightly gate
-            # (see the cron comments above): audit mismatch = real bug.
-            if [ "$(date -u +%H)" = "05" ]; then STRICT="true"; fi
+            # The post-nightly gate. GHA's hour-05 cron has never actually
+            # fired (zero hour-05 runs in the first 10 days of history):
+            # under queue pressure GHA coalesces it into the hourly cron's
+            # delayed ~06:2x-06:45 firing, which then resolved hour 06 and
+            # ran non-strict — so the strict gate never armed. Treat any
+            # scheduled run in UTC hour 05 OR 06 as the gate; both sit in
+            # the quiet window after the ~04:50-05:05 UTC reload burst,
+            # and a rare double-gate night is harmless.
+            H="$(date -u +%H)"
+            if [ "$H" = "05" ] || [ "$H" = "06" ]; then STRICT="true"; fi
           else
             MODE="${{ github.event.client_payload.mode }}"
             PROJECTS="${{ github.event.client_payload.projects }}"
@@ -137,15 +144,20 @@ jobs:
           echo "Running: extract_asset_tasks_inc.py $FLAGS"
           python -u extract_asset_tasks_inc.py $FLAGS
 
-      # The audit is the point of the pilot, and every result persists to
-      # pipeline.inc_audit_results. But between nightly reloads the shadow
-      # is FRESHER than stg_asset_tasks, so a mid-day mismatch is expected
-      # churn, not a bug — failing every daytime run would train everyone
-      # to ignore red. Default: informational (summary + table). The
-      # post-nightly gate run dispatches with strict_audit=true, where a
-      # mismatch IS the signal and fails the run.
+      # The audit is the pilot's evidence, and every result persists to
+      # pipeline.inc_audit_results — but it is not free: the doctrine
+      # audit reads ~6-9 GB per run (hash + EXCEPT + full-width column
+      # classify over ~1.2M rows x 3 projects, measured 2026-07-21), so
+      # auditing every scheduled walk burned ~60-90 GB/day of Disk IO
+      # Budget (part of the 2026-07-20 depletion). Daytime audits also
+      # only ever showed v1-lag timing skew (the shadow is FRESHER than
+      # stg_asset_tasks between reloads) — noise, not evidence; the
+      # cutover PASS streak is judged on the gate run alone. Scheduled
+      # runs therefore audit ONLY on the strict gate run; manual and
+      # repository dispatches still audit every time.
       - name: Drift audit vs current pipeline
         id: audit
+        if: github.event_name != 'schedule' || steps.resolve.outputs.strict_audit == 'true'
         continue-on-error: ${{ steps.resolve.outputs.strict_audit != 'true' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
@@ -156,7 +168,7 @@ jobs:
           python -u audit_asset_tasks_inc.py $FLAGS
 
       - name: Audit summary
-        if: always()
+        if: always() && steps.audit.outcome != 'skipped'
         run: |
           if [ "${{ steps.audit.outcome }}" = "success" ]; then
             echo "### ✅ Drift audit: MATCH — shadow == stg_asset_tasks" >> $GITHUB_STEP_SUMMARY
