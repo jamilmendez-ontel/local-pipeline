@@ -53,14 +53,34 @@ jobs:
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
           echo "${{ secrets.CALENDAR_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/calendar_token.pickle
 
-      - name: Run calendar events (with retry)
+      # Retry in-job on transient failures (usually a Supabase pooler connect
+      # timeout). Backoff before attempts 2..N gives a short blip time to clear
+      # instead of hammering the same bad window. If all attempts fail, the run
+      # fails and the companion auto-rerun workflow re-runs it after a delay.
+      - name: Run calendar events (with retries + backoff)
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
-          python -u extract_calendar_events.py || {
-            echo "Calendar events failed, retrying after 2 minutes..."
-            sleep 120
+          set +e
+          max_attempts=4
+          backoff=(0 30 120 300)   # seconds to wait before attempts 1..4
+          for attempt in $(seq 1 $max_attempts); do
+            wait=${backoff[$((attempt - 1))]}
+            if [ "$wait" -gt 0 ]; then
+              echo "Attempt $attempt/$max_attempts: waiting ${wait}s before retry..."
+              sleep "$wait"
+            fi
+            echo "::group::Calendar events attempt $attempt/$max_attempts"
             python -u extract_calendar_events.py
-          }
+            code=$?
+            echo "::endgroup::"
+            if [ "$code" -eq 0 ]; then
+              echo "Calendar events succeeded on attempt $attempt."
+              exit 0
+            fi
+            echo "Attempt $attempt failed with exit code $code."
+          done
+          echo "All $max_attempts attempts failed."
+          exit 1
 
       - name: Upload logs on failure
         if: failure()
