@@ -220,7 +220,9 @@ function setupCalendarEventsTriggers() {
  * Fires downstream dispatches at end-of-run:
  *   - pipeline-asset-tasks-export (same-repo)
  *   - date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
- *   - weekly-compliance-audit (cross-repo, Fridays only, same PAT)
+ *   - weekly-compliance-audit (cross-repo, daily, same PAT; report-automation
+ *     itself gates the Google Chat post to Fridays only, the email sends
+ *     every night)
  */
 function triggerAssetTasks() {
   fireDispatch_('pipeline-asset-tasks');
