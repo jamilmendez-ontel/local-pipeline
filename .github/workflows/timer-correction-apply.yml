@@ -6,8 +6,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: timer-correction-apply
-  # Queue subsequent runs instead of cancelling — each correction matters
+  # Shares the `pipeline-timer` group with pipeline-timer.yml so this workflow
+  # (which calls rebuild_timer_clean → TRUNCATE+reload of the clean table) can
+  # never run WHILE the timer pipeline is mid-reloading stg_timer_activities.
+  # That overlap could rebuild the clean table from a partial/empty dirty source
+  # and blank mv_timer_day_rollup. Queue, don't cancel — each correction matters.
+  group: pipeline-timer
   cancel-in-progress: false
 
 env:

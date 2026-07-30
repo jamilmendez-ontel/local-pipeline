@@ -1878,6 +1878,22 @@ def rebuild_clean_table(db):
     """Rebuild stg_timer_activities_clean via the database RPC."""
     now = datetime.now(timezone.utc)
     _reconcile_resolved_group_stragglers(db, now)
+    # Guard: rebuild_timer_clean() TRUNCATEs the clean table then re-inserts from
+    # stg_timer_activities. If the dirty source is empty (e.g. mid-reload, or a
+    # failed extract), rebuilding would leave the clean table empty -- which
+    # cascades into an empty mv_timer_day_rollup and blanks the HR dashboards
+    # (Hours Variance + DR Monitoring timer/variance). Refuse to rebuild from an
+    # empty source: keep the last good clean table; the next run rebuilds it.
+    dirty = retry_db(
+        lambda: db.fetchval(f"SELECT COUNT(*) FROM {SCHEMA_STAGING}.stg_timer_activities"),
+        description="count dirty timer table",
+    )
+    if not dirty:
+        logger.warning(
+            "stg_timer_activities is empty -- skipping clean rebuild to avoid "
+            "blanking stg_timer_activities_clean (would empty mv_timer_day_rollup)."
+        )
+        return
     logger.info("Rebuilding stg_timer_activities_clean...")
     retry_db(
         lambda: db.execute(f"SELECT {SCHEMA_STAGING}.rebuild_timer_clean()"),
