@@ -1259,8 +1259,10 @@ def refresh_analytics():
     # mv_timer_revenue: timer→revenue attribution (migration 211) — derives from
     # stg_timer_activities_clean + stg_assets + stg_asset_tasks, so it refreshes
     # with the core set after every load. ~10s CONCURRENTLY.
+    # mv_timer_revenue_daily (migration 214) reads FROM mv_timer_revenue, so it
+    # must stay listed after it. ~4s CONCURRENTLY.
     mvs = ["mv_project_summary", "mv_technician_stats", "mv_daily_completion",
-           "mv_timer_revenue"]
+           "mv_timer_revenue", "mv_timer_revenue_daily"]
     for mv in mvs:
         result = db.fetchrow(
             f'SELECT * FROM analytics.refresh_one_mv($1)',
