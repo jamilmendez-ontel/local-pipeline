@@ -496,29 +496,35 @@ def transform_assets(db, run_id: str):
 
 
 def enrich_stg_assets_with_status():
-    """Populate stg_assets.asset_status from data_raw.raw_assets.
+    """Populate stg_assets.asset_status + asset_identifier from data_raw.raw_assets.
 
     Called after extract_assets loads raw_assets. Idempotent -- only updates
-    rows whose status actually changed. Returns rows updated count.
+    rows where either value actually changed. Returns rows updated count.
+    asset_identifier is the Swift asset path (Site ID) -- the fine-market source
+    for reference.ref_market_bucket_crosswalk (migrations 209/210); stg_assets
+    is fully refreshed by transform_assets(), so this re-enrichment is what
+    keeps both columns populated.
     """
     db = get_db()
-    print(f"[{datetime.now():%H:%M:%S}] Enriching stg_assets.asset_status from raw_assets...")
+    print(f"[{datetime.now():%H:%M:%S}] Enriching stg_assets.asset_status + asset_identifier from raw_assets...")
 
     updated = db.fetchval(
         f'''
         WITH upd AS (
             UPDATE {SCHEMA_STAGING}.stg_assets s
-            SET asset_status = r.asset_status
+            SET asset_status = r.asset_status,
+                asset_identifier = r.asset_identifier
             FROM {SCHEMA_RAW}.raw_assets r
             WHERE s.project_did = r.project_did
               AND s.asset_did = r.asset_did
-              AND s.asset_status IS DISTINCT FROM r.asset_status
+              AND (s.asset_status IS DISTINCT FROM r.asset_status
+                   OR s.asset_identifier IS DISTINCT FROM r.asset_identifier)
             RETURNING 1
         )
         SELECT COUNT(*) FROM upd
         '''
     )
-    print(f"[{datetime.now():%H:%M:%S}] Enriched {updated:,} stg_assets rows with asset_status")
+    print(f"[{datetime.now():%H:%M:%S}] Enriched {updated:,} stg_assets rows with asset_status + asset_identifier")
     return updated
 
 
