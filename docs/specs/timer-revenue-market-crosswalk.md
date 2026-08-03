@@ -1,7 +1,40 @@
 # Timer → Revenue: Market Crosswalk Design
 
-**Status**: Design (verified against live DB 2026-08-02). Not yet implemented — no
-migration, no pipeline change.
+**Status**: IMPLEMENTED 2026-08-02 (design verified same day). Migration 209
+(`stg_assets.asset_identifier` + backfill, 35,292/35,319 rows populated), migration 210
+(`reference.market_signature()` + `reference.ref_market_bucket_crosswalk`, 1,204
+signatures seeded: 946 bucketed across all 14 markets, 258 EXCLUDED), and
+`enrich_stg_assets_with_status()` in transform.py now re-enriches `asset_identifier`
+alongside `asset_status` every assets extract (survives the full refresh).
+End-to-end verified: 98.8% of asset-linked timer rows resolve to a priced bucket via
+`stg_timer_activities → stg_assets.asset_identifier → market_signature() → crosswalk`.
+Serving-view caveat: `stg_assets` can repeat an `asset_did` across projects — use
+`DISTINCT ON (asset_did)` when joining from timers.
+**PHASE 2 IMPLEMENTED 2026-08-02 (same session): migration 211 `analytics.mv_timer_revenue`.**
+The LR-approval signal (workbook `Snapshot_LR`) resolved to: asset has a
+`stg_asset_tasks` row with `task_name_clean='Live Review Complete'` AND
+`task_status='approved'` (17,534 assets). The MV ports the col-69 Amount logic at
+(asset_did, task_clean, user_email) grain: `amount = bundled_rate × tech time-share`,
+FCOP absorbs the LR rate when LR unapproved, unapproved LR rows pay 0,
+`pricing_status` makes unpriceable rows observable (no_market / excluded_market /
+no_rate / lr_unapproved_zero). Materialized because the underlying query runs ~9s
+(plain view would hit the 8s PostgREST statement timeout — DRMC brownout lesson);
+refreshed CONCURRENTLY (~10s) via `analytics.refresh_one_mv('mv_timer_revenue')`,
+wired into `refresh_analytics()`'s core list in transform.py.
+Verified: 122,336 rows — 112,320 priced (~$7.55M across 20,367 assets), 8,402
+no_rate (overhead tasks not in the rate sheet), 1,423 no_market, 171 excluded, 20
+lr_unapproved_zero. Integrity: all 107,940 priced (asset,task) groups sum tech_share
+to 1.0 and payout exactly equals the bundled rate — no overcounting by construction.
+Remaining: ontel-people consumer UI, and the QA alert for new unseen signatures.
+
+**Migration 212 (2026-08-03, premerge finding):** the MV now sources `asset_identifier`
+from `data_raw.raw_assets` directly instead of `stg_assets`. The nightly full refresh of
+`stg_assets` runs BEFORE the assets-phase enrich, so an MV refresh landing in that window
+would have nulled all revenue. Reading raw makes the refresh order-independent;
+`stg_assets.asset_identifier` remains as the enriched convenience column.
+Known EXCLUDED misclassification (pending manual row, Jamil to confirm):
+`VZW/SBA/CAR-TN` — extra SBA segment pushes "NSB Macro" outside the 3-segment window;
+~134h of 2026 work should be `VZW Embedded / Macro`.
 **Context**: The timer→revenue feasibility (2026-07-31) found task-name joins to
 `reference.ref_task_revenue_rates` work (68.3%) but timer data had no fine market.
 The RevMetrics workbook (`local-pipeline/reference/revenue-metrics/README.md`) showed
