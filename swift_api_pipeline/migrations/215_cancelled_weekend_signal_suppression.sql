@@ -1,11 +1,12 @@
--- 214: Suppress late-clock-in and late-filing signals for cancelled DRs and for
+-- 215: Suppress late-clock-in and late-filing signals for cancelled DRs and for
 -- weekend work. Jamil 2026-08-03.
 -- Spec: ontel-people/docs/superpowers/specs/2026-08-03-cancelled-and-weekend-signal-suppression-design.md
 --
 -- Three rules. Two of them are defined here, once each:
 --   is_tardy (NEW)   clock_in_late_minutes > 30 AND not cancelled AND not Sat/Sun
 --   is_late_filing   gains AND not cancelled
--- The third (reminder eligibility) lives in ontel-people migration 028.
+-- The third (reminder eligibility) lives in ontel-people migration 029
+-- (originally 028; renamed 2026-08-03, see below).
 --
 -- Weekend affects is_tardy ONLY. A Saturday report is still owed, so late FILING
 -- on weekend work stays a live signal. Only the clock-in-vs-roster-shift
@@ -23,6 +24,13 @@
 -- NEVER DROP analytics.mv_hr_report_review.
 --
 -- Rollback is at the bottom of this file.
+--
+-- Renumbered 214 -> 215 on 2026-08-03: another session applied
+-- 214_mv_timer_revenue_daily.sql to the warehouse four minutes after this one, so
+-- this file was renamed to the next free number to resolve the file-naming
+-- collision. Already applied to the database under the original name; the
+-- Supabase migration registry still holds the row as "214" for history. Nothing
+-- was re-applied.
 
 -- ---------------------------------------------------------------------------
 -- 1. v_hr_report_review: redefine is_late_filing in place, append is_tardy last.
@@ -80,7 +88,7 @@ SELECT
 FROM analytics.mv_hr_report_review m;
 
 COMMENT ON VIEW analytics.v_hr_report_review IS
-  'HR daily-report review serving view over mv_hr_report_review. is_tardy is the single tardy verdict (grace 30m, excludes cancelled DRs and Sat/Sun work); is_late_filing excludes cancelled DRs. Migration 214.';
+  'HR daily-report review serving view over mv_hr_report_review. is_tardy is the single tardy verdict (grace 30m, excludes cancelled DRs and Sat/Sun work); is_late_filing excludes cancelled DRs. Migration 215.';
 
 -- ---------------------------------------------------------------------------
 -- 2. v_daily_report_approvals: append is_tardy so the DR Approval badge follows
@@ -108,7 +116,7 @@ BEGIN
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'analytics' AND table_name = 'v_daily_report_approvals' AND column_name = 'is_tardy'
   ) THEN
-    RAISE NOTICE '214: is_tardy already present on v_daily_report_approvals; skipping.';
+    RAISE NOTICE '215: is_tardy already present on v_daily_report_approvals; skipping.';
     RETURN;
   END IF;
 
@@ -119,7 +127,7 @@ BEGIN
   IF position('clock_in_late_minutes' IN body) = 0
      OR position('work_dow' IN body) = 0
      OR position('task_status' IN body) = 0 THEN
-    RAISE EXCEPTION '214: v_daily_report_approvals is missing an input column for is_tardy, aborting.';
+    RAISE EXCEPTION '215: v_daily_report_approvals is missing an input column for is_tardy, aborting.';
   END IF;
 
   EXECUTE 'CREATE OR REPLACE VIEW analytics.v_daily_report_approvals AS
@@ -148,14 +156,14 @@ BEGIN
     WHERE n.nspname = 'analytics' AND p.proname = fn;
 
     IF def IS NULL THEN
-      RAISE EXCEPTION '214: analytics.% not found, aborting.', fn;
+      RAISE EXCEPTION '215: analytics.% not found, aborting.', fn;
     END IF;
     IF position(repl IN def) > 0 THEN
-      RAISE NOTICE '214: analytics.% already uses is_tardy; skipping.', fn;
+      RAISE NOTICE '215: analytics.% already uses is_tardy; skipping.', fn;
       CONTINUE;
     END IF;
     IF position(anchor IN def) = 0 THEN
-      RAISE EXCEPTION '214: tardy anchor not found in analytics.%, aborting.', fn;
+      RAISE EXCEPTION '215: tardy anchor not found in analytics.%, aborting.', fn;
     END IF;
 
     EXECUTE replace(def, anchor, repl);
@@ -175,14 +183,14 @@ BEGIN
   WHERE n.nspname = 'analytics' AND p.proname = 'hr_infraction_months';
 
   IF def IS NULL THEN
-    RAISE EXCEPTION '214: analytics.hr_infraction_months not found, aborting.';
+    RAISE EXCEPTION '215: analytics.hr_infraction_months not found, aborting.';
   END IF;
   IF position(r_tardy IN def) > 0 THEN
-    RAISE NOTICE '214: hr_infraction_months already uses is_tardy; skipping.';
+    RAISE NOTICE '215: hr_infraction_months already uses is_tardy; skipping.';
     RETURN;
   END IF;
   IF position(a_file IN def) = 0 OR position(a_tardy IN def) = 0 THEN
-    RAISE EXCEPTION '214: infraction anchors not found in hr_infraction_months, aborting.';
+    RAISE EXCEPTION '215: infraction anchors not found in hr_infraction_months, aborting.';
   END IF;
 
   EXECUTE replace(replace(def, a_file, r_file), a_tardy, r_tardy);
@@ -199,14 +207,14 @@ BEGIN
   WHERE n.nspname = 'analytics' AND p.proname = 'hr_infraction_detail';
 
   IF def IS NULL THEN
-    RAISE EXCEPTION '214: analytics.hr_infraction_detail not found, aborting.';
+    RAISE EXCEPTION '215: analytics.hr_infraction_detail not found, aborting.';
   END IF;
   IF position(repl IN def) > 0 THEN
-    RAISE NOTICE '214: hr_infraction_detail already uses is_tardy; skipping.';
+    RAISE NOTICE '215: hr_infraction_detail already uses is_tardy; skipping.';
     RETURN;
   END IF;
   IF position(anchor IN def) = 0 THEN
-    RAISE EXCEPTION '214: tardiness anchor not found in hr_infraction_detail, aborting.';
+    RAISE EXCEPTION '215: tardiness anchor not found in hr_infraction_detail, aborting.';
   END IF;
 
   EXECUTE replace(def, anchor, repl);
