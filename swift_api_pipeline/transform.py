@@ -528,6 +528,36 @@ def enrich_stg_assets_with_status():
     return updated
 
 
+def seed_market_signatures():
+    """Auto-seed reference.ref_market_bucket_crosswalk with new market signatures.
+
+    Calls reference.seed_new_market_signatures() (migration 213): any signature
+    observed in raw_assets that the crosswalk doesn't know is inserted and
+    classified by the same rules that seeded the table. A newcomer that lands
+    EXCLUDED matched no rule — that's the only case needing a human, flagged
+    loudly here so it surfaces in the emailed pipeline log. Never raises: a
+    failure here must not block the assets pipeline.
+    """
+    db = get_db()
+    try:
+        rows = db.fetch('SELECT * FROM reference.seed_new_market_signatures()')
+    except Exception as e:
+        print(f"[{datetime.now():%H:%M:%S}] WARNING: market-signature auto-seed failed (non-fatal): {e}")
+        return 0
+    if not rows:
+        print(f"[{datetime.now():%H:%M:%S}] Market signatures: no new signatures (crosswalk current)")
+        return 0
+    for r in rows:
+        if r['market_bucket'] == 'EXCLUDED':
+            print(f"[{datetime.now():%H:%M:%S}] *** NEW MARKET SIGNATURE NEEDS REVIEW (auto-EXCLUDED): "
+                  f"{r['market_signature']} — timer revenue for these assets is unpriced until "
+                  f"ref_market_bucket_crosswalk is updated ***")
+        else:
+            print(f"[{datetime.now():%H:%M:%S}] New market signature auto-seeded: "
+                  f"{r['market_signature']} -> {r['market_bucket']}")
+    return len(rows)
+
+
 def run_assets_transform(run_id: str = None):
     """Run assets transformation only"""
     print(f"\n{'='*60}")
