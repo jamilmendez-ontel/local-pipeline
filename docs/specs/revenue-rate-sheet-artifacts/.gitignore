@@ -1,0 +1,3 @@
+# Keep the binary rate-sheet exports local; the README + migration SQL are the committed record.
+*.xlsx
+*.csv
