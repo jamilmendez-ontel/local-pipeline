@@ -1,7 +1,17 @@
 # Timer → Revenue: Market Crosswalk Design
 
-**Status**: Design (verified against live DB 2026-08-02). Not yet implemented — no
-migration, no pipeline change.
+**Status**: IMPLEMENTED 2026-08-02 (design verified same day). Migration 209
+(`stg_assets.asset_identifier` + backfill, 35,292/35,319 rows populated), migration 210
+(`reference.market_signature()` + `reference.ref_market_bucket_crosswalk`, 1,204
+signatures seeded: 946 bucketed across all 14 markets, 258 EXCLUDED), and
+`enrich_stg_assets_with_status()` in transform.py now re-enriches `asset_identifier`
+alongside `asset_status` every assets extract (survives the full refresh).
+End-to-end verified: 98.8% of asset-linked timer rows resolve to a priced bucket via
+`stg_timer_activities → stg_assets.asset_identifier → market_signature() → crosswalk`.
+Serving-view caveat: `stg_assets` can repeat an `asset_did` across projects — use
+`DISTINCT ON (asset_did)` when joining from timers.
+Remaining: phase 2 (Amount attribution — needs the LR-approval signal) and the
+serving view; see Open items.
 **Context**: The timer→revenue feasibility (2026-07-31) found task-name joins to
 `reference.ref_task_revenue_rates` work (68.3%) but timer data had no fine market.
 The RevMetrics workbook (`local-pipeline/reference/revenue-metrics/README.md`) showed
