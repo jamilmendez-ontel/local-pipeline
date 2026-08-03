@@ -10,8 +10,22 @@ End-to-end verified: 98.8% of asset-linked timer rows resolve to a priced bucket
 `stg_timer_activities → stg_assets.asset_identifier → market_signature() → crosswalk`.
 Serving-view caveat: `stg_assets` can repeat an `asset_did` across projects — use
 `DISTINCT ON (asset_did)` when joining from timers.
-Remaining: phase 2 (Amount attribution — needs the LR-approval signal) and the
-serving view; see Open items.
+**PHASE 2 IMPLEMENTED 2026-08-02 (same session): migration 211 `analytics.mv_timer_revenue`.**
+The LR-approval signal (workbook `Snapshot_LR`) resolved to: asset has a
+`stg_asset_tasks` row with `task_name_clean='Live Review Complete'` AND
+`task_status='approved'` (17,534 assets). The MV ports the col-69 Amount logic at
+(asset_did, task_clean, user_email) grain: `amount = bundled_rate × tech time-share`,
+FCOP absorbs the LR rate when LR unapproved, unapproved LR rows pay 0,
+`pricing_status` makes unpriceable rows observable (no_market / excluded_market /
+no_rate / lr_unapproved_zero). Materialized because the underlying query runs ~9s
+(plain view would hit the 8s PostgREST statement timeout — DRMC brownout lesson);
+refreshed CONCURRENTLY (~10s) via `analytics.refresh_one_mv('mv_timer_revenue')`,
+wired into `refresh_analytics()`'s core list in transform.py.
+Verified: 122,336 rows — 112,320 priced (~$7.55M across 20,367 assets), 8,402
+no_rate (overhead tasks not in the rate sheet), 1,423 no_market, 171 excluded, 20
+lr_unapproved_zero. Integrity: all 107,940 priced (asset,task) groups sum tech_share
+to 1.0 and payout exactly equals the bundled rate — no overcounting by construction.
+Remaining: ontel-people consumer UI, and the QA alert for new unseen signatures.
 **Context**: The timer→revenue feasibility (2026-07-31) found task-name joins to
 `reference.ref_task_revenue_rates` work (68.3%) but timer data had no fine market.
 The RevMetrics workbook (`local-pipeline/reference/revenue-metrics/README.md`) showed
