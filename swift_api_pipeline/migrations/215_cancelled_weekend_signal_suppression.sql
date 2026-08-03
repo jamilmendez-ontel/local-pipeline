@@ -231,6 +231,11 @@ NOTIFY pgrst, 'reload schema';
 
 -- ---------------------------------------------------------------------------
 -- ROLLBACK
+--   WARNING: rolling back the DB while the app is still deployed will 400 every
+--   DR Monitoring and DR Approval read, because the deployed app selects
+--   is_tardy in its PostgREST column lists and rollback DROPs that column.
+--   Rollback order is the inverse of rollout: revert the app first, THEN roll
+--   back the DB. Never roll back the DB first.
 --   1. Re-run migration 207's v_hr_report_review definition (restores
 --      is_late_filing and drops is_tardy). CREATE OR REPLACE cannot drop a
 --      column, so this needs DROP VIEW analytics.v_hr_report_review followed by
