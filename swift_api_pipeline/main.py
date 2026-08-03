@@ -352,7 +352,7 @@ def run_assets_pipeline():
     ~30-60s end-to-end for the 7 TECH-OPS TS13+ projects.
     """
     from extract_assets import run_assets_extract
-    from transform import enrich_stg_assets_with_status
+    from transform import enrich_stg_assets_with_status, seed_market_signatures
 
     logger.info(f"\n{'#'*60}")
     logger.info(f"# ASSETS EXTRACT + STATUS ENRICHMENT")
@@ -360,6 +360,7 @@ def run_assets_pipeline():
 
     run_assets_extract()
     enrich_stg_assets_with_status()
+    seed_market_signatures()
     return True
 
 
