@@ -26,6 +26,15 @@ no_rate (overhead tasks not in the rate sheet), 1,423 no_market, 171 excluded, 2
 lr_unapproved_zero. Integrity: all 107,940 priced (asset,task) groups sum tech_share
 to 1.0 and payout exactly equals the bundled rate — no overcounting by construction.
 Remaining: ontel-people consumer UI, and the QA alert for new unseen signatures.
+
+**Migration 212 (2026-08-03, premerge finding):** the MV now sources `asset_identifier`
+from `data_raw.raw_assets` directly instead of `stg_assets`. The nightly full refresh of
+`stg_assets` runs BEFORE the assets-phase enrich, so an MV refresh landing in that window
+would have nulled all revenue. Reading raw makes the refresh order-independent;
+`stg_assets.asset_identifier` remains as the enriched convenience column.
+Known EXCLUDED misclassification (pending manual row, Jamil to confirm):
+`VZW/SBA/CAR-TN` — extra SBA segment pushes "NSB Macro" outside the 3-segment window;
+~134h of 2026 work should be `VZW Embedded / Macro`.
 **Context**: The timer→revenue feasibility (2026-07-31) found task-name joins to
 `reference.ref_task_revenue_rates` work (68.3%) but timer data had no fine market.
 The RevMetrics workbook (`local-pipeline/reference/revenue-metrics/README.md`) showed

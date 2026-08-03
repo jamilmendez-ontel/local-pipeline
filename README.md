@@ -70,7 +70,9 @@ main.py
 │
 └── Post-Phase 2:
     ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
-    └── analytics.refresh_one_mv() × 3 (mv_project_summary, mv_technician_stats, mv_daily_completion)
+    └── analytics.refresh_one_mv() × 4 (mv_project_summary, mv_technician_stats, mv_daily_completion,
+        mv_timer_revenue — timer→revenue attribution, migrations 209-212: asset-path market crosswalk
+        + rate-sheet amounts split by tech time-share; see docs/specs/timer-revenue-market-crosswalk.md)
 ```
 
 ### Incremental asset-tasks shadow (pilot, 2026-07)
