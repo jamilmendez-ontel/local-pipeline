@@ -45,10 +45,13 @@ BLANK_TABLES = [
     "analytics.mv_timer_day_rollup",
     "analytics.mv_hr_report_review",
 ]
-# Located by command text (jobids change when jobs are recreated).
+# Located by command text (jobids change when jobs are recreated). Needles
+# must match cron.job.command text (verified live 2026-08-04: jobid 9 =
+# SELECT analytics.refresh_dr_task_rollup_safe(); jobid 11 =
+# SELECT analytics.refresh_timer_day_rollup_safe()).
 WATCHED_JOBS = {
     "dr_task_rollup": "refresh_dr_task_rollup_safe",
-    "timer_day_rollup": "refresh_mv_timer_day_rollup",
+    "timer_day_rollup": "refresh_timer_day_rollup_safe",
 }
 
 
