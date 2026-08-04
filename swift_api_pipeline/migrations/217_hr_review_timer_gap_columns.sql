@@ -25,7 +25,16 @@
 --
 -- Rollback is at the bottom. NEVER DROP analytics.v_hr_report_review.
 
-BEGIN;
+-- The apply channel (MCP apply_migration / migrate_cloud.py) wraps each
+-- migration in its own transaction, matching neighbors 199/207/215 which
+-- carry no explicit BEGIN/COMMIT. This migration holds AccessExclusiveLock on
+-- v_daily_report_approvals (step 3) while step 6 later needs a lock on
+-- mv_hr_report_review; pg_cron jobid 9 (*/5 refresh) can want the opposite
+-- lock order -> deadlock window. Pausing cron INSIDE this transaction would
+-- be a no-op (cron.job changes only become visible at commit), so we fail
+-- fast instead: lock_timeout aborts cleanly rather than deadlocking. On a
+-- lock_timeout error, simply re-apply during a quiet 5-min-cron window.
+SET LOCAL lock_timeout = '15s';
 
 -- ---------------------------------------------------------------------------
 -- 0) Preflight: the RPC bodies we re-create below assume 199 + 215. Abort if
@@ -34,9 +43,9 @@ BEGIN;
 DO $$
 DECLARE def text;
 BEGIN
-  SELECT pg_get_functiondef(p.oid) INTO def
-  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname = 'analytics' AND p.proname = 'hr_review_page';
+  -- Resolved by signature, not name: avoids ambiguity if an overloaded
+  -- hr_review_page ever exists mid-migration.
+  def := pg_get_functiondef('analytics.hr_review_page(text,text,text,date,date,text[],text,text,integer,integer,text[],text[],integer[],integer,integer)'::regprocedure);
   IF def IS NULL THEN RAISE EXCEPTION '217: hr_review_page missing'; END IF;
   IF position('v.is_tardy' IN def) = 0 THEN
     RAISE EXCEPTION '217: hr_review_page does not carry the 215 is_tardy predicate; re-check drift before applying';
@@ -53,6 +62,9 @@ END $$;
 --    Gaps count between consecutive blocks that END after p_anchor; the first
 --    participating block contributes no leading gap (lag is NULL).
 -- ---------------------------------------------------------------------------
+-- Deliberately no SET search_path (unlike approval_wait_days, mig 199): a
+-- proconfig entry on this function would block SRF inlining into the MV
+-- build below, forcing per-row function calls instead of a flattened join.
 CREATE OR REPLACE FUNCTION analytics.long_gap_stats(
   p_block_starts timestamptz[],
   p_block_ends   timestamptz[],
@@ -251,8 +263,9 @@ CREATE INDEX idx_mv_hr_review_v2_carrier_date
   ON analytics.mv_hr_report_review_v2 (carrier_group, work_date);
 
 -- ---------------------------------------------------------------------------
--- 5) Serving view: migration 215's body (30 columns, is_tardy last) over the
---    new MV, with the 6 new columns APPENDED. Append-only, never reorder.
+-- 5) Serving view: migration 215's body (32 columns: 31 from 207 + is_tardy)
+--    over the new MV, with the 6 new columns APPENDED. Append-only, never
+--    reorder.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW analytics.v_hr_report_review AS
 SELECT
@@ -316,8 +329,10 @@ BEGIN
   FROM pg_depend d
   JOIN pg_rewrite rw ON rw.oid = d.objid
   JOIN pg_class dep ON dep.oid = rw.ev_class
-  WHERE d.refobjid IN ('analytics.mv_hr_report_review'::regclass, 'analytics.mv_timer_day_rollup'::regclass)
-    AND dep.relname NOT IN ('mv_hr_report_review', 'mv_timer_day_rollup');
+  WHERE d.classid = 'pg_rewrite'::regclass
+    AND d.refobjid IN ('analytics.mv_hr_report_review'::regclass, 'analytics.mv_timer_day_rollup'::regclass)
+    AND rw.ev_class <> d.refobjid
+    AND (dep.relnamespace::regnamespace::text, dep.relname) NOT IN (('analytics','mv_hr_report_review'), ('analytics','mv_timer_day_rollup'));
   IF n > 0 THEN
     RAISE EXCEPTION '217: old MVs still have % dependent view(s); aborting before DROP', n;
   END IF;
@@ -333,6 +348,11 @@ ALTER INDEX analytics.idx_mv_hr_review_v2_carrier_date RENAME TO idx_mv_hr_revie
 
 ALTER MATERIALIZED VIEW analytics.mv_timer_day_rollup_v2 RENAME TO mv_timer_day_rollup;
 ALTER INDEX analytics.mv_timer_day_rollup_v2_pk RENAME TO mv_timer_day_rollup_pk;
+
+-- REFRESH requires ownership; refresh_*_safe() are SECURITY DEFINER owned by
+-- postgres (live owners verified postgres 2026-08-03).
+ALTER MATERIALIZED VIEW analytics.mv_hr_report_review OWNER TO postgres;
+ALTER MATERIALIZED VIEW analytics.mv_timer_day_rollup OWNER TO postgres;
 
 -- ---------------------------------------------------------------------------
 -- 7) List RPCs: full bodies = migration 199 + the 215 is_tardy predicate
@@ -479,25 +499,40 @@ AS $function$
 $function$;
 
 -- ---------------------------------------------------------------------------
--- 8) Access + semantic metadata (207 pattern; WHERE NOT EXISTS, never
---    ON CONFLICT for table-level rows).
+-- 8) Access + semantic metadata: GRANT/REVOKE (207 pattern) plus guarded
+--    UPDATEs of existing rows. Both rows already exist (INSERTed by
+--    migrations 170 and 207 respectively), so this is UPDATE not INSERT; a
+--    plain UPDATE that matched zero rows would silently no-op and leave the
+--    metadata undocumenting the new 217 columns, so each is wrapped with a
+--    GET DIAGNOSTICS check that aborts instead.
 -- ---------------------------------------------------------------------------
 GRANT SELECT ON analytics.mv_hr_report_review TO service_role;
 REVOKE ALL ON analytics.mv_hr_report_review FROM anon, authenticated;
 GRANT SELECT ON analytics.mv_timer_day_rollup TO service_role;
 REVOKE ALL ON analytics.mv_timer_day_rollup FROM anon, authenticated;
 
-UPDATE agent.schema_metadata
-SET description = 'Per (person_key, ET work day) timer rollup: union_min (merged closed intervals), entry_count, open_count, first_start, last_end (max closed end, 217), start_times (all starts incl. open, 217), block_starts/block_ends (merged disjoint blocks as parallel arrays, 217). person_key = emp_id when resolvable else ''email:<address>''. Refreshed every 10 min by pg_cron.'
-WHERE schema_name = 'analytics' AND table_name = 'mv_timer_day_rollup' AND column_name IS NULL;
+DO $$
+DECLARE rows_affected int;
+BEGIN
+  UPDATE agent.schema_metadata
+  SET description = 'Per (person_key, ET work day) timer rollup: union_min (merged closed intervals), entry_count, open_count, first_start, last_end (max closed end, 217), start_times (all starts incl. open, 217), block_starts/block_ends (merged disjoint blocks as parallel arrays, 217). person_key = emp_id when resolvable else ''email:<address>''. Refreshed every 10 min by pg_cron.'
+  WHERE schema_name = 'analytics' AND table_name = 'mv_timer_day_rollup' AND column_name IS NULL;
+  GET DIAGNOSTICS rows_affected = ROW_COUNT;
+  IF rows_affected = 0 THEN
+    RAISE EXCEPTION '217: schema_metadata row missing for analytics.mv_timer_day_rollup';
+  END IF;
 
-UPDATE agent.schema_metadata
-SET description = 'Materialized snapshot of the HR daily-report review layer, one row per report task (task_did grain). 37 columns after migration 217: adds first_task_start (first start at/after clock-in), last_task_end, long_gap_count/long_gap_minutes (21m+ gaps between merged blocks from the first after-clock-in task; NULL when a timer is open or no clock-in), early/late_task_count (entry starts outside clock-in + raw stated hours; NULL without a window). v_hr_report_review is the serving pass-through.'
-WHERE schema_name = 'analytics' AND table_name = 'mv_hr_report_review' AND column_name IS NULL;
+  UPDATE agent.schema_metadata
+  SET description = 'Materialized snapshot of the HR daily-report review layer, one row per report task (task_did grain). 37 columns after migration 217: adds first_task_start (first start at/after clock-in), last_task_end, long_gap_count/long_gap_minutes (21m+ gaps between merged blocks from the first after-clock-in task; NULL when a timer is open or no clock-in), early/late_task_count (entry starts outside clock-in + raw stated hours; NULL without a window). v_hr_report_review is the serving pass-through.',
+      related_tables = ARRAY['analytics.v_hr_report_review','analytics.v_daily_report_approvals','analytics.mv_daily_report_task_rollup','analytics.mv_timer_day_rollup','data_staging.stg_daily_reports','analytics.long_gap_stats']
+  WHERE schema_name = 'analytics' AND table_name = 'mv_hr_report_review' AND column_name IS NULL;
+  GET DIAGNOSTICS rows_affected = ROW_COUNT;
+  IF rows_affected = 0 THEN
+    RAISE EXCEPTION '217: schema_metadata row missing for analytics.mv_hr_report_review';
+  END IF;
+END $$;
 
 NOTIFY pgrst, 'reload schema';
-
-COMMIT;
 
 -- ---------------------------------------------------------------------------
 -- ROLLBACK (view columns can never be dropped without DROP VIEW, which is
