@@ -210,6 +210,9 @@ BEGIN
             AND t.end_time IS NOT DISTINCT FROM corr.corrected_end_time
             AND t.duration_min IS NOT DISTINCT FROM corr.corrected_duration_min
       )
+      -- NOTE: unlike every other removals anti-join, the LIVE function has no
+      -- rm.reason REVERTED exclusion here (drift vs committed 197, preserved
+      -- deliberately by 218; do not "restore" it without a decision).
       AND NOT EXISTS (
           SELECT 1 FROM app_timer.entry_removals rm
           WHERE rm.project_did = corr.project_did

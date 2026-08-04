@@ -2,7 +2,10 @@
 """Pipeline health watcher: detect silent warehouse failures and email Jamil.
 
 Checks (spec 2026-08-04, thresholds are spec-fixed):
-  1. cron.job_run_details rows with status <> 'succeeded' in the last 24h.
+  1. cron.job_run_details rows with status <> 'succeeded' whose runid falls in
+     a runid-based 24h window (never start_time: pg_cron leaves start_time
+     NULL on some failed rows, e.g. "job startup timeout", which would make a
+     start_time-based window inert and let old failures linger forever).
   2. The 5-min DR refresh chain and the 10-min timer rollup refresh: last
      SUCCESSFUL run older than 30 minutes (jobs located by command text, never
      by jobid; jobids change when jobs are recreated).
@@ -28,6 +31,7 @@ import base64
 import sys
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from zoneinfo import ZoneInfo
 
 from config import get_logger, get_db, close_db, retry_db, setup_logging
 
@@ -119,9 +123,12 @@ def evaluate_rebuild_duration(max_ms, threshold_ms=REBUILD_ALARM_MS):
 
 
 def build_email_body(findings, checked_at):
+    # Internal now/age-math stays UTC (see evaluate_staleness); this is
+    # display-only conversion to America/New_York for the email recipient.
+    checked_at_et = checked_at.astimezone(ZoneInfo("America/New_York"))
     lines = [
         "Pipeline health watcher findings",
-        f"Checked at: {checked_at:%Y-%m-%d %H:%M %Z}",
+        f"Checked at: {checked_at_et:%Y-%m-%d %I:%M %p} ET",
         "",
     ]
     lines += [f"  {i}. {f}" for i, f in enumerate(findings, 1)]
@@ -142,13 +149,17 @@ def build_email_body(findings, checked_at):
 # ---------------------------------------------------------------------------
 
 def probe_failed_runs(db):
+    # runid-based window, not start_time: pg_cron leaves start_time NULL on
+    # some failed rows (e.g. "job startup timeout"), which made a
+    # start_time-based window inert and left old failures in the window
+    # forever (183 historical July rows discovered live 2026-08-04).
     rows = retry_db(lambda: db.fetch(
         "SELECT jobid, command, status, return_message "
         "FROM cron.job_run_details "
-        "WHERE status <> 'succeeded' AND runid IN ("
-        "  SELECT runid FROM cron.job_run_details "
-        "  WHERE COALESCE(start_time, now()) > now() - interval '24 hours' "
-        ") ORDER BY runid DESC LIMIT 200"
+        "WHERE status <> 'succeeded' "
+        "  AND runid >= (SELECT COALESCE(min(runid), 0) FROM cron.job_run_details "
+        "                WHERE start_time > now() - interval '24 hours') "
+        "ORDER BY runid DESC LIMIT 2000"
     ), description="failed cron runs")
     return [dict(r) for r in rows]
 

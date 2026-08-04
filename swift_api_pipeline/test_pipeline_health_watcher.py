@@ -63,3 +63,5 @@ def test_email_body_lists_every_finding():
     body = build_email_body(["finding one", "finding two"], NOW)
     assert "finding one" in body and "finding two" in body
     assert "2026-08-04" in body
+    # NOW is 12:00 UTC; displayed timestamp converts to America/New_York (08:00 AM ET)
+    assert "08:00 AM ET" in body
