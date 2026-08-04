@@ -1,4 +1,10 @@
 -- 218: Make rebuild_timer_clean() non-blocking for readers (Jamil 2026-08-04).
+-- APPLIED to prod 2026-08-04 ~2:15a ET via MCP apply_migration. Verified same
+-- night with a two-connection live proof: 14 timed reads DURING a 59.6s
+-- rebuild all returned the complete pre-rebuild table (385,675 rows, exact
+-- parity), worst read latency 3.9s (IO contention, not locks; pre-218 those
+-- reads blocked until the rebuild finished). Rebuild 59.6s vs 41.1s TRUNCATE
+-- mean = expected DELETE overhead, far inside the 300s timeout.
 -- Spec: docs/superpowers/specs/2026-08-04-timer-clean-nonblocking-and-watcher-design.md
 --
 -- Incident 2026-08-04 ~00:26 ET: the nightly pipeline-timer run's rebuild took
