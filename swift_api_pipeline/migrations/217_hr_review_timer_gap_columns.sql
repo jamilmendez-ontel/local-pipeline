@@ -1,5 +1,11 @@
 -- 217: First/last task, 21m+ gap stats, and outside-window task counts for the
 -- DR Monitoring table (Jamil 2026-08-03).
+-- APPLIED to prod 2026-08-03 ~11:03p ET via MCP apply_migration. Verified same
+-- night: row parity exact (rollup 54,963 = 54,963; review 26,352 = 26,352);
+-- NULL-gate violations 0 (open-timer, no-clock-in, anchor); long_gap_stats
+-- fixture (1, 35.0); RPC flag counts = direct view counts (long_gaps 6,281;
+-- outside_window 3,928); first post-swap cron tick (jobid 9, 11:05p ET)
+-- succeeded in 3.5s vs 2.8-5.2s pre-217 baseline.
 -- Spec: ontel-people/docs/superpowers/specs/2026-08-03-dr-monitoring-column-picker-design.md
 --
 -- Definitions (user-confirmed):
