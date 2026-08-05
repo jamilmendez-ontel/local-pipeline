@@ -2,7 +2,7 @@ name: "Pipeline: Calendar Events (auto-rerun on failure)"
 
 # Safety net for the twice-daily "Pipeline: Calendar Events" run.
 #
-# The calendar pipeline only dispatches ~6am and ~6pm ET, so a failed run used
+# The calendar pipeline only dispatches ~5am and ~5pm ET, so a failed run used
 # to mean ~12h of stale calendar data before the next attempt. This workflow
 # fires when that pipeline concludes in failure, waits for a transient issue
 # (usually a Supabase pooler connect timeout) to clear, then re-runs the failed

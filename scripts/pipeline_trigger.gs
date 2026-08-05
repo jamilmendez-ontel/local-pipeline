@@ -30,7 +30,7 @@
  *               fires after the Ontel pipeline completes)
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
  *               run after User Priorities is fresh. Create via own trigger.)
- *   6:00 AM & 6:00 PM — Calendar Events (twice daily; was 12:30 AM once daily.
+ *   5:00 AM & 5:00 PM — Calendar Events (twice daily; was 6 AM/6 PM, before that 12:30 AM once daily.
  *               Create via setupCalendarEventsTriggers())
  *
  * Note: QA Forms used to be staggered inside triggerLightPipelines() via an
@@ -163,7 +163,7 @@ function setupPriorityRefreshTrigger() {
 
 /**
  * Trigger the Calendar Events pipeline (all kinds: leave/holiday/birthday/
- * training/other). Runs TWICE daily at 6:00 AM and 6:00 PM ET. Create the
+ * training/other). Runs TWICE daily at 5:00 AM and 5:00 PM ET. Create the
  * triggers by running setupCalendarEventsTriggers() once.
  */
 function triggerCalendarEvents() {
@@ -174,11 +174,11 @@ function triggerCalendarEvents() {
  * Run hours (project timezone, ET) for the twice-daily Calendar Events runs.
  * Apps Script daily triggers fire within a ~1-hour window around the given hour.
  */
-var CALENDAR_EVENTS_HOURS = [6, 18];
+var CALENDAR_EVENTS_HOURS = [5, 17];
 
 /**
  * Idempotently (re)create the twice-daily time-driven triggers for
- * triggerCalendarEvents() at 6:00 AM and 6:00 PM ET. RUN THIS ONCE from the
+ * triggerCalendarEvents() at 5:00 AM and 5:00 PM ET. RUN THIS ONCE from the
  * Apps Script editor after deploying this file. It first deletes ALL existing
  * triggers bound to triggerCalendarEvents AND to the legacy triggerCalendarLeave
  * (this function was renamed; the old time triggers are still bound to the old
@@ -187,7 +187,7 @@ var CALENDAR_EVENTS_HOURS = [6, 18];
  *
  * NOTE: atHour() fires in the project's time zone. This assumes the project is
  * set to America/New_York (ET) like the rest of these schedules — verify via
- * File > Project Settings > Time zone before relying on the 6 AM / 6 PM times.
+ * File > Project Settings > Time zone before relying on the 5 AM / 5 PM times.
  */
 function setupCalendarEventsTriggers() {
   // Remove existing triggers bound to the new name AND to the legacy

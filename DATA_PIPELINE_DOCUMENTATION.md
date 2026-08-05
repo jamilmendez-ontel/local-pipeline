@@ -532,7 +532,7 @@ soft-delete via `is_deleted` + tombstone-on-cancel; reconcile sweeps drift)
 | Task | Schedule | Pipeline |
 |------|----------|----------|
 | SwiftPipeline-Nightly | Daily 12:01 AM | asset_tasks → backfill → analytics → discrepancies → exports |
-| SwiftPipeline-Calendar | Disabled (migrated to GHA, 6 AM & 6 PM ET) | calendar events sync |
+| SwiftPipeline-Calendar | Disabled (migrated to GHA, 5 AM & 5 PM ET) | calendar events sync |
 
 ---
 

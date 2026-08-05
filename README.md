@@ -35,7 +35,7 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form` |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
-| `pipeline-calendar-events.yml` | Apps Script (6 AM & 6 PM ET) | Google Calendar → `stg_calendar_events` (incremental, AI-normalized; per-kind `analytics.v_calendar_*` views). Self-heals on failure: 4 in-job attempts with backoff, plus the auto-rerun workflow below |
+| `pipeline-calendar-events.yml` | Apps Script (5 AM & 5 PM ET) | Google Calendar → `stg_calendar_events` (incremental, AI-normalized; per-kind `analytics.v_calendar_*` views). Self-heals on failure: 4 in-job attempts with backoff, plus the auto-rerun workflow below |
 | `pipeline-calendar-events-autorerun.yml` | `workflow_run` on calendar-events failure | Safety net: waits 10 min then re-runs the failed calendar-events jobs, up to 2 automatic reruns (`run_attempt < 3`), so a failed run recovers in ~20-30 min instead of waiting ~12h for the next dispatch |
 | `pipeline-asset-tasks.yml` | Nightly Apps Script | Heavy nightly: asset_tasks → MVs → fires downstream dispatches |
 | `pipeline-asset-tasks-inc.yml` | Manual dispatch (pilot) | SHADOW: incremental asset-tasks walker → `*_inc` tables + drift audit (see below) |
