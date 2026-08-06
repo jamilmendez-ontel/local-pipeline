@@ -240,11 +240,13 @@ ON CONFLICT (asset_did) DO UPDATE SET
   asset_name=EXCLUDED.asset_name,
   asset_requirement_count=EXCLUDED.asset_requirement_count,
   last_updated=EXCLUDED.last_updated, loaded_at=now()
-WHERE (stg_assets_inc.last_updated, stg_assets_inc.asset_name,
-       stg_assets_inc.asset_requirement_count)
+WHERE (stg_assets_inc.project_did, stg_assets_inc.asset_id,
+       stg_assets_inc.asset_name, stg_assets_inc.asset_requirement_count,
+       stg_assets_inc.last_updated)
       IS DISTINCT FROM
-      (EXCLUDED.last_updated, EXCLUDED.asset_name,
-       EXCLUDED.asset_requirement_count)
+      (EXCLUDED.project_did, EXCLUDED.asset_id,
+       EXCLUDED.asset_name, EXCLUDED.asset_requirement_count,
+       EXCLUDED.last_updated)
 """
 
 # Guarded upsert for the raw payload archive; guard purely on payload
