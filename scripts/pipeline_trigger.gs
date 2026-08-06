@@ -10,7 +10,8 @@
  *   2. Paste these functions into a new file (e.g. pipeline_trigger.gs)
  *   3. Create time-driven triggers in Apps Script:
  *      - triggerOrgs()             → Daily, 10:13 PM EST
- *      - triggerLightPipelines()   → Daily, 12:09 AM EST (Timer only now)
+ *      - triggerLightPipelines()   → Daily, ~1:15 AM EST (Timer only now; create
+ *                                    via setupTimerTrigger(), not the editor UI)
  *      - triggerForms()            → Daily, 12:17 AM EST (QA Forms — own trigger)
  *      - triggerOpenItemsData()    → Daily, 02:00 AM EST (Open Items Report Data)
  *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
@@ -20,7 +21,13 @@
  *
  * Schedules (EST):
  *   10:13 PM  — Orgs & Projects
- *   12:09 AM  — Timer
+ *   ~1:15 AM  — Timer (moved from 12:09 AM on 2026-08-06: its
+ *               rebuild_timer_clean() calls were colliding with the Asset
+ *               Tasks transform, Priorities full run and QA Forms load in the
+ *               12:01-1:00 AM window; disk I/O contention pushed the rebuild
+ *               from a ~50-70s baseline to 242s, near its 300s
+ *               statement_timeout. 1:15 AM sits in the lull before the 2:00 AM
+ *               GC/Open Items wave.)
  *   12:17 AM  — QA Forms
  *   12:13 AM  — User Priorities FULL run (refresh + Excel export + shared-Drive upload)
  *   every 10m — User Priorities DB refresh only (extract + transform; no export)
@@ -53,7 +60,17 @@ function triggerOrgs() {
 
 /**
  * Trigger the daily Timer pipeline.
- * Schedule this at 12:09 AM EST daily.
+ * Schedule: ~1:15 AM ET daily. Create/refresh the trigger by running
+ * setupTimerTrigger() once from the Apps Script editor.
+ *
+ * Moved from 12:09 AM on 2026-08-06: the run's two rebuild_timer_clean()
+ * calls (~15 and ~45 min in) landed on top of the Asset Tasks transform
+ * (12:01 AM start), the Priorities full run (12:13 AM) and the QA Forms load
+ * (12:17 AM). Under that combined disk I/O load the rebuild degraded from a
+ * ~50-70s baseline to 242s, close to its 300s statement_timeout (caught by
+ * pipeline_health_watcher.py's 120s alarm). 1:15 AM puts both rebuild calls
+ * in the 1:00-2:00 AM lull, after the midnight wave and before the 2:00 AM
+ * GC/Open Items wave.
  *
  * NOTE: This used to also fire QA Forms after an 8-min Utilities.sleep() and
  * User Priorities before that. Both have been split out:
@@ -64,6 +81,44 @@ function triggerOrgs() {
  */
 function triggerLightPipelines() {
   fireDispatch_('pipeline-timer');
+}
+
+/**
+ * Target time (project timezone, ET) for the daily Timer run.
+ * nearMinute() is a +/-15 min hint, so the trigger fires ~1:00-1:30 AM.
+ */
+var TIMER_HOUR = 1;
+var TIMER_MINUTE = 15;
+
+/**
+ * Idempotently (re)create the daily time-driven trigger for
+ * triggerLightPipelines() at ~1:15 AM ET. RUN THIS ONCE from the Apps Script
+ * editor after deploying this file; it replaces the old editor-created
+ * 12:09 AM trigger (deleted first by handler name, so re-running is safe,
+ * e.g. after editing TIMER_HOUR/TIMER_MINUTE).
+ *
+ * NOTE: atHour() fires in the project's time zone. This assumes the project is
+ * set to America/New_York (ET) like the rest of these schedules; verify via
+ * File > Project Settings > Time zone before relying on the 1:15 AM time.
+ */
+function setupTimerTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerLightPipelines') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerLightPipelines')
+    .timeBased()
+    .everyDays(1)
+    .atHour(TIMER_HOUR)
+    .nearMinute(TIMER_MINUTE)
+    .create();
+
+  Logger.log('Created triggerLightPipelines trigger at ~' +
+             TIMER_HOUR + ':' + (TIMER_MINUTE < 10 ? '0' : '') + TIMER_MINUTE +
+             ' ET daily.');
 }
 
 /**
