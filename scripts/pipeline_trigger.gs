@@ -39,6 +39,9 @@
  *               run after User Priorities is fresh. Create via own trigger.)
  *   5:00 AM & 5:00 PM — Calendar Events (twice daily; was 6 AM/6 PM, before that 12:30 AM once daily.
  *               Create via setupCalendarEventsTriggers())
+ *   Sat 6:00 PM — Asset Tasks INC weekly full-walk sweep (= Sunday ~6 AM PHT;
+ *               heals assign/reschedule drift the hourly shadow walk can't see.
+ *               Create via setupAssetTasksIncFullWalkTrigger())
  *
  * Note: QA Forms used to be staggered inside triggerLightPipelines() via an
  * 8-min Utilities.sleep() after Timer. That was fragile — if the trigger
@@ -301,6 +304,59 @@ function triggerAssetTasksGC() {
 }
 
 /**
+ * Weekly full-walk sweep for the incremental asset-tasks SHADOW pipeline
+ * (pipeline-asset-tasks-inc.yml). Re-fetches every asset + task in the pilot
+ * projects through the guarded upserts, healing the change class the
+ * lastUpdated-pruned hourly walk can never see: task assign/reschedule bumps
+ * the TASK's lastUpdated but NOT the parent asset-project's, so the
+ * asset-level prune skips the asset until a submit/approve touches it
+ * (2026-08-06 doctrine-gate drift root cause). This is the plan's
+ * "Sunday 06:00 PHT ghost sweep" that was never wired — the workflow had
+ * ZERO repository_dispatch runs before 2026-08-06.
+ *
+ * Schedule: Saturday 6 PM ET = Sunday 6 AM PHT (7 AM in US winter), the
+ * plan's quiet-window slot. Create via setupAssetTasksIncFullWalkTrigger().
+ * Run cost: ~2-3h walk + one ~6-9 GB drift audit (dispatched runs always
+ * audit); hourly inc runs queue behind it (concurrency group,
+ * cancel-in-progress: false), and the audit evidence persists to
+ * pipeline.inc_audit_results.
+ *
+ * strict_audit stays 'false': this is a heal sweep, not the nightly gate.
+ */
+function triggerAssetTasksIncFullWalk() {
+  fireDispatchWithPayload_('pipeline-asset-tasks-inc', {
+    mode: 'full-walk',
+    strict_audit: 'false'
+  });
+}
+
+/**
+ * Idempotently (re)create the weekly Saturday 6 PM ET trigger for
+ * triggerAssetTasksIncFullWalk(). RUN THIS ONCE from the Apps Script editor
+ * after deploying this file. Safe to re-run: deletes any existing triggers
+ * bound to the handler first (orphaned-trigger gotcha — see
+ * setupCalendarEventsTriggers).
+ */
+function setupAssetTasksIncFullWalkTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerAssetTasksIncFullWalk') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerAssetTasksIncFullWalk')
+    .timeBased()
+    .everyWeeks(1)
+    .onWeekDay(ScriptApp.WeekDay.SATURDAY)
+    .atHour(18)
+    .create();
+
+  Logger.log('Created weekly triggerAssetTasksIncFullWalk trigger: ' +
+             'Saturdays ~6 PM ET (Sunday morning PHT full-walk sweep).');
+}
+
+/**
  * Like fireDispatch_ but allows passing a client_payload — required when the
  * receiving workflow's `on: repository_dispatch` reads inputs via
  * github.event.client_payload.* (which is how we gate dispatch_downstream).
@@ -378,6 +434,8 @@ function fireDispatch_(eventType) {
 /**
  * Test function — manually trigger all pipelines to verify setup.
  * Run this once after setup to confirm everything works.
+ * Deliberately EXCLUDES triggerAssetTasksIncFullWalk: that dispatch starts a
+ * ~2-3h full walk + a ~6-9 GB audit — fire it manually only when you mean it.
  */
 function testAllDispatches() {
   fireDispatch_('pipeline-orgs');
