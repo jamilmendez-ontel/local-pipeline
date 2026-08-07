@@ -89,7 +89,12 @@ jobs:
       # `WHERE asset_did IS NULL`) and cheap.
       - name: Run backfill (asset_did) after the timer reload
         working-directory: ${{ env.PIPELINE_DIR }}
-        run: python -u main.py --pipeline backfill --no-email
+        run: |
+          python -u main.py --pipeline backfill --no-email || {
+            echo "Backfill failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline backfill --no-email
+          }
 
       - name: Decode shared Drive token
         working-directory: ${{ env.PIPELINE_DIR }}
@@ -126,7 +131,12 @@ jobs:
       - name: Refresh analytics MVs (after the timer reload)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
-        run: python -u main.py --pipeline analytics --no-email
+        run: |
+          python -u main.py --pipeline analytics --no-email || {
+            echo "Analytics refresh failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline analytics --no-email
+          }
 
       - name: Export clean timer data
         id: clean_export

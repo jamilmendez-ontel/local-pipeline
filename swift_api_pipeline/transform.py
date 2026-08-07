@@ -1261,19 +1261,32 @@ def refresh_analytics():
     # with the core set after every load. ~10s CONCURRENTLY.
     # mv_timer_revenue_daily (migration 214) reads FROM mv_timer_revenue, so it
     # must stay listed after it. ~4s CONCURRENTLY.
+    # Each MV refreshes independently: a failure on one must not stop the ones
+    # after it (the revenue MVs are listed last, and the post-timer-reload
+    # workflow step exists solely to refresh THEM — an error on an earlier core
+    # MV aborting the loop would silently leave revenue a day stale). Failures
+    # still raise after the loop so the nightly run reports them.
     mvs = ["mv_project_summary", "mv_technician_stats", "mv_daily_completion",
            "mv_timer_revenue", "mv_timer_revenue_daily"]
+    failed = []
     for mv in mvs:
-        result = db.fetchrow(
-            f'SELECT * FROM analytics.refresh_one_mv($1)',
-            mv
-        )
-        if result:
-            print(f"  {result['view_name']}: {result['refresh_time_ms']:,}ms")
-        else:
-            print(f"  {mv}: no data returned")
+        try:
+            result = db.fetchrow(
+                f'SELECT * FROM analytics.refresh_one_mv($1)',
+                mv
+            )
+            if result:
+                print(f"  {result['view_name']}: {result['refresh_time_ms']:,}ms")
+            else:
+                print(f"  {mv}: no data returned")
+        except Exception as e:
+            failed.append(mv)
+            print(f"  {mv}: FAILED — {e}")
 
     print(f"\n{'='*60}\n")
+
+    if failed:
+        raise RuntimeError(f"refresh_one_mv failed for: {', '.join(failed)}")
 
 
 def refresh_quote_mvs():

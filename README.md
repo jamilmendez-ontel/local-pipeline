@@ -79,7 +79,8 @@ main.py
 ```
 
 **Step order across the two nightly workflows is load-bearing for `asset_did`.**
-`pipeline-asset-tasks` runs at 04:18 UTC and `pipeline-timer` at 04:21, and
+`pipeline-asset-tasks` runs at 04:18 UTC and `pipeline-timer` after it (04:21 for
+years; dispatched ~05:15 UTC / 1:15 AM ET since the 2026-08-06 trigger move), and
 `transform_timer_activities` does `DELETE FROM stg_timer_activities WHERE
 start_date = <extraction MONTH bucket>` then re-inserts **without** `asset_did`.
 So asset-tasks' backfill was always undone three minutes later, and
