@@ -61,6 +61,41 @@ jobs:
             python -u main.py --pipeline timer
           }
 
+      # MUST run AFTER the timer transform, and this workflow is the only place
+      # that can be true.
+      #
+      # transform_timer_activities does `DELETE FROM stg_timer_activities WHERE
+      # start_date = $1` for the extraction MONTH bucket, then re-INSERTs with a
+      # column list that does not include asset_did. pipeline-asset-tasks runs
+      # its own "Run backfill (asset_did)" at 04:18 UTC and this workflow starts
+      # at 04:21, so for years the nightly order was:
+      #
+      #   04:18  backfill fills asset_did
+      #   04:21  timer transform deletes the whole current-month bucket and
+      #          re-inserts it with asset_did NULL
+      #          timer_correction_review --apply -> rebuild_timer_clean()
+      #          propagates those NULLs into stg_timer_activities_clean
+      #
+      # Net effect: asset_did was ALWAYS NULL for the current month-to-date, and
+      # only became populated once the month rolled over and the nightly DELETE
+      # stopped touching those rows. Measured 2026-08-07: the 2026-08-01
+      # extraction bucket had 0 of 2,354 rows with asset_did while every earlier
+      # month sat at 77-80%. No asset means no market means no rate, so
+      # attributed revenue was structurally blank for the current month, every
+      # month.
+      #
+      # Backfilling here closes the loop in the same run, before the clean-table
+      # rebuild below picks the values up. It is idempotent (every pass is
+      # `WHERE asset_did IS NULL`) and cheap.
+      - name: Run backfill (asset_did) after the timer reload
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline backfill --no-email || {
+            echo "Backfill failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline backfill --no-email
+          }
+
       - name: Decode shared Drive token
         working-directory: ${{ env.PIPELINE_DIR }}
         run: echo "${{ secrets.DRIVE_SHARED_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/drive_shared_token.pickle
@@ -84,6 +119,23 @@ jobs:
             echo "Apply failed (often a transient pooler cap), retrying after 2 minutes..."
             sleep 120
             python -u timer_correction_review.py --apply
+          }
+
+      # The analytics refresh in pipeline-asset-tasks runs at 04:18 UTC, three
+      # minutes BEFORE this workflow starts, so it never sees the night's timer
+      # data. Anything derived from stg_timer_activities_clean was therefore a
+      # day stale, including mv_timer_revenue and mv_timer_revenue_daily. Refresh
+      # again here, after the reload + backfill + rebuild_timer_clean above, so
+      # the revenue MVs are built from tonight's fully populated clean table.
+      # Non-fatal: a stale MV degrades, it does not corrupt.
+      - name: Refresh analytics MVs (after the timer reload)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        run: |
+          python -u main.py --pipeline analytics --no-email || {
+            echo "Analytics refresh failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline analytics --no-email
           }
 
       - name: Export clean timer data

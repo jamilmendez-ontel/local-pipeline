@@ -71,10 +71,32 @@ main.py
 │
 └── Post-Phase 2:
     ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
-    └── analytics.refresh_one_mv() × 4 (mv_project_summary, mv_technician_stats, mv_daily_completion,
+    └── analytics.refresh_one_mv() × 5 (mv_project_summary, mv_technician_stats, mv_daily_completion,
         mv_timer_revenue — timer→revenue attribution, migrations 209-212: asset-path market crosswalk
-        + rate-sheet amounts split by tech time-share; see docs/specs/timer-revenue-market-crosswalk.md)
+        + rate-sheet amounts split by tech time-share; see docs/specs/timer-revenue-market-crosswalk.md,
+        mv_timer_revenue_daily — per-day proration for the ontel-people revenue embed, migrations 214,
+        225 and 228; listed after mv_timer_revenue because it reads from it)
 ```
+
+**Step order across the two nightly workflows is load-bearing for `asset_did`.**
+`pipeline-asset-tasks` runs at 04:18 UTC and `pipeline-timer` after it (04:21 for
+years; dispatched ~05:15 UTC / 1:15 AM ET since the 2026-08-06 trigger move), and
+`transform_timer_activities` does `DELETE FROM stg_timer_activities WHERE
+start_date = <extraction MONTH bucket>` then re-inserts **without** `asset_did`.
+So asset-tasks' backfill was always undone three minutes later, and
+`rebuild_timer_clean()` then copied the NULLs into the clean table: `asset_did`
+was structurally NULL for the whole current month-to-date and only filled in
+once the month rolled over and the DELETE stopped touching those rows (measured
+2026-08-07: 0 of 2,354 rows in the 2026-08-01 bucket, against 77-80% for every
+earlier month). No asset means no market means no rate, so attributed revenue was
+blank for the current month, every month.
+
+`pipeline-timer` therefore runs its own **backfill after the reload** and its own
+**analytics refresh after `rebuild_timer_clean()`** (the 04:18 refresh cannot see
+timer data that lands at 04:21). Do not remove either step, and do not rely on
+asset-tasks' backfill for timer rows. The durable fix is to populate `asset_did`
+during the transform's INSERT so no ordering dependency exists at all; until then
+these two steps are what keep the current month priced.
 
 ### Incremental asset-tasks shadow (pilot, 2026-07)
 
