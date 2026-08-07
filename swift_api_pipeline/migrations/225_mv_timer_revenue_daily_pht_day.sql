@@ -1,4 +1,11 @@
--- 224: fix analytics.mv_timer_revenue_daily's work_date — it was a MONTH, not a day
+-- 225: fix analytics.mv_timer_revenue_daily's work_date — it was a MONTH, not a day
+--
+-- NUMBERING NOTE: this is recorded in supabase_migrations.schema_migrations as
+-- version 20260807082823 name `224_mv_timer_revenue_daily_pht_day`. 224 was free
+-- when this was written; a parallel session landed
+-- `224_hr_filing_speed_drilldown` on main minutes later. The FILE is renumbered
+-- to 225 so "next free number" stays truthful; the applied version name keeps
+-- its 224 prefix rather than rewriting an applied record.
 --
 -- Migration 214 grouped the per-day proration by
 -- data_staging.stg_timer_activities_clean.start_date. That column is NOT the
