@@ -203,6 +203,27 @@ class DailyReportsPipeline:
         all_tasks = []
         done = 0
 
+        # Staged tasks older than the rolling window that never reached a
+        # terminal status: an approval that lands >window days after the work
+        # date (bi-monthly approvers batch-approve late) would otherwise never
+        # be re-fetched and the row stays 'submitted' forever. The employee
+        # task lists are fetched in full regardless, so refreshing these rows
+        # costs no extra API calls: they join the Step 3 status upsert as
+        # status_only and are excluded from the child fetches in Steps 4-5.
+        stale_status_dids = set()
+        if not full and days:
+            stale_rows = retry_db(
+                lambda: db.fetch(
+                    f"SELECT task_did FROM {SCHEMA_STAGING}.stg_daily_reports "
+                    f"WHERE task_status NOT IN ('approved', 'cancelled') "
+                    f"  AND work_date < $1",
+                    date.today() - timedelta(days=days),
+                ),
+                description="stale non-terminal task dids",
+            )
+            stale_status_dids = {r["task_did"] for r in stale_rows}
+            logger.info(f"  Out-of-window non-terminal tasks to status-refresh: {len(stale_status_dids)}")
+
         def process_employee(asset_info):
             tasks = self.fetch_tasks(asset_info["asset_project_id"])
             parsed = []
@@ -214,15 +235,21 @@ class DailyReportsPipeline:
                 # Skip future dates — they're empty placeholders
                 if work_date and work_date > today:
                     continue
-                # Filter by date range for daily mode
+                # Filter by date range for daily mode; out-of-window tasks
+                # still awaiting a terminal status stay in for a status-only
+                # refresh.
+                status_only = False
                 if not full and days and work_date:
                     cutoff = today - timedelta(days=days)
                     if work_date < cutoff:
-                        continue
+                        if t.get("id") not in stale_status_dids:
+                            continue
+                        status_only = True
                 parsed.append({
                     "asset_info": asset_info,
                     "task": t,
                     "work_date": work_date,
+                    "status_only": status_only,
                 })
             return parsed
 
@@ -237,13 +264,17 @@ class DailyReportsPipeline:
 
         logger.info(f"  Total: {len(all_tasks)} tasks")
 
-        # Split tasks for Step 4:
+        # Split tasks for Step 4 (status_only tasks are status-refresh only —
+        # no child fetches, no Step 5 reconcile):
         # - Requirements: only fetch for tasks with req_count > 0
         # - Timers: fetch for ALL non-pending/cancelled tasks (timer exists even without requirements)
-        tasks_with_reqs = [t for t in all_tasks if t["task"].get("metrics", {}).get("reqCount", 0) > 0]
+        tasks_with_reqs = [t for t in all_tasks
+                           if not t.get("status_only")
+                           and t["task"].get("metrics", {}).get("reqCount", 0) > 0]
         tasks_for_timers = [t for t in all_tasks
-                           if t["task"].get("status") not in ("pending", "cancelled")
-                           or t["task"].get("metrics", {}).get("reqCount", 0) > 0]
+                           if not t.get("status_only")
+                           and (t["task"].get("status") not in ("pending", "cancelled")
+                                or t["task"].get("metrics", {}).get("reqCount", 0) > 0)]
         logger.info(f"  With requirements: {len(tasks_with_reqs)}")
         logger.info(f"  For timer fetch: {len(tasks_for_timers)}")
 
@@ -519,7 +550,8 @@ class DailyReportsPipeline:
         if not timers_only:
             zero_req_dids = [
                 t["task"].get("id", "") for t in all_tasks
-                if t["task"].get("id")
+                if not t.get("status_only")
+                and t["task"].get("id")
                 and isinstance(t["task"].get("metrics"), dict)
                 and t["task"]["metrics"].get("reqCount") == 0
             ]

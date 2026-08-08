@@ -98,6 +98,21 @@ function triggerDailyReportsRolling() {
 }
 
 /**
+ * Weekly DEEP rolling run — same workflow, 90-day window. Belt-and-suspenders
+ * for late edits to requirements (hours) and timers on reports older than the
+ * 30-day window: the stale-status sweep (2026-08-07) catches late APPROVALS at
+ * any age for free, but req/timer child data is only re-fetched in-window.
+ * ~20 min run (vs ~8 at 30 days) — fine weekly, far too heavy for the 5-min
+ * cadence. Install as a weekly time-based trigger:
+ *   Function: triggerDailyReportsDeep → Time-driven → Week timer →
+ *   Every Sunday, 5am-6am (ET — after the nightly pipeline burst and the
+ *   3-4 AM daily/requirements window; see 2026-06-05 note above).
+ */
+function triggerDailyReportsDeep() {
+  fireRollingDispatch(90);
+}
+
+/**
  * Fire repository_dispatch for the rolling workflow (event: daily-reports-rolling).
  */
 function fireRollingDispatch(days) {
