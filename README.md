@@ -145,7 +145,7 @@ report-automation reports that don't need full-scale extracts.
 | `extract_aging.py` | Gmail-based AR aging (`stg_ar_aging`) |
 | `extract_sales.py` | Gmail-based sales detail (`stg_sales_detail`) |
 | `extract_calendar_events.py` | Google Calendar events → `stg_calendar_events` (all kinds: leave/holiday/birthday/training/other) — incremental, AI-normalized |
-| `extract_daily_reports.py` | Daily reports + per-task work summaries. Rolling window (default 30 days) plus a stale-status sweep: out-of-window tasks still non-terminal in staging get a status-only refresh, so late batch approvals (>30 days after the work date) still land. |
+| `extract_daily_reports.py` | Daily reports + per-task work summaries. Rolling window (default 30 days) plus a stale-status sweep: out-of-window tasks still non-terminal in staging get a status-only refresh, so late batch approvals (>30 days after the work date) still land. A weekly Apps Script trigger (`triggerDailyReportsDeep`, Sunday 5-6 AM ET) re-runs the same workflow with a 90-day window to also catch late requirement/timer edits. |
 | `extract_revenue_rates.py` | `reference.ref_task_revenue_rates` from a manually-maintained sheet |
 
 ## Key files (`swift_api_pipeline/`)
