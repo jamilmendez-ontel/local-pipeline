@@ -286,6 +286,11 @@ async def export(output_dir: Path):
 
     # Fetch dynamic TS project list
     projects = [p["project_name"] for p in await fetch_ts_projects(conn)]
+    if not projects:
+        raise SystemExit(
+            "GUARD FAILED: reference.ref_ontel_techops_projects returned no TS projects. "
+            "Aborting export."
+        )
 
     executor = ThreadPoolExecutor(max_workers=1)
     loop = asyncio.get_event_loop()
@@ -334,6 +339,11 @@ async def export(output_dir: Path):
                 f"  -> {file_path.name}"
             )
             results.append((ts_label, file_path, count))
+
+        if not results:
+            raise SystemExit(
+                "GUARD FAILED: all TS projects had 0 timer rows - refusing silent empty export."
+            )
 
         # Fetch all duplicates across all projects in one query
         all_dup_rows = await conn.fetch(DUPLICATES_QUERY, month_start_utc, month_end_utc)
