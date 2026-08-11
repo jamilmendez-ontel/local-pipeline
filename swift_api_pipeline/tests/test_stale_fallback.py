@@ -16,7 +16,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from timer_correction_review import _parse_entry_details, _group_rows, _pick_group
+from timer_correction_review import (
+    _parse_entry_details, _group_rows, _pick_group,
+    _duration_matches, _prefill_entry_id, _strip_entry_id_prefix,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +126,65 @@ def test_pick_group_two_groups_same_member_is_ambiguous():
         _row("a@x.co", START_B, 19, 50.0),
     ])
     assert _pick_group(groups, "a@x.co") is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_entry_details duration_str + _duration_matches
+# (guards the 2026-08-10 over-removal incident: a stale removal must target
+# only the snapshot the member saw, never the whole start-key group)
+# ---------------------------------------------------------------------------
+
+def test_parse_details_carries_duration_str():
+    p = _parse_entry_details(
+        "TECH-OPS: TS19 | D-HBR237 | 6. Final COP Complete | Jun 22, 2026 | 0 min")
+    assert p["duration_str"] == "0 min"
+    p = _parse_entry_details(
+        "TECH-OPS: TS19 | (no site) | 1. General Admin and Support | Jul 15, 2026 | 45h 12m")
+    assert p["duration_str"] == "45h 12m"
+
+
+def test_duration_matches_same_formatter_output():
+    assert _duration_matches("0 min", 0.28)          # sub-minute ghost rounds to 0 min
+    assert _duration_matches("8h 18m", 498.46)
+    assert _duration_matches("22h 50m", 1370.3)
+    assert _duration_matches("45 min", 44.9)
+
+
+def test_duration_matches_null_duration_row_is_safe():
+    # A still-running snapshot has duration_min=None (_fmt_duration -> "-").
+    # It must never match a real duration string, and a "-" details string
+    # must only match another still-running snapshot.
+    assert not _duration_matches("0 min", None)
+    assert not _duration_matches("8h 18m", None)
+    assert _duration_matches("-", None)
+
+
+def test_duration_matches_rejects_drifted_row():
+    # The Manalac case: member saw a 0-min running snapshot; at apply time the
+    # row is a real 8.3h session. The removal must NOT match it.
+    assert not _duration_matches("0 min", 498.46)
+    assert not _duration_matches("22h 50m", 498.46)
+    assert not _duration_matches(None, 498.46)
+    assert not _duration_matches("", 498.46)
+
+
+# ---------------------------------------------------------------------------
+# entry-id sentinel prefix (Google Sheets scientific-notation mangling guard)
+# ---------------------------------------------------------------------------
+
+def test_prefill_roundtrip():
+    assert _strip_entry_id_prefix(_prefill_entry_id("539e17ab12cd")) == "539e17ab12cd"
+
+
+def test_strip_accepts_legacy_bare_ids():
+    assert _strip_entry_id_prefix("6b7c45ddd18a") == "6b7c45ddd18a"
+    assert _strip_entry_id_prefix("  6b7c45ddd18a  ") == "6b7c45ddd18a"
+    assert _strip_entry_id_prefix("") == ""
+
+
+def test_strip_handles_prefix_case_and_whitespace():
+    assert _strip_entry_id_prefix(" ID:6b7c45ddd18a ") == "6b7c45ddd18a"
+    assert _strip_entry_id_prefix("id: 6b7c45ddd18a") == "6b7c45ddd18a"
 
 
 if __name__ == "__main__":
