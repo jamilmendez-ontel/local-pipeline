@@ -94,6 +94,31 @@ def epoch_to_dt(epoch_ms):
         return None
 
 
+# Members clock in (start the attendance timer) on a DR task that is still
+# 'pending' with no requirement rows -- the timer is the FIRST thing that
+# exists on the task. Fetch timers for those while the work date is fresh so
+# DR Monitoring sees the clock-in the same day (Jamil Mendez 2026-08-11:
+# clock-in 9:08 AM PHT stayed invisible until the task left 'pending' at
+# ~4:33 PM PHT). Older pending tasks stay excluded: DR tasks are pre-created
+# months ahead (~17.8k pending rows in a 30-day window vs ~140 within this
+# lookback, measured 2026-08-11), and a blanket fetch would 8x the API calls.
+PENDING_TIMER_LOOKBACK_DAYS = 2
+
+
+def should_fetch_timers(status, req_count, work_date, today):
+    """Timer (attendance) fetch policy for one task. Everything non-pending,
+    non-cancelled is fetched; any status with requirement rows is fetched
+    (original rule, kept); a 0-req pending task is fetched only while its work
+    date is within PENDING_TIMER_LOOKBACK_DAYS of today."""
+    if status not in ("pending", "cancelled") or (req_count or 0) > 0:
+        return True
+    return (
+        status == "pending"
+        and work_date is not None
+        and today - timedelta(days=PENDING_TIMER_LOOKBACK_DAYS) <= work_date <= today
+    )
+
+
 class DailyReportsPipeline:
     def __init__(self):
         self.ext = BaseExtractor(pipeline_name="daily_reports")
@@ -267,14 +292,17 @@ class DailyReportsPipeline:
         # Split tasks for Step 4 (status_only tasks are status-refresh only —
         # no child fetches, no Step 5 reconcile):
         # - Requirements: only fetch for tasks with req_count > 0
-        # - Timers: fetch for ALL non-pending/cancelled tasks (timer exists even without requirements)
+        # - Timers: all non-pending/cancelled tasks, plus recent pending ones
+        #   (clock-in exists on a pending DR before anything else does) --
+        #   see should_fetch_timers()
         tasks_with_reqs = [t for t in all_tasks
                            if not t.get("status_only")
                            and t["task"].get("metrics", {}).get("reqCount", 0) > 0]
         tasks_for_timers = [t for t in all_tasks
                            if not t.get("status_only")
-                           and (t["task"].get("status") not in ("pending", "cancelled")
-                                or t["task"].get("metrics", {}).get("reqCount", 0) > 0)]
+                           and should_fetch_timers(t["task"].get("status"),
+                                                   t["task"].get("metrics", {}).get("reqCount", 0),
+                                                   t["work_date"], date.today())]
         logger.info(f"  With requirements: {len(tasks_with_reqs)}")
         logger.info(f"  For timer fetch: {len(tasks_for_timers)}")
 
