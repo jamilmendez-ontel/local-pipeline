@@ -15,9 +15,10 @@ from threading import Thread, Event
 from datetime import datetime, timezone
 from typing import List, Dict
 from config import (
-    SCHEMA_RAW, get_logger, retry_db, get_db, QA_FORMS
+    SCHEMA_RAW, get_logger, retry_db, get_db
 )
 from base_extractor import BaseExtractor
+from qa_forms_registry import load_qa_forms
 
 logger = get_logger("forms")
 
@@ -200,10 +201,10 @@ class FormsExtractor(BaseExtractor):
                     logger.error(f"Flush failed for {table_name} ({len(data):,} rows): {e}")
         logger.info("Loader complete")
 
-    def clear_old_raw_data(self):
+    def clear_old_raw_data(self, forms):
         """Clear old raw data (keep current run_id). Single query per table."""
         logger.info(f"Cleaning up old raw data (keeping run_id={self.run_id})...")
-        for form_config in QA_FORMS.values():
+        for form_config in forms.values():
             table = form_config["table_name"]
             retry_db(
                 lambda t=table: self.db.execute(
@@ -219,8 +220,10 @@ class FormsExtractor(BaseExtractor):
 
 def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
     """Main pipeline for extracting forms data with parallel processing"""
+    extractor = FormsExtractor()
+
     if forms is None:
-        forms = QA_FORMS
+        forms = load_qa_forms(extractor.db)
 
     logger.info(f"\n{'='*60}")
     logger.info("Forms Extraction Pipeline (Parallel)")
@@ -228,8 +231,6 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
     logger.info(f"Workers: {max_workers}")
     logger.info(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     logger.info(f"{'='*60}\n")
-
-    extractor = FormsExtractor()
 
     try:
         extractor.start_pipeline_run()
@@ -288,7 +289,7 @@ def run_forms_pipeline(forms: Dict = None, max_workers: int = MAX_WORKERS):
         total_records = extractor.total_loaded
 
         # Clean up old raw data now that new extraction succeeded
-        extractor.clear_old_raw_data()
+        extractor.clear_old_raw_data(forms)
 
         extractor.complete_pipeline_run("success", total_records)
 

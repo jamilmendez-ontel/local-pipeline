@@ -1,5 +1,6 @@
 """
-Export QA form data from Supabase to Excel — one workbook per TECH-OPS project (TS13-TS18).
+Export QA form data from Supabase to Excel — one workbook per TECH-OPS project registered
+and active in reference.ref_qa_forms.
 Matches the format of the QA_Form_TS*_Data_*.csv sample files.
 
 Each workbook has a single sheet named "Sheet1" with all QA form columns.
@@ -32,21 +33,13 @@ from dotenv import load_dotenv
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "swift_api_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
+from ts_projects import fetch_qa_export_projects
+
 ET = ZoneInfo("America/New_York")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENV_PATH = SCRIPT_DIR.parent / "swift_api_pipeline" / ".env"
 OUTPUT_DIR = SCRIPT_DIR / "data_sample" / "qa_form_exports"
-
-PROJECTS = [
-    ("TECH-OPS: TS13", "-NFkG865XjMXlwqZ1AqU"),
-    ("TECH-OPS: TS14", "-NV5j_QcTmdwoaGklFvf"),
-    ("TECH-OPS: TS15", "-Np5nDzlfJrK_nt5Ro7e"),
-    ("TECH-OPS: TS16", "-O99xSQdLiGywc6KRVw-"),
-    ("TECH-OPS: TS17", "-ONLJdAstPfeGwVNgpYH"),
-    ("TECH-OPS: TS18", "-O_IpQNpLVwhdVC3QYIm"),
-    ("TECH-OPS: TS19", "-OmzvGwfYsSskngv6SEo"),
-]
 
 # (db_column, excel_header) in display order
 COLUMNS = [
@@ -223,6 +216,14 @@ async def export(output_dir: Path):
     await conn.execute("SET statement_timeout = '300s'")
     await check_pipeline_guard(conn)
 
+    projects = await fetch_qa_export_projects(conn)
+    if not projects:
+        await conn.close()
+        raise SystemExit(
+            "GUARD FAILED: reference.ref_qa_forms returned no active registered projects - "
+            "refusing silent empty export."
+        )
+
     # Get run_id from latest successful pipeline run
     run_row = await conn.fetchrow("""
         SELECT run_id FROM pipeline.pipeline_runs
@@ -238,17 +239,17 @@ async def export(output_dir: Path):
 
     try:
         # Pipeline: prefetch next project while writing current one
-        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[0][0], run_id_uuid))
+        next_fetch = asyncio.ensure_future(conn.fetch(QUERY, projects[0][0], run_id_uuid))
 
-        for i, (project_name, project_did) in enumerate(PROJECTS):
+        for i, (project_name, project_did) in enumerate(projects):
             ts_label = project_name.split(": ")[1]
             t_q      = time.time()
 
             rows      = await next_fetch
             t_fetched = time.time()
 
-            if i + 1 < len(PROJECTS):
-                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, PROJECTS[i + 1][0], run_id_uuid))
+            if i + 1 < len(projects):
+                next_fetch = asyncio.ensure_future(conn.fetch(QUERY, projects[i + 1][0], run_id_uuid))
 
             count     = len(rows)
             file_path = output_dir / make_filename(ts_label, project_did, export_dt)

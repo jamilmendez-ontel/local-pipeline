@@ -33,7 +33,7 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
 | `pipeline-timer.yml` | Nightly Apps Script | `stg_timer_activities` + `stg_timer_corrections` apply + clean rebuild |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
-| `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form` |
+| `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
 | `pipeline-calendar-events.yml` | Apps Script (5 AM & 5 PM ET) | Google Calendar → `stg_calendar_events` (incremental, AI-normalized; per-kind `analytics.v_calendar_*` views). Self-heals on failure: 4 in-job attempts with backoff, plus the auto-rerun workflow below |
 | `pipeline-calendar-events-autorerun.yml` | `workflow_run` on calendar-events failure | Safety net: waits 10 min then re-runs the failed calendar-events jobs, up to 2 automatic reruns (`run_attempt < 3`), so a failed run recovers in ~20-30 min instead of waiting ~12h for the next dispatch |
@@ -65,7 +65,7 @@ main.py
 │   ├── extract_asset_tasks.py → raw_asset_tasks (6 workers, COPY)
 │   │   └── transform.py → stg_assets (RPC), stg_asset_tasks (server-side SQL)
 │   ├── pipeline.py:user_priorities → raw_user_priorities → stg_user_priorities
-│   ├── extract_forms.py → raw_form_qa_ts13..ts18 → stg_qa_form
+│   ├── extract_forms.py → raw_form_qa_ts13..ts19 (dynamic, `reference.ref_qa_forms`) → stg_qa_form
 │   └── extract_timer.py → raw_timer_activities → stg_timer_activities
 │       └── data_staging.rebuild_timer_clean() → stg_timer_activities_clean
 │
@@ -123,6 +123,27 @@ Pilot scope is TS17–19 (`--projects all13` widens to phase 2). Measured
   `--full-walk`); phase 2 → restructure the current pipeline on this
   pattern (and gc-asset-tasks after it) after 7+ clean days at full scope
   with runtime/IO a small fraction of the full reload's.
+
+### Dynamic TS project coverage + QA form auto-discovery (2026-08-11)
+
+The three nightly Excel export scripts (`scripts-reference/export_asset_tasks_excel.py`,
+`export_timer_excel.py`, `export_qa_form_excel.py`, fired by `pipeline-asset-tasks-export.yml`
+/ `pipeline-timer.yml` / `pipeline-forms.yml`) read their TS project list from
+`reference.ref_ontel_techops_projects` (`ts_projects.py`) instead of a hardcoded TS13–TS19
+list, so a new TS project is covered the moment it lands in `stg_projects`, no code change
+needed. A brand-new TS with no rows yet is printed as `SKIPPED (new/empty)` and left out of
+that night's workbook rather than failing the export guard.
+
+`config.py`'s `QA_FORMS` dict has been replaced by `reference.ref_qa_forms` (migration 231,
+RLS on, seeded with TS13–TS19). `pipeline-forms.yml` discovers a new TS's QA form
+automatically before extraction: it calls `GET /api/organizations/{org}/forms` and matches
+the title `ACTIVE - QA Form TS{n}`. Exactly one match registers the form (inserts the
+`ref_qa_forms` row, creates `raw_form_qa_ts{n}` from a version-controlled DDL template) and
+emails jamil.mendez@ontel.co a veto-framed confirmation; zero matches retry quietly every
+night (with a 7-day escalation email once the TS has asset-task rows but still no form);
+multiple matches send an alert asking for a manual pick. Discovery failures degrade to an
+alert email and never block that night's extraction of the already-registered forms. See
+`docs/superpowers/specs/2026-08-11-ts-project-auto-coverage-design.md` for the full design.
 
 ### Targeted extractors (report-driven)
 
