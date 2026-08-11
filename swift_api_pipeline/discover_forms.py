@@ -61,15 +61,29 @@ def discover_forms(headless: bool = True, filter_pattern: str = None):
             password_input.fill(SWIFT_PASSWORD)
             print(f"[{datetime.now():%H:%M:%S}] Filled password field")
 
-            # Click login button - wait a moment for password field to settle
+            # Submit - Enter in the password field (the Auth0 Lock widget can
+            # swallow synthetic button clicks), then click as a fallback.
             time.sleep(0.5)
-            login_button = page.locator('button:has-text("Log in")').first
-            # Use force click to avoid element interception issues
-            login_button.click(force=True)
-            print(f"[{datetime.now():%H:%M:%S}] Clicked login button")
+            password_input.press("Enter")
+            print(f"[{datetime.now():%H:%M:%S}] Submitted login (Enter)")
+            try:
+                page.wait_for_selector('input[type="email"]', state="hidden", timeout=10000)
+            except PlaywrightTimeout:
+                login_button = page.locator('button:has-text("Log in")').first
+                login_button.click(force=True)
+                print(f"[{datetime.now():%H:%M:%S}] Enter didn't submit - clicked login button")
 
-            # Wait for navigation after login
+            # Wait for navigation after login. networkidle alone returns before
+            # Auth0 finishes — wait until the login form is actually gone.
             print(f"[{datetime.now():%H:%M:%S}] Waiting for login to complete...")
+            try:
+                page.wait_for_selector('input[type="email"]', state="hidden", timeout=60000)
+            except PlaywrightTimeout:
+                page.screenshot(path="login_debug.png", full_page=True)
+                raise RuntimeError(
+                    "Login did not complete: login form still visible after 60s "
+                    "(see login_debug.png — check credentials or an error banner)"
+                )
             page.wait_for_load_state("networkidle", timeout=30000)
             time.sleep(2)  # Extra wait for SPA to settle
 
