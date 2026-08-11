@@ -1617,7 +1617,10 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
                     logger.warning(
                         f"Stale removal {entry_id}: no uncovered row matches the "
                         f"details duration '{det_dur}' (group has "
-                        f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}); "
+                        f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}) "
+                        f"for {group[0].get('user_email')} / "
+                        f"{group[0].get('site_name') or '(no site)'} on "
+                        f"{_entry_date_et(group[0]['start_time'])}; "
                         f"entry drifted materially — skipping for manual review")
                     continue
                 # The FIRST row is stored under the response's own stale

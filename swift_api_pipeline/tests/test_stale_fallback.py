@@ -150,6 +150,15 @@ def test_duration_matches_same_formatter_output():
     assert _duration_matches("45 min", 44.9)
 
 
+def test_duration_matches_null_duration_row_is_safe():
+    # A still-running snapshot has duration_min=None (_fmt_duration -> "-").
+    # It must never match a real duration string, and a "-" details string
+    # must only match another still-running snapshot.
+    assert not _duration_matches("0 min", None)
+    assert not _duration_matches("8h 18m", None)
+    assert _duration_matches("-", None)
+
+
 def test_duration_matches_rejects_drifted_row():
     # The Manalac case: member saw a 0-min running snapshot; at apply time the
     # row is a real 8.3h session. The removal must NOT match it.
