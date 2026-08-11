@@ -17,6 +17,19 @@ does not require equality; it requires every difference to be EXPLAINED:
      columns are task_submitted_by_did / task_approved_by_did AND the
      corresponding *_by_name is NULL on both sides (dangling user reference
      in the export). Any other differing column = UNEXPLAINED -> FAIL.
+  4. LIFECYCLE LAG (approved by Jamil 2026-08-10): the walk prunes at the
+     asset level, but assign/schedule edits bump only the TASK lastUpdated,
+     so INC lags CURRENT on assignment columns until the weekly full-walk
+     sweep; conversely INC walks hourly while CURRENT reloads nightly, so
+     INC legitimately LEADS on submit/approve for up to a day. A diff row
+     is tolerated as lifecycle_lag when every differing column is
+     lifecycle-class AND: assignment/schedule columns may differ either
+     way; task_status and the submit/approve/cancel event columns must be
+     strictly AHEAD on INC (the walker seeing an asset-touching event LATE
+     is a bug, never lag); differing event dates on INC are within
+     LAG_CAP_DAYS. The whole tolerance is active only while the sweep is
+     alive (last successful baseline/full-walk within SWEEP_FRESH_DAYS) —
+     a dead sweep means the bound is gone, so the gate goes strict again.
 
 Hash match remains the trivial-pass fast path. EVERY run still inserts one
 row per project into pipeline.inc_audit_results (samples LIMIT 50/20 as
@@ -32,10 +45,12 @@ clears on the next; only persistent unexplained drift is the bug signal).
 import argparse
 import json
 import sys
+from datetime import date, datetime, timedelta, timezone
 
 from config import SCHEMA_PIPELINE, SCHEMA_STAGING, setup_logging, get_logger
 from db_tx import close_tx_db, get_tx_db, retry_tx_db
-from extract_asset_tasks_inc import PILOT_PROJECTS, _project_tail, resolve_projects
+from extract_asset_tasks_inc import (PILOT_PROJECTS, PIPELINE_NAME,
+                                     _project_tail, resolve_projects)
 
 logger = get_logger("audit_asset_tasks_inc")
 
@@ -125,6 +140,73 @@ NAME_FOR_DID = {"task_submitted_by_did": "task_submitted_by_name",
                 "task_approved_by_did": "task_approved_by_name",
                 "task_cancelled_by_did": "task_cancelled_by_name"}
 
+# Doctrine rule 4: bounded lifecycle lag between the hourly walk and the
+# nightly export reload / weekly sweep.
+LAG_CAP_DAYS = 7        # differing INC-side event dates may be this old
+SWEEP_FRESH_DAYS = 8    # tolerance dies with the weekly sweep (7d + slack)
+
+# Assignment/schedule edits bump only the task lastUpdated (asset-level
+# pruning cannot see them): may lag in EITHER direction.
+ASSIGNMENT_COLS = {"task_scheduled", "task_assigned_to_did",
+                   "task_assigned_to_collection", "task_assigned_to_name",
+                   "task_assigned_to_email"}
+# Submit/approve/cancel touch the asset, so the walk sees them within one
+# cycle: tolerated only when INC is AHEAD (current NULL -> inc value).
+EVENT_COLS = {"task_submitted_on", "task_submitted_by_did",
+              "task_submitted_by_name", "task_submitted_by_email",
+              "task_approved_on", "task_approved_by_did",
+              "task_approved_by_name", "task_approved_by_email",
+              "task_cancelled_on", "task_cancelled_by_did",
+              "task_cancelled_by_name", "task_cancelled_by_email"}
+EVENT_DATE_COLS = {"task_submitted_on", "task_approved_on",
+                   "task_cancelled_on"}
+LIFECYCLE_COLS = {"task_status"} | ASSIGNMENT_COLS | EVENT_COLS
+# Strictly-ahead check for task_status; terminal states share a rank so no
+# terminal->terminal flip ever counts as "ahead".
+STATUS_RANK = {"pending": 0, "in_progress": 1, "submitted": 2,
+               "rejected": 3, "approved": 3, "cancelled": 3}
+
+LAST_SWEEP_SQL = f"""
+SELECT max(completed_at) AS last_sweep
+FROM {SCHEMA_PIPELINE}.pipeline_runs
+WHERE pipeline_name = '{PIPELINE_NAME}' AND status = 'success'
+  AND metadata->>'mode' IN ('baseline', 'full-walk')
+"""
+
+
+def _as_date(value):
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _is_lifecycle_lag(diff_cols, row, today):
+    """Doctrine rule 4 for one shared-row diff. `row` carries c_<col> /
+    i_<col> values; `diff_cols` is the differing subset of COMPARE_COLS."""
+    if not diff_cols or not set(diff_cols) <= LIFECYCLE_COLS:
+        return False
+    for col in diff_cols:
+        cur, inc = row[f"c_{col}"], row[f"i_{col}"]
+        if col in ASSIGNMENT_COLS:
+            continue
+        if col == "task_status":
+            if cur not in STATUS_RANK or inc not in STATUS_RANK:
+                return False
+            if STATUS_RANK[cur] >= STATUS_RANK[inc]:
+                return False
+        else:  # event column: fills in on INC only, and recently
+            if cur is not None or inc is None:
+                return False
+            if col in EVENT_DATE_COLS and \
+                    (today - _as_date(inc)).days > LAG_CAP_DAYS:
+                return False
+    return True
+
+
+def _lag_tolerance_active(last_sweep_at, now):
+    """Rule 4 is only honest while the weekly sweep bounds the lag."""
+    if last_sweep_at is None:
+        return False
+    return now - last_sweep_at <= timedelta(days=SWEEP_FRESH_DAYS)
+
 
 def _column_diffs(db, project_did, limit=20):
     """Full-column comparison for task_dids present on both sides. Returns
@@ -153,11 +235,16 @@ def _column_diffs(db, project_did, limit=20):
     return diffs
 
 
-def _classify_column_diffs(db, project_did):
-    """Doctrine rule 3 over ALL shared-row diffs (no LIMIT). A diff row is a
-    tolerated dangling-DID row when every differing column is in
-    DANGLING_DID_COLS and its paired *_by_name is NULL on BOTH sides.
-    Returns (dangling_rows, unexplained_rows, unexplained_sample)."""
+def _classify_column_diffs(db, project_did, today=None, lag_active=True):
+    """Doctrine rules 3+4 over ALL shared-row diffs (no LIMIT). A diff row
+    is tolerated as dangling-DID (rule 3, checked first) when every
+    differing column is in DANGLING_DID_COLS and its paired *_by_name is
+    NULL on BOTH sides; otherwise as lifecycle_lag (rule 4) when
+    _is_lifecycle_lag holds and the sweep-freshness gate is on.
+    Returns (dangling_rows, lifecycle_lag_rows, unexplained_rows,
+    unexplained_sample)."""
+    if today is None:
+        today = datetime.now(timezone.utc).date()
     c_cols = ", ".join(f"c.{col} AS c_{col}" for col in COMPARE_COLS)
     i_cols = ", ".join(f"i.{col} AS i_{col}" for col in COMPARE_COLS)
     c_tuple = ", ".join(f"c.{col}" for col in COMPARE_COLS)
@@ -170,19 +257,22 @@ def _classify_column_diffs(db, project_did):
         project_did, timeout=AUDIT_QUERY_TIMEOUT,
     )
     dangling = 0
+    lifecycle_lag = 0
     unexplained = 0
     unexplained_sample = {}
     for r in rows:
         diff_cols = [col for col in COMPARE_COLS
                      if r[f"c_{col}"] != r[f"i_{col}"]]
-        tolerated = bool(diff_cols) and all(
+        is_dangling = bool(diff_cols) and all(
             col in DANGLING_DID_COLS
             and r[f"c_{NAME_FOR_DID[col]}"] is None
             and r[f"i_{NAME_FOR_DID[col]}"] is None
             for col in diff_cols
         )
-        if tolerated:
+        if is_dangling:
             dangling += 1
+        elif lag_active and _is_lifecycle_lag(diff_cols, r, today):
+            lifecycle_lag += 1
         else:
             unexplained += 1
             if len(unexplained_sample) < 20:
@@ -190,10 +280,10 @@ def _classify_column_diffs(db, project_did):
                     col: [str(r[f"c_{col}"]) if r[f"c_{col}"] is not None else None,
                           str(r[f"i_{col}"]) if r[f"i_{col}"] is not None else None]
                     for col in diff_cols}
-    return dangling, unexplained, unexplained_sample
+    return dangling, lifecycle_lag, unexplained, unexplained_sample
 
 
-def audit_project(db, project_did, current_side, inc_side):
+def audit_project(db, project_did, current_side, inc_side, lag_active=True):
     """Compare one project's two sides under the doctrine. Returns the
     inc_audit_results row as a dict (without id/audited_at) plus a
     'doctrine_pass' key (not persisted as a column; encoded in notes)."""
@@ -223,8 +313,8 @@ def audit_project(db, project_did, current_side, inc_side):
                  timeout=AUDIT_QUERY_TIMEOUT)[0]
     extra_total = db.fetch(EXTRA_COUNT_SQL, project_did,
                            timeout=AUDIT_QUERY_TIMEOUT)[0]["extra_total"]
-    dangling, unexplained_diffs, unexplained_sample = _classify_column_diffs(
-        db, project_did)
+    dangling, lag_diffs, unexplained_diffs, unexplained_sample = \
+        _classify_column_diffs(db, project_did, lag_active=lag_active)
 
     doctrine_pass = (m["unexplained_missing"] == 0 and unexplained_diffs == 0)
 
@@ -250,7 +340,10 @@ def audit_project(db, project_did, current_side, inc_side):
                f"UNEXPLAINED={m['unexplained_missing']}); "
                f"adhoc_extra={extra_total}; "
                f"col_diffs(dangling_did={dangling}, "
-               f"UNEXPLAINED={unexplained_diffs}); samples LIMIT 50/20"),
+               f"lifecycle_lag={lag_diffs}, "
+               f"UNEXPLAINED={unexplained_diffs})"
+               + ("" if lag_active else "; LAG TOLERANCE OFF (sweep stale)")
+               + "; samples LIMIT 50/20"),
     )
     return result
 
@@ -291,10 +384,24 @@ def main():
                 "drift right after either run is expected; persistent "
                 "same-direction drift is the bug signal.")
 
+    last_sweep = db.fetch(LAST_SWEEP_SQL,
+                          timeout=AUDIT_QUERY_TIMEOUT)[0]["last_sweep"]
+    lag_active = _lag_tolerance_active(last_sweep, datetime.now(timezone.utc))
+    if lag_active:
+        logger.info(f"Rule 4 lifecycle-lag tolerance ACTIVE "
+                    f"(last sweep {last_sweep:%Y-%m-%d %H:%M} UTC)")
+    else:
+        logger.warning(
+            f"Rule 4 lifecycle-lag tolerance OFF — last successful "
+            f"baseline/full-walk is {last_sweep or 'MISSING'} (> "
+            f"{SWEEP_FRESH_DAYS} days): the weekly sweep is not bounding "
+            f"the lag; fix the Saturday dispatch before trusting FAILs")
+
     any_fail = False
     for did in dids:
         tail = tail_by_did[did]
-        result = audit_project(db, did, current_rows.get(did), inc_rows.get(did))
+        result = audit_project(db, did, current_rows.get(did), inc_rows.get(did),
+                               lag_active=lag_active)
         retry_tx_db(lambda r=result: persist_result(db, r),
                     description=f"insert inc_audit_results [{tail}]")
         if result["doctrine_pass"]:
