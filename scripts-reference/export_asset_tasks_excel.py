@@ -3,6 +3,10 @@ Export asset tasks from raw_asset_tasks to two ZIP files:
   1. CSV ZIP  — 50K-row chunks, attached to email (~21 MB)
   2. XLSX ZIP — single workbook with one sheet per project, uploaded to Drive (~168 MB)
 
+TS project list is dynamic (reference.ref_ontel_techops_projects via ts_projects.py,
+TS13+) instead of a fixed 7-project list; new/empty TS projects are skipped rather
+than failing the guard.
+
 Output:
     scripts-reference/asset_task_extract/YYYYMMDD.zip   (CSV chunks)
     scripts-reference/YYYYMMDD.zip                      (XLSX workbook)
@@ -34,21 +38,13 @@ from xlsxwriter import Workbook
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "swift_api_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
+from ts_projects import fetch_ts_projects, partition_by_rows
+
 ET = ZoneInfo("America/New_York")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENV_PATH   = SCRIPT_DIR.parent / "swift_api_pipeline" / ".env"
 OUTPUT_DIR = SCRIPT_DIR / "asset_task_extract"
-
-PROJECTS = [
-    "TECH-OPS: TS13",
-    "TECH-OPS: TS14",
-    "TECH-OPS: TS15",
-    "TECH-OPS: TS16",
-    "TECH-OPS: TS17",
-    "TECH-OPS: TS18",
-    "TECH-OPS: TS19",
-]
 
 # CSV columns in order — names come directly from JSONB keys, plus retrieved_at
 CSV_COLUMNS = [
@@ -121,7 +117,12 @@ ORDER BY data->>'Asset_ID', data->>'Task_Name'
 
 
 async def check_pipeline_guard(conn):
-    """Abort if the latest asset_tasks_extract run failed or any project has missing rows."""
+    """Abort if the latest asset_tasks_extract run failed; skip TS projects with no rows.
+
+    Returns the list of TS project names that have rows in stg_asset_tasks
+    (new/empty TS projects are skipped, not treated as a failure — the
+    "data shrank" case is the extract guard's job since 9168639).
+    """
     row = await conn.fetchrow("""
         SELECT status, records_extracted, error_message,
                started_at AT TIME ZONE 'America/New_York' AS started_et
@@ -148,7 +149,10 @@ async def check_pipeline_guard(conn):
             f"(status={status}, error={error}). Aborting export."
         )
 
-    # Verify all 6 projects have rows in stg_asset_tasks
+    # Fetch the dynamic TS project list and skip any with no rows yet
+    projects = await fetch_ts_projects(conn)
+    names = [p["project_name"] for p in projects]
+
     project_counts = await conn.fetch("""
         SELECT p.project_name, COUNT(at.id) AS row_count
         FROM data_staging.stg_projects p
@@ -156,17 +160,18 @@ async def check_pipeline_guard(conn):
         WHERE p.project_name = ANY($1::text[])
         GROUP BY p.project_name
         ORDER BY p.project_name
-    """, PROJECTS)
+    """, names)
 
-    missing = [r["project_name"] for r in project_counts if r["row_count"] == 0]
-    if missing:
-        raise SystemExit(
-            f"GUARD FAILED: Projects with 0 rows in stg_asset_tasks: {', '.join(missing)}. "
-            f"Aborting export."
-        )
+    counts = {r["project_name"]: r["row_count"] for r in project_counts}
+    with_rows, empty = partition_by_rows(names, counts)
 
-    for r in project_counts:
-        print(f"  {r['project_name']}: {r['row_count']:,} rows")
+    for name in with_rows:
+        print(f"  {name}: {counts[name]:,} rows")
+    for name in empty:
+        print(f"  {name}: SKIPPED (new/empty - no staging rows yet)")
+
+    if not with_rows:
+        raise SystemExit("GUARD FAILED: no TS project has any rows in stg_asset_tasks. Aborting export.")
 
     # Verify raw and staging row counts match
     counts = await conn.fetchrow("""
@@ -189,6 +194,7 @@ async def check_pipeline_guard(conn):
         )
 
     print("  Guard passed.\n")
+    return with_rows
 
 
 def rows_to_csv_bytes(rows: list) -> bytes:
@@ -288,7 +294,7 @@ async def export(output_dir: Path):
     # Guard check + metadata on a short-lived connection
     conn = await asyncpg.connect(**dsn)
     await conn.execute("SET statement_timeout = '600s'")
-    await check_pipeline_guard(conn)
+    projects = await check_pipeline_guard(conn)
 
     run_row = await conn.fetchrow("""
         SELECT run_id FROM pipeline.pipeline_runs
@@ -302,7 +308,7 @@ async def export(output_dir: Path):
         FROM data_staging.stg_projects
         WHERE project_name = ANY($1::text[])
         ORDER BY project_name
-    """, PROJECTS)
+    """, projects)
     project_map = {r["project_name"]: r["project_did"] for r in proj_rows}
     await conn.close()
 
@@ -315,7 +321,7 @@ async def export(output_dir: Path):
     project_data = {}  # {ts_label: [[col_values], ...]}
 
     with zipfile.ZipFile(csv_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for project_name in PROJECTS:
+        for project_name in projects:
             project_did = project_map[project_name]
             ts_label    = project_name.split(": ")[1]
             t_proj      = time.time()
