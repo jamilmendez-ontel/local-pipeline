@@ -704,7 +704,9 @@ def transform_qa_forms(db, run_id: str):
     """Transform raw QA form tables to stg_qa_form using server-side SQL.
 
     Runs entirely in PostgreSQL — no data transfer to Python.
-    Uses UNION ALL across all 6 raw form tables, with JSONB field extraction.
+    Uses UNION ALL across the raw form tables in the dynamic registry
+    (reference.ref_qa_forms, seeded + grown by qa_form_discovery.py auto-
+    discovery), with JSONB field extraction.
     """
     print(f"[{datetime.now():%H:%M:%S}] Transforming QA forms...")
 

@@ -320,6 +320,10 @@ async def export(output_dir: Path):
             t_fetched = time.time()
 
             count = len(rows)
+            if count == 0:
+                print(f"{ts_label}: SKIPPED (new/empty - no timer rows)")
+                continue
+
             file_path = output_dir / make_filename(ts_label, export_dt)
 
             await loop.run_in_executor(executor, write_workbook, file_path, rows)
