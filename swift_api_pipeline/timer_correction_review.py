@@ -278,7 +278,20 @@ def _parse_entry_details(details: str) -> dict | None:
         "site": None if site in ("", "(no site)") else site,
         "task": None if task in ("", "(no task)") else task,
         "start_date": start_date,  # Eastern calendar date of start_time
+        # _fmt_duration string of the snapshot the member actually saw in the
+        # review email. Identifies WHICH row of a start-key group the response
+        # targets — a group can mix runaway/ghost snapshots with a real session.
+        "duration_str": parts[-1].strip() or None,
     }
+
+
+def _duration_matches(details_duration_str, duration_min) -> bool:
+    """True when a raw row's duration renders to the same _fmt_duration string
+    the member saw in the review email. String comparison on the formatter
+    output — the details prefill was built with the same formatter."""
+    if not details_duration_str:
+        return False
+    return _fmt_duration(duration_min) == details_duration_str
 
 
 def _group_rows(rows: list[dict]) -> dict:
@@ -509,11 +522,26 @@ def _escape_html(value) -> str:
              .replace('"', "&quot;"))
 
 
+def _prefill_entry_id(entry_id: str) -> str:
+    """Sentinel-prefix the entry id for form prefills. An all-digit-plus-E hex
+    hash (e.g. '539e17ab...') lands in Google Sheets as a NUMBER in scientific
+    notation ('5.39E+17'), destroying the hash and forcing every such response
+    into the stale fallback. The 'id:' prefix keeps Sheets treating it as text."""
+    return f"id:{entry_id}"
+
+
+def _strip_entry_id_prefix(raw: str) -> str:
+    """Undo _prefill_entry_id on the response-reading side. Accepts legacy
+    bare ids (pre-prefix responses) unchanged."""
+    raw = (raw or "").strip()
+    return raw[3:].strip() if raw.lower().startswith("id:") else raw
+
+
 def _correct_form_url(entry_id: str, details: str) -> str:
     """Build a pre-filled Correction form URL."""
     base = f"https://docs.google.com/forms/d/e/{CORRECT_FORM_ID}/viewform"
     return (f"{base}"
-            f"?{CORRECT_FORM_ENTRY_ID}={quote(entry_id)}"
+            f"?{CORRECT_FORM_ENTRY_ID}={quote(_prefill_entry_id(entry_id))}"
             f"&{CORRECT_FORM_ENTRY_DETAILS}={quote(details)}")
 
 
@@ -521,7 +549,7 @@ def _remove_form_url(entry_id: str, details: str) -> str:
     """Build a pre-filled Remove form URL."""
     base = f"https://docs.google.com/forms/d/e/{REMOVE_FORM_ID}/viewform"
     return (f"{base}"
-            f"?{REMOVE_FORM_ENTRY_ID}={quote(entry_id)}"
+            f"?{REMOVE_FORM_ENTRY_ID}={quote(_prefill_entry_id(entry_id))}"
             f"&{REMOVE_FORM_ENTRY_DETAILS}={quote(details)}")
 
 
@@ -1094,7 +1122,7 @@ def read_form_responses() -> list[dict]:
                 if i < len(headers):
                     row_dict[headers[i]] = val.strip()
 
-            entry_id = row_dict.get("entry id", "").strip()
+            entry_id = _strip_entry_id_prefix(row_dict.get("entry id", ""))
             if not entry_id:
                 continue
 
@@ -1128,7 +1156,7 @@ def read_form_responses() -> list[dict]:
                 if i < len(headers):
                     row_dict[headers[i]] = val.strip()
 
-            entry_id = row_dict.get("entry id", "").strip()
+            entry_id = _strip_entry_id_prefix(row_dict.get("entry id", ""))
             if not entry_id:
                 continue
 
@@ -1566,17 +1594,36 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
                                f"(details fallback: unparseable/no match/ambiguous), skipping")
                 continue
             uncovered = _uncovered_rows(db, group)
+            det = _parse_entry_details(resp.get("details") or "") or {}
+            det_dur = det.get("duration_str")
 
             if action == "remove":
                 if not uncovered:
                     logger.info(f"Stale removal {entry_id}: start-key group already "
                                 f"fully covered by corrections/removals, nothing to do")
                     continue
-                # Remove every drifted snapshot of the timer that isn't already
-                # accounted for. The FIRST row is stored under the response's
-                # own stale entry_id so the response is marked processed and is
-                # never re-resolved on later runs; siblings get their real hash.
-                for i, row in enumerate(uncovered):
+                # Remove ONLY the snapshot(s) the member actually saw — the
+                # rows whose duration renders to the details prefill's duration
+                # string. A start-key group can mix runaway/ghost snapshots
+                # with a REAL session (same start, different end); bulk-removing
+                # the whole group erased 22.6h of valid work across 9 member-
+                # days before 2026-08-10. If nothing matches, the entry drifted
+                # materially after the review email (e.g. a 0-min running
+                # snapshot completed into a real session) — skip for manual
+                # review instead of guessing.
+                targets = [r for r in uncovered
+                           if _duration_matches(det_dur, r.get("duration_min"))]
+                if not targets:
+                    logger.warning(
+                        f"Stale removal {entry_id}: no uncovered row matches the "
+                        f"details duration '{det_dur}' (group has "
+                        f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}); "
+                        f"entry drifted materially — skipping for manual review")
+                    continue
+                # The FIRST row is stored under the response's own stale
+                # entry_id so the response is marked processed and is never
+                # re-resolved on later runs; siblings get their real hash.
+                for i, row in enumerate(targets):
                     row_eid = entry_id if i == 0 else _make_entry_id(
                         row["project_did"], row["user_email"], row["start_time"],
                         row.get("site_name"), row.get("site_id"), row.get("task"),
@@ -1618,14 +1665,26 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
                 applied += 1
                 continue
 
-            # Correction: only safe when exactly one row of the group is still
-            # unaccounted for — that row is what the member's edit refers to.
-            if len(uncovered) != 1:
+            # Correction: prefer the row whose duration matches the details
+            # prefill (the snapshot the member saw). Fall back to the single
+            # uncovered row only when the group is unambiguous anyway.
+            dur_matches = [r for r in uncovered
+                           if _duration_matches(det_dur, r.get("duration_min"))]
+            if len(dur_matches) == 1:
+                entry = dur_matches[0]
+            elif len(uncovered) == 1:
+                entry = uncovered[0]
+                if det_dur and not _duration_matches(det_dur, entry.get("duration_min")):
+                    logger.info(f"Stale correction {entry_id}: row drifted since the "
+                                f"review email ('{det_dur}' -> "
+                                f"{_fmt_duration(entry.get('duration_min'))}); "
+                                f"correction wins, applying to the drifted row")
+            else:
                 logger.warning(f"Stale correction {entry_id}: "
                                f"{len(uncovered)} uncovered rows in start-key group, "
+                               f"none/multiple match details duration '{det_dur}', "
                                f"cannot resolve unambiguously, skipping")
                 continue
-            entry = uncovered[0]
             logger.info(f"Stale correction {entry_id}: resolved via details fallback "
                         f"to current row ({_fmt_duration(entry.get('duration_min'))})")
 
