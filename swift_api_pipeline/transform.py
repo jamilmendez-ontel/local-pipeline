@@ -10,8 +10,9 @@ from datetime import datetime, date as _date
 from zoneinfo import ZoneInfo
 from config import (
     get_db, SCHEMA_RAW, SCHEMA_STAGING, SCHEMA_REFERENCE, SCHEMA_PIPELINE,
-    retry_db, QA_FORMS, get_logger
+    retry_db, get_logger
 )
+from qa_forms_registry import load_qa_forms
 
 logger = get_logger("transform")
 
@@ -707,6 +708,8 @@ def transform_qa_forms(db, run_id: str):
     """
     print(f"[{datetime.now():%H:%M:%S}] Transforming QA forms...")
 
+    qa_forms = load_qa_forms(db)
+
     # Clear ALL existing staging data (full refresh)
     db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_qa_form')
     print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_qa_form")
@@ -724,7 +727,7 @@ def transform_qa_forms(db, run_id: str):
 
     # Build UNION ALL across all form tables
     union_parts = []
-    for form_name, form_config in QA_FORMS.items():
+    for form_name, form_config in qa_forms.items():
         table_name = form_config["table_name"]
         form_id = form_config["form_id"]
 
@@ -880,7 +883,8 @@ def run_qa_forms_transform(run_id: str = None):
 
     qa_count = transform_qa_forms(db, run_id)
 
-    raw_tables = [cfg["table_name"] for cfg in QA_FORMS.values()]
+    qa_forms = load_qa_forms(db)
+    raw_tables = [cfg["table_name"] for cfg in qa_forms.values()]
     print(f"\nRow Count Validation:")
     validate_transform_counts(db, raw_tables, "stg_qa_form", run_id, qa_count)
 

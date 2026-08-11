@@ -48,46 +48,6 @@ def get_logger(name: str) -> logging.Logger:
 from db import get_db, close_db, reconnect_db, retry_db
 
 
-# QA Forms configuration (TS13+) — single source of truth
-QA_FORMS = {
-    "qa_ts13": {
-        "form_id": "-NH1hUPkaKtPdd7BK9cb",
-        "table_name": "raw_form_qa_ts13",
-        "display_name": "QA Form TS13"
-    },
-    "qa_ts14": {
-        "form_id": "-NXCg4vTDNVykN8ioMYp",
-        "table_name": "raw_form_qa_ts14",
-        "display_name": "QA Form TS14"
-    },
-    "qa_ts15": {
-        "form_id": "-Np6o9OCL4RWIJq68HJe",
-        "table_name": "raw_form_qa_ts15",
-        "display_name": "QA Form TS15"
-    },
-    "qa_ts16": {
-        "form_id": "-O9ACLN3je1w7oEoG5hY",
-        "table_name": "raw_form_qa_ts16",
-        "display_name": "QA Form TS16"
-    },
-    "qa_ts17": {
-        "form_id": "-ONMD-cGBq-_3r9ybaAq",
-        "table_name": "raw_form_qa_ts17",
-        "display_name": "QA Form TS17"
-    },
-    "qa_ts18": {
-        "form_id": "-O_J2hPlryTezP9RhujA",
-        "table_name": "raw_form_qa_ts18",
-        "display_name": "QA Form TS18"
-    },
-    "qa_ts19": {
-        "form_id": "-Omun_NWXeQE1tEhSPXf",
-        "table_name": "raw_form_qa_ts19",
-        "display_name": "QA Form TS19"
-    },
-}
-
-
 # ---- Invoicing Form (Quote Automation) ----------------------------------
 # Swift forms whose requirement-responses feed the quotation pipeline.
 # Add a new DID here to onboard a future invoicing form — no schema change.
