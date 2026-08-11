@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS {schema}.{table} (
 );
 ALTER TABLE {schema}.{table} ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON {schema}.{table} FROM anon, authenticated;
+CREATE INDEX IF NOT EXISTS idx_{table}_run_id ON {schema}.{table}(run_id);
+CREATE INDEX IF NOT EXISTS idx_{table}_data ON {schema}.{table} USING GIN(data);
 """
 
 
@@ -123,20 +125,48 @@ def _project_state(db, ts_number):
 
 
 def run_discovery(db, token, send_email=True):
-    """Register QA forms for unregistered TS projects. Returns new ts_numbers."""
-    projects = db.fetch(
-        f"SELECT project_number FROM {SCHEMA_REFERENCE}.ref_ontel_techops_projects "
-        f"WHERE project_number >= $1", MIN_TS_NUMBER,
-    )
-    registered = {
-        r["ts_number"] for r in
-        db.fetch(f"SELECT ts_number FROM {SCHEMA_REFERENCE}.ref_qa_forms")
-    }
-    missing = missing_ts_numbers(projects, registered)
-    if not missing:
+    """Register QA forms for unregistered TS projects. Returns new ts_numbers.
+
+    Everything before the per-TS loop (the DB reads that determine what's
+    missing, and the Swift forms fetch) is one infrastructure step: if any
+    of it raises, there is no per-TS scope to isolate, and the 7-day
+    escalation below can never fire because it never reaches this failing
+    step. That failure is alerted unconditionally here (not gated on "was
+    there something to discover") because it's rare and always actionable -
+    it means auto-discovery is completely dark until someone looks.
+    """
+    try:
+        projects = db.fetch(
+            f"SELECT project_number FROM {SCHEMA_REFERENCE}.ref_ontel_techops_projects "
+            f"WHERE project_number >= $1", MIN_TS_NUMBER,
+        )
+        registered = {
+            r["ts_number"] for r in
+            db.fetch(f"SELECT ts_number FROM {SCHEMA_REFERENCE}.ref_qa_forms")
+        }
+        missing = missing_ts_numbers(projects, registered)
+        if not missing:
+            return []
+
+        forms = fetch_org_forms(token)
+    except Exception as e:
+        logger.error("QA form auto-discovery: infrastructure failure before per-TS loop", exc_info=True)
+        if send_email:
+            try:
+                send_alert(
+                    "[forms] QA auto-discovery infrastructure failure",
+                    f"QA form auto-discovery failed before it could check individual TS "
+                    f"projects:\n\n"
+                    f"  {type(e).__name__}: {e}\n\n"
+                    f"This blocks discovery of NEW QA forms only - extraction of "
+                    f"already-registered forms is unaffected. If this repeats nightly, "
+                    f"the per-TS 7-day escalation can never fire because it lives inside "
+                    f"this same failing step.",
+                )
+            except Exception:
+                logger.error("QA auto-discovery alert email also failed", exc_info=True)
         return []
 
-    forms = fetch_org_forms(token)
     newly = []
     for ts in missing:
         try:
