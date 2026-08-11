@@ -293,6 +293,25 @@ def run_forms_pipeline():
     logger.info(f"# QA FORMS PIPELINE")
     logger.info(f"{'#'*60}")
 
+    # Auto-discovery first: a QA form registered tonight is extracted tonight.
+    # Any discovery failure degrades to logs/alert email - never blocks extraction.
+    try:
+        from base_extractor import BaseExtractor
+        from db import get_db
+        from qa_form_discovery import run_discovery
+
+        class _DiscoveryAuth(BaseExtractor):
+            def __init__(self):
+                super().__init__(pipeline_name="qa_form_discovery")
+
+        auth = _DiscoveryAuth()
+        auth.authenticate()
+        new_ts = run_discovery(get_db(), auth.token)
+        if new_ts:
+            logger.info(f"QA form auto-discovery registered: {new_ts}")
+    except Exception as e:
+        logger.warning(f"QA form auto-discovery failed (continuing with registered forms): {e}")
+
     run_id = extract_forms()
     run_qa_forms_transform(run_id)
 
