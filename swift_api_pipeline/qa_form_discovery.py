@@ -139,43 +139,46 @@ def run_discovery(db, token, send_email=True):
     forms = fetch_org_forms(token)
     newly = []
     for ts in missing:
-        result = match_qa_form(forms, ts)
-        if result["status"] == "one":
-            m = result["matches"][0]
-            register_qa_form(db, ts, m["id"], m["title"])
-            newly.append(ts)
-            if send_email:
-                send_alert(
-                    f"[forms] Registered QA Form TS{ts} automatically",
-                    f"Auto-discovery registered QA Form TS{ts}:\n\n"
-                    f"  form_id: {m['id']}\n  title:   {m['title']}\n"
-                    f"  table:   raw_form_qa_ts{ts}\n\n"
-                    f"It is included in tonight's forms extraction. "
-                    f"Reply/flag if this is wrong - deactivate with:\n"
-                    f"  UPDATE reference.ref_qa_forms SET active=false WHERE ts_number={ts};",
-                )
-        elif result["status"] == "many":
-            if send_email:
-                lines = "\n".join(f"  {m['id']}  {m['title']}" for m in result["matches"])
-                send_alert(
-                    f"[forms] QA Form TS{ts}: multiple candidates - manual pick needed",
-                    f"Auto-discovery found {len(result['matches'])} candidate forms for TS{ts}:\n\n"
-                    f"{lines}\n\nInsert the right one:\n"
-                    f"  INSERT INTO reference.ref_qa_forms (ts_number, form_id, form_title, table_name, registered_by)\n"
-                    f"  VALUES ({ts}, '<form_id>', '<title>', 'raw_form_qa_ts{ts}', 'manual');",
-                )
-        else:  # zero - quiet retry unless escalation applies
-            state = _project_state(db, ts)
-            if state and needs_escalation(state["task_count"], float(state["age_days"])):
+        try:
+            result = match_qa_form(forms, ts)
+            if result["status"] == "one":
+                m = result["matches"][0]
+                register_qa_form(db, ts, m["id"], m["title"])
+                newly.append(ts)
                 if send_email:
                     send_alert(
-                        f"[forms] TS{ts} has tasks flowing but no QA form after "
-                        f"{int(float(state['age_days']))} days",
-                        f"TECH-OPS: TS{ts} has {state['task_count']:,} asset-task rows but no "
-                        f"'ACTIVE - QA Form TS{ts}' exists in Swift yet.\n"
-                        f"Discovery retries nightly; this alert repeats until the form "
-                        f"appears or a row is inserted manually.",
+                        f"[forms] Registered QA Form TS{ts} automatically",
+                        f"Auto-discovery registered QA Form TS{ts}:\n\n"
+                        f"  form_id: {m['id']}\n  title:   {m['title']}\n"
+                        f"  table:   raw_form_qa_ts{ts}\n\n"
+                        f"It is included in tonight's forms extraction. "
+                        f"Reply/flag if this is wrong - deactivate with:\n"
+                        f"  UPDATE reference.ref_qa_forms SET active=false WHERE ts_number={ts};",
                     )
-            else:
-                logger.info(f"TS{ts}: no QA form in Swift yet - will retry nightly")
+            elif result["status"] == "many":
+                if send_email:
+                    lines = "\n".join(f"  {m['id']}  {m['title']}" for m in result["matches"])
+                    send_alert(
+                        f"[forms] QA Form TS{ts}: multiple candidates - manual pick needed",
+                        f"Auto-discovery found {len(result['matches'])} candidate forms for TS{ts}:\n\n"
+                        f"{lines}\n\nInsert the right one:\n"
+                        f"  INSERT INTO reference.ref_qa_forms (ts_number, form_id, form_title, table_name, registered_by)\n"
+                        f"  VALUES ({ts}, '<form_id>', '<title>', 'raw_form_qa_ts{ts}', 'manual');",
+                    )
+            else:  # zero - quiet retry unless escalation applies
+                state = _project_state(db, ts)
+                if state and needs_escalation(state["task_count"], float(state["age_days"])):
+                    if send_email:
+                        send_alert(
+                            f"[forms] TS{ts} has tasks flowing but no QA form after "
+                            f"{int(float(state['age_days']))} days",
+                            f"TECH-OPS: TS{ts} has {state['task_count']:,} asset-task rows but no "
+                            f"'ACTIVE - QA Form TS{ts}' exists in Swift yet.\n"
+                            f"Discovery retries nightly; this alert repeats until the form "
+                            f"appears or a row is inserted manually.",
+                        )
+                else:
+                    logger.info(f"TS{ts}: no QA form in Swift yet - will retry nightly")
+        except Exception:
+            logger.error(f"TS{ts}: auto-discovery step failed, skipping to next", exc_info=True)
     return newly
