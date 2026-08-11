@@ -1,5 +1,7 @@
 """
-Export timer activities from Supabase to Excel — one workbook per TECH-OPS project (TS13-TS18).
+Export timer activities from Supabase to Excel — one workbook per TECH-OPS project.
+TS project list is dynamic (reference.ref_ontel_techops_projects via ts_projects.py, TS13+)
+instead of a fixed list; new/empty TS projects are skipped rather than failing the guard.
 Matches the format of the timer_data_sample files (TimeData_TS{num}_{YYYYMM}_{YYYYMMDD}.xlsx).
 
 Each workbook has a single sheet named "Sheet1" with 16 columns.
@@ -32,21 +34,14 @@ from dotenv import load_dotenv
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "swift_api_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
+from ts_projects import fetch_ts_projects
+
 ET = ZoneInfo("America/New_York")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENV_PATH = SCRIPT_DIR.parent / "swift_api_pipeline" / ".env"
 OUTPUT_DIR = SCRIPT_DIR / "data_sample" / "timer_exports"
 
-PROJECTS = [
-    "TECH-OPS: TS13",
-    "TECH-OPS: TS14",
-    "TECH-OPS: TS15",
-    "TECH-OPS: TS16",
-    "TECH-OPS: TS17",
-    "TECH-OPS: TS18",
-    "TECH-OPS: TS19",
-]
 
 EXCEL_COLUMNS = [
     "Project",
@@ -289,6 +284,9 @@ async def export(output_dir: Path):
     await conn.execute("SET statement_timeout = '300s'")
     await check_pipeline_guard(conn)
 
+    # Fetch dynamic TS project list
+    projects = [p["project_name"] for p in await fetch_ts_projects(conn)]
+
     executor = ThreadPoolExecutor(max_workers=1)
     loop = asyncio.get_event_loop()
     export_dt = datetime.now(ET)
@@ -314,7 +312,7 @@ async def export(output_dir: Path):
     dup_results = []
 
     try:
-        for i, project_name in enumerate(PROJECTS):
+        for i, project_name in enumerate(projects):
             ts_label = project_name.split(": ")[1]
             t_q = time.time()
 
