@@ -218,9 +218,11 @@ async def export(output_dir: Path):
 
     projects = await fetch_qa_export_projects(conn)
     if not projects:
-        print("No registered/active projects found in reference.ref_qa_forms. Nothing to export.")
         await conn.close()
-        sys.exit(0)
+        raise SystemExit(
+            "GUARD FAILED: reference.ref_qa_forms returned no active registered projects - "
+            "refusing silent empty export."
+        )
 
     # Get run_id from latest successful pipeline run
     run_row = await conn.fetchrow("""
