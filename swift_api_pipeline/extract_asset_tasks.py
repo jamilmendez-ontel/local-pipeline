@@ -36,16 +36,15 @@ PROJECT_TIMEOUT_SECONDS = 3600  # Max 1 hour per project extraction
 def detect_abnormal_counts(current_counts, baseline_counts, drop_pct=ABNORMAL_DROP_PCT):
     """Return sorted project names whose row count looks abnormal.
 
-    A project is abnormal if it returned 0 rows, or (with a positive baseline)
-    fell more than drop_pct below the previous successful run. Projects with no
-    baseline and a nonzero count are skipped so first-ever extractions don't
-    false-alarm.
+    A project is abnormal only if it HAD rows before (positive baseline) and
+    fell more than drop_pct below the previous successful run — including a
+    collapse to 0. Projects with no baseline (brand-new TS projects, which
+    legitimately start empty) never alarm; the alarming case is data that was
+    there and shrank. (Rule set by Jamil 2026-08-11 after TS20's first
+    appearance blocked the export.)
     """
     abnormal = []
     for name, count in current_counts.items():
-        if count == 0:
-            abnormal.append(name)
-            continue
         base = baseline_counts.get(name)
         if base and base > 0 and count < base * (1 - drop_pct):
             abnormal.append(name)

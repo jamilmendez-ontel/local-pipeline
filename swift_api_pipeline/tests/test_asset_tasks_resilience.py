@@ -29,8 +29,20 @@ def test_outcome_abnormal_when_only_counts_off():
     assert o.email_status() == "ABNORMAL ROW COUNT"
 
 
-def test_zero_rows_is_abnormal_even_with_no_baseline():
-    assert detect_abnormal_counts({"TS13": 0}, {}) == ["TS13"]
+def test_new_project_zero_rows_with_no_baseline_is_clean():
+    # A brand-new project (e.g. TS20 on 2026-08-11) legitimately has no tasks
+    # yet; without a baseline there is nothing to have "lost".
+    assert detect_abnormal_counts({"TS20": 0}, {}) == []
+
+
+def test_zero_rows_with_positive_baseline_is_abnormal():
+    # A project that HAD rows and now returns 0 is the real alarm.
+    assert detect_abnormal_counts({"TS13": 0}, {"TS13": 1000}) == ["TS13"]
+
+
+def test_zero_rows_with_zero_baseline_is_clean():
+    # New project still empty on later runs (baseline persisted as 0).
+    assert detect_abnormal_counts({"TS20": 0}, {"TS20": 0}) == []
 
 
 def test_no_baseline_nonzero_is_skipped():
