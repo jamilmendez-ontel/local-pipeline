@@ -30,6 +30,9 @@ does not require equality; it requires every difference to be EXPLAINED:
      LAG_CAP_DAYS. The whole tolerance is active only while the sweep is
      alive (last successful baseline/full-walk within SWEEP_FRESH_DAYS) —
      a dead sweep means the bound is gone, so the gate goes strict again.
+     Note the deliberate slack (8 = 7 + 1 day for a slow/retried Saturday
+     sweep): a Saturday sweep that never runs is detected at the MONDAY
+     gate, not Sunday's.
 
 Hash match remains the trivial-pass fast path. EVERY run still inserts one
 row per project into pipeline.inc_audit_results (samples LIMIT 50/20 as
@@ -235,7 +238,7 @@ def _column_diffs(db, project_did, limit=20):
     return diffs
 
 
-def _classify_column_diffs(db, project_did, today=None, lag_active=True):
+def _classify_column_diffs(db, project_did, today=None, lag_active=False):
     """Doctrine rules 3+4 over ALL shared-row diffs (no LIMIT). A diff row
     is tolerated as dangling-DID (rule 3, checked first) when every
     differing column is in DANGLING_DID_COLS and its paired *_by_name is
@@ -283,7 +286,7 @@ def _classify_column_diffs(db, project_did, today=None, lag_active=True):
     return dangling, lifecycle_lag, unexplained, unexplained_sample
 
 
-def audit_project(db, project_did, current_side, inc_side, lag_active=True):
+def audit_project(db, project_did, current_side, inc_side, lag_active=False):
     """Compare one project's two sides under the doctrine. Returns the
     inc_audit_results row as a dict (without id/audited_at) plus a
     'doctrine_pass' key (not persisted as a column; encoded in notes)."""
@@ -384,8 +387,10 @@ def main():
                 "drift right after either run is expected; persistent "
                 "same-direction drift is the bug signal.")
 
-    last_sweep = db.fetch(LAST_SWEEP_SQL,
-                          timeout=AUDIT_QUERY_TIMEOUT)[0]["last_sweep"]
+    last_sweep = retry_tx_db(
+        lambda: db.fetch(LAST_SWEEP_SQL,
+                         timeout=AUDIT_QUERY_TIMEOUT)[0]["last_sweep"],
+        description="fetch last sweep for rule-4 gate")
     lag_active = _lag_tolerance_active(last_sweep, datetime.now(timezone.utc))
     if lag_active:
         logger.info(f"Rule 4 lifecycle-lag tolerance ACTIVE "

@@ -197,6 +197,11 @@ def test_tolerance_inactive_when_no_sweep_ever():
     assert not _lag_tolerance_active(None, now)
 
 
+def test_tolerance_active_at_exact_freshness_boundary():
+    now = datetime(2026, 8, 10, 6, 0, tzinfo=timezone.utc)
+    assert _lag_tolerance_active(now - timedelta(days=SWEEP_FRESH_DAYS), now)
+
+
 # ---- classification wiring -------------------------------------------
 
 
@@ -247,6 +252,15 @@ def test_classify_with_tolerance_off_counts_lag_as_unexplained():
         db, "P1", today=TODAY, lag_active=False)
     assert (dangling, lifecycle_lag, unexplained) == (0, 0, 1)
     assert list(sample) == ["B"]
+
+
+def test_classify_defaults_to_strict_without_explicit_lag_active():
+    """A caller that doesn't thread the sweep-freshness gate must get the
+    strict pre-rule-4 behavior, never silent tolerance."""
+    db = FakeDb([_lag_row("B")])
+    dangling, lifecycle_lag, unexplained, _ = _classify_column_diffs(
+        db, "P1", today=TODAY)
+    assert (dangling, lifecycle_lag, unexplained) == (0, 0, 1)
 
 
 def test_dangling_classification_takes_precedence_over_lag():
