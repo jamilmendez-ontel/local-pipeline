@@ -162,6 +162,7 @@ report-automation reports that don't need full-scale extracts.
 | `gmail_client.py` | Gmail API authentication |
 | `calendar_client.py` | Google Calendar API authentication |
 | `sheets_client.py` | Drive API authentication (used for Google Forms responses) |
+| `timer_correction_review.py` | Daily timer review emails + form-response apply (corrections/removals -> `app_timer.*` -> `rebuild_timer_clean()`). Since 2026-08-10 (#44): stale-response removals are surgical (duration-matched to the snapshot the member saw; no match = skip for manual review, never bulk group removal) and form prefill entry ids carry an `id:` prefix so Google Sheets can't mangle hex hashes into scientific notation. |
 | `migrations/*.sql` | Numbered SQL migrations (000-064 at time of writing) |
 
 ## CLI
