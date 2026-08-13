@@ -13,6 +13,10 @@ Checks (spec 2026-08-04, thresholds are spec-fixed):
      mv_hr_report_review (the stale-not-blank guards' worst case).
   4. rebuild_timer_clean() max_exec_time above 120s (headroom alarm before its
      300s statement_timeout; migration 218 made it non-blocking, not fast).
+     After a real alarm (not --dry-run/--force-findings) the statement's
+     pg_stat row is auto-reset so the alarm re-arms: max_exec_time is an
+     all-time high-water mark, and without the reset a single past outlier
+     re-emails daily forever (seen 2026-08-06 and 2026-08-12).
 
 Behavior: healthy run = one log line, NO email, exit 0. Any finding = one
 plain-text email to Jamil listing all findings, exit 0. Watcher crash = exit 1
@@ -201,6 +205,23 @@ def probe_rebuild_duration(db):
         return None
 
 
+def reset_rebuild_stats(db):
+    """Clear the rebuild statement's pg_stat rows after a duration alarm so the
+    next alarm reflects fresh >threshold runs, not a stale high-water mark.
+    Failure degrades to the old behavior (manual reset), never kills the run."""
+    try:
+        db.fetch(
+            "SELECT extensions.pg_stat_statements_reset(userid, dbid, queryid) "
+            "FROM extensions.pg_stat_statements "
+            "WHERE query ILIKE '%rebuild_timer_clean()%' AND query NOT ILIKE '%pg_stat%'"
+        )
+        logger.info("rebuild_timer_clean pg_stat row reset; duration alarm re-armed.")
+        return True
+    except Exception as e:
+        logger.warning(f"rebuild stats auto-reset failed (alarm stays latched): {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Email (same Gmail API pattern as pipeline_notifier / gmail_client)
 # ---------------------------------------------------------------------------
@@ -235,7 +256,16 @@ def main():
         findings += evaluate_failed_runs(probe_failed_runs(db))
         findings += evaluate_staleness(probe_staleness(db), now, stale_threshold)
         findings += evaluate_blanks(probe_blanks(db))
-        findings += evaluate_rebuild_duration(probe_rebuild_duration(db), rebuild_threshold)
+        rebuild_findings = evaluate_rebuild_duration(
+            probe_rebuild_duration(db), rebuild_threshold)
+        if rebuild_findings and not args.dry_run and not args.force_findings:
+            if reset_rebuild_stats(db):
+                rebuild_findings = [
+                    f + " (stats auto-reset after this alarm: a repeat email "
+                        "means fresh runs over the threshold, not this outlier)"
+                    for f in rebuild_findings
+                ]
+        findings += rebuild_findings
     finally:
         close_db()
 

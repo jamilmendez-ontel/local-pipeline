@@ -44,7 +44,7 @@ Script time-driven triggers under the notifier account. See
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
 | `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
 | `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
-| `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild); emails Jamil only on findings, silent when healthy |
+| `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
 
 Exact trigger times live in `scripts/pipeline_trigger.gs`. The
 `pipeline-asset-tasks` workflow fires downstream dispatches at end-of-run
