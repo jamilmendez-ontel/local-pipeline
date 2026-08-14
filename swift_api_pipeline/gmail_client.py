@@ -95,9 +95,14 @@ def masked_sender(service, display_name):
     """
     global _profile_address
     if _profile_address is None:
-        _profile_address = (
-            service.users().getProfile(userId="me").execute()["emailAddress"]
-        )
+        try:
+            _profile_address = (
+                service.users().getProfile(userId="me").execute()["emailAddress"]
+            )
+        except Exception:
+            # A token without gmail.readonly can still send; degrade to the
+            # unmasked legacy sender rather than failing the email.
+            return "me"
     return f"{display_name} <{_profile_address}>"
 
 
