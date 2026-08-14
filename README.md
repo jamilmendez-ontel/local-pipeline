@@ -159,6 +159,32 @@ report-automation reports that don't need full-scale extracts.
 `stg_targeted_asset_tasks` captures both `task_approved_on` and
 `task_submitted_on` from the upstream API's epoch fields.
 
+### Swift schedule feed audit (2026-08-14)
+
+`schedule_feed_audit.py` cross-checks every scheduled task in the User
+Priorities report against the task's own activity feed (Firebase RTDB).
+Swift's server-side calendar scheduling path stores **timed schedules 12
+hours early** on the task record (its date-only noon→midnight normalization
+applied unconditionally) while the activity feed keeps the correct instant —
+so the feed wins whenever the two disagree.
+
+- Registry: `pipeline.schedule_audit_anomalies` (+ `schedule_audit_runs`),
+  migrations 236-237. Classes: `timed_mismatch`, `ghost_schedule`
+  (feed says removed, task still scheduled), `no_feed_schedule`.
+  Date-only midnight-ET (task) vs noon-ET (feed) is benign and excluded.
+- Serving: `analytics.v_user_priorities_effective` overlays
+  `scheduled_effective` (feed value) while an anomaly is open AND the stored
+  value is unchanged since detection (reschedule guard). `stg_user_priorities`
+  is never mutated; corrections auto-resolve when task and feed re-agree.
+- Alerts ("Pipeline Alerts" → Jamil): once per entry per breakage — new
+  anomaly or an open one whose stored value changed and is still wrong.
+  `--notify-schedulers` additionally emails the scheduler ("Ontel Schedule
+  Check" mask, directory-matched address; unique first+last match required).
+- Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d
+  window) / `--mode full` (~5.2k feed fetches, ~4 min). Coverage <90% ⇒ run
+  FAILED (never silently green). Logs carry counts/DIDs only — no member
+  names (public repo).
+
 ### Other extractors
 
 | Script | Output |
@@ -184,6 +210,7 @@ report-automation reports that don't need full-scale extracts.
 | `calendar_client.py` | Google Calendar API authentication |
 | `sheets_client.py` | Drive API authentication (used for Google Forms responses) |
 | `timer_correction_review.py` | Daily timer review emails + form-response apply (corrections/removals -> `app_timer.*` -> `rebuild_timer_clean()`). Since 2026-08-10 (#44): stale-response removals are surgical (duration-matched to the snapshot the member saw; no match = skip for manual review, never bulk group removal) and form prefill entry ids carry an `id:` prefix so Google Sheets can't mangle hex hashes into scientific notation. |
+| `schedule_feed_audit.py` | Swift task-record vs activity-feed schedule audit (12h calendar-path flip); maintains `pipeline.schedule_audit_anomalies`, serves corrections via `analytics.v_user_priorities_effective` |
 | `migrations/*.sql` | Numbered SQL migrations (000-064 at time of writing) |
 
 ## CLI
