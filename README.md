@@ -178,6 +178,9 @@ so the feed wins whenever the two disagree.
   is never mutated; corrections auto-resolve when task and feed re-agree.
 - Alerts ("Pipeline Alerts" → Jamil): once per entry per breakage — new
   anomaly or an open one whose stored value changed and is still wrong.
+  1h grace on fresh feed events: a disagreement seen minutes after a
+  remove/reschedule is Swift still propagating, not an anomaly — it only
+  flags if it persists into the next run.
   `--notify-schedulers` additionally emails the scheduler ("Ontel Schedule
   Check" mask, directory-matched address; unique first+last match required).
 - Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d

@@ -64,6 +64,13 @@ TOLERANCE_MS = 2000
 WORKERS = 8
 COVERAGE_FLOOR = 0.90
 ALERT_RECIPIENTS = ["jamil.mendez@ontel.co"]
+# A feed event younger than this at detection time means Swift may still be
+# propagating a legit change (remove/reschedule) to the task record - the
+# report lags the feed by minutes. Skip flagging entirely and let the next
+# run decide: a real anomaly persists, a propagating change clears itself.
+# (First observed 2026-08-14: John Versoza's schedule removal was flagged as
+# a ghost 2 minutes after the fact.)
+FEED_EVENT_GRACE = timedelta(hours=1)
 
 _token_lock = threading.Lock()
 _tokens = {"fb": None, "id": None}
@@ -423,6 +430,15 @@ def main():
                         "UPDATE pipeline.schedule_audit_anomalies SET status = 'resolved', "
                         "resolved_at = now() WHERE task_did = $1 AND status = 'open'", did)
                     n_resolved += 1
+                continue
+
+            # Grace: a NOT-yet-open disagreement whose latest feed event is
+            # very fresh is most likely a legit change still propagating to
+            # the task record. Skip it; the next run flags it if it stuck.
+            if (did not in open_dids and d["last_event_at"] is not None
+                    and started - d["last_event_at"] < FEED_EVENT_GRACE):
+                logger.info(f"grace-skip {did}: feed event "
+                            f"{started - d['last_event_at']} old ({verdict})")
                 continue
 
             was_open = did in open_dids
