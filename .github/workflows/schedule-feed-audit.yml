@@ -1,0 +1,94 @@
+name: "Audit: Swift Schedule Feed"
+
+# Cross-checks task-record schedules against each task's activity feed
+# (Swift 12h calendar-path flip; see swift_api_pipeline/schedule_feed_audit.py).
+#
+# Cadence: GHA cron as the driver (4-hourly incremental + one nightly full at
+# 07:17 UTC = 3:17 AM ET). This is an advisory audit, so occasional GHA cron
+# drift/skips are acceptable; an Apps Script repository_dispatch trigger
+# (types: [schedule-feed-audit]) can be layered on later if cron proves too
+# flaky, per the house convention for time-critical jobs.
+#
+# Overlap safety: GHA concurrency group here + the script's own DB-side
+# 'running' row check. Logs carry counts and task DIDs only (public repo).
+
+on:
+  schedule:
+    - cron: '17 3,7,11,15,19,23 * * *'
+  repository_dispatch:
+    types: [schedule-feed-audit]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Audit mode'
+        type: choice
+        options: [incremental, full]
+        default: incremental
+
+concurrency:
+  group: schedule-feed-audit
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Resolve mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            MODE="${{ github.event.client_payload.mode || 'incremental' }}"
+          elif [ "$(date -u +%H)" = "07" ]; then
+            MODE="full"    # nightly full sweep at 07:17 UTC / 3:17 AM ET
+          else
+            MODE="incremental"
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Resolved mode: $MODE"
+
+      # --notify-schedulers: member-facing notices approved by Jamil
+      # 2026-08-14 (sample reviewed). Directory-unmatched schedulers fall
+      # back to Jamil's alert automatically.
+      - name: Run schedule feed audit
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: python -u schedule_feed_audit.py --mode ${{ steps.mode.outputs.mode }} --notify-schedulers

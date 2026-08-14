@@ -184,6 +184,10 @@ so the feed wins whenever the two disagree.
   window) / `--mode full` (~5.2k feed fetches, ~4 min). Coverage <90% ⇒ run
   FAILED (never silently green). Logs carry counts/DIDs only — no member
   names (public repo).
+- Scheduling: `.github/workflows/schedule-feed-audit.yml` — 4-hourly
+  incremental + nightly full (07:17 UTC), runs with `--notify-schedulers`
+  (member notices approved 2026-08-14). Also accepts
+  `repository_dispatch` type `schedule-feed-audit` and manual dispatch.
 
 ### Other extractors
 
