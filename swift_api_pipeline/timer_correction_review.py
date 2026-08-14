@@ -157,7 +157,7 @@ def check_token_health():
         logger.error(f"TOKEN HEALTH CHECK FAILED: {filename} — {error}")
 
     try:
-        from gmail_client import authenticate
+        from gmail_client import authenticate, masked_sender
         service = authenticate()
 
         items = "\n".join(
@@ -188,7 +188,7 @@ def check_token_health():
         """
         msg = MIMEMultipart()
         msg["To"] = "jamil.mendez@ontel.co"
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Pipeline Alerts")
         msg["Subject"] = "Pipeline Alert: OAuth Token Refresh Failed"
         msg.attach(MIMEText(html, "html"))
 
@@ -826,7 +826,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
     snapshot is harmless. Keeping it this way avoids re-fetching from
     clean inside send_daily_emails just for snapshot purposes.
     """
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
 
     by_user = {}
     for e in entries:
@@ -909,7 +909,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
 
         msg = MIMEMultipart()
         msg["To"] = recipient
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Ontel Timer Review")
         msg["Subject"] = f"Timer Activity Entries - {date_str}"
         msg.attach(MIMEText(html_body, "html"))
 
@@ -2425,7 +2425,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
         logger.info("No applied changes — skipping correction confirmations")
         return
 
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
 
     by_user_date: dict[tuple, list[dict]] = {}
     for change in applied_changes:
@@ -2468,7 +2468,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
         subject = f"Re: Timer Activity Entries - {date_str}"
         msg = MIMEMultipart()
         msg["To"] = recipient
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Ontel Timer Review")
         msg["Subject"] = subject
         if notif and notif.get("message_id"):
             msg["In-Reply-To"] = notif["message_id"]
@@ -2551,7 +2551,7 @@ def run_remind(test_mode: bool = False):
         logger.info("No unresolved duplicate reviews need reminders")
         return
 
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
 
     # Group by (user_email, entry_date) so each reminder is per-date
     by_user_date = {}
@@ -2668,7 +2668,7 @@ def run_remind(test_mode: bool = False):
 
         msg = MIMEMultipart()
         msg["To"] = recipient
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Ontel Timer Review")
         msg["Subject"] = subject
         if notif and notif.get("message_id"):
             msg["In-Reply-To"] = notif["message_id"]
@@ -3001,7 +3001,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
     view. Threads via app_timer.daily_notifications.thread_id; updates
     last_sent_at + last_sent_entry_ids after each send.
     """
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
 
     candidates = find_days_needing_resend(db, lookback_days=lookback_days)
     if not candidates:
@@ -3093,7 +3093,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         subject = f"Re: Timer Activity Entries - {date_str}"
         msg = MIMEMultipart()
         msg["To"] = recipient
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Ontel Timer Review")
         msg["Subject"] = subject
         if message_id:
             msg["In-Reply-To"] = message_id

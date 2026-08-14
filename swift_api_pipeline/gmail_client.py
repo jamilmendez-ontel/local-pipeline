@@ -81,6 +81,26 @@ def authenticate():
     return build("gmail", "v1", credentials=creds)
 
 
+_profile_address = None
+
+
+def masked_sender(service, display_name):
+    """From-header value with a display name Gmail will keep.
+
+    Gmail rewrites a From whose address does not match the authenticated
+    account, dropping a custom display name along with it (verified
+    2026-08-14: 'Name <me>' arrives as the account's default identity).
+    Pinning the profile's real address alongside the name survives
+    delivery intact. The profile lookup is cached for the process.
+    """
+    global _profile_address
+    if _profile_address is None:
+        _profile_address = (
+            service.users().getProfile(userId="me").execute()["emailAddress"]
+        )
+    return f"{display_name} <{_profile_address}>"
+
+
 def authenticate_drive():
     """
     Authenticate with Google Drive API using the same OAuth2 credentials.

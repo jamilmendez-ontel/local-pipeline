@@ -85,7 +85,7 @@ def check_period_complete(period_start, period_end):
 def send_period_complete_email(period_start, period_end, total, approved, cancelled):
     """Send notification that all daily reports for the period are approved."""
     try:
-        from gmail_client import authenticate
+        from gmail_client import authenticate, masked_sender
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
         import base64
@@ -119,7 +119,7 @@ def send_period_complete_email(period_start, period_end, total, approved, cancel
 
         msg = MIMEMultipart()
         msg["To"] = "jamil.mendez@ontel.co"
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Pipeline Alerts")
         msg["Subject"] = f"Daily Reports Complete — {period_str}"
         msg.attach(MIMEText(html, "html"))
 

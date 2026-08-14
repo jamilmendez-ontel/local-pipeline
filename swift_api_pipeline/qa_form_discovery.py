@@ -84,11 +84,11 @@ def fetch_org_forms(token):
 
 
 def send_alert(subject, body):
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
     service = authenticate()
     msg = MIMEText(body, "plain")
     msg["To"] = ALERT_RECIPIENT
-    msg["From"] = "me"
+    msg["From"] = masked_sender(service, "Pipeline Alerts")
     msg["Subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
     service.users().messages().send(userId="me", body={"raw": raw}).execute()

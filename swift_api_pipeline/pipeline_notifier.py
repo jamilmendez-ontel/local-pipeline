@@ -443,7 +443,7 @@ def send_pipeline_email(
     Wrapped in try/except — email failures are logged but never crash the pipeline.
     """
     try:
-        from gmail_client import authenticate
+        from gmail_client import authenticate, masked_sender
 
         if recipients is None:
             recipients = NOTIFICATION_RECIPIENTS
@@ -456,7 +456,7 @@ def send_pipeline_email(
 
         msg = MIMEMultipart()
         msg["To"] = ", ".join(recipients)
-        msg["From"] = "me"
+        msg["From"] = masked_sender(service, "Pipeline Alerts")
         msg["Subject"] = subject
 
         # HTML body

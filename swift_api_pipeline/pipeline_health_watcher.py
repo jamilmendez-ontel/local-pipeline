@@ -227,11 +227,11 @@ def reset_rebuild_stats(db):
 # ---------------------------------------------------------------------------
 
 def send_email(findings, checked_at):
-    from gmail_client import authenticate
+    from gmail_client import authenticate, masked_sender
     service = authenticate()
     msg = MIMEText(build_email_body(findings, checked_at), "plain")
     msg["To"] = ", ".join(RECIPIENTS)
-    msg["From"] = "me"
+    msg["From"] = masked_sender(service, "Pipeline Alerts")
     msg["Subject"] = f"Pipeline health: {len(findings)} finding(s)"
     raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
