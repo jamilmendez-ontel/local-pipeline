@@ -17,6 +17,8 @@
  *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
  *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
  *                                    setupPriorityRefreshTrigger() once to create it
+ *      - checkForRevenueReports()  → Every 5 min (Gmail watcher → gmail-revenue-report;
+ *                                    create via setupRevenueWatchTrigger())
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
  * Schedules (EST):
@@ -31,6 +33,9 @@
  *   12:17 AM  — QA Forms
  *   12:13 AM  — User Priorities FULL run (refresh + Excel export + shared-Drive upload)
  *   every 10m — User Priorities DB refresh only (extract + transform; no export)
+ *   every 5m  — Gmail watch for unread "Daily Revenue Report" emails →
+ *               gmail-revenue-report (AR aging + sales; downstream: the
+ *               Daily Finance report + COP invoice forecast chains)
  *   12:01 AM  — Asset Tasks (post-local-batch-retirement; fires dispatch_downstream=true
  *               so downstream workflows run at end-of-pipeline)
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
@@ -397,12 +402,14 @@ function fireDispatchWithPayload_(eventType, clientPayload) {
 
 /**
  * Fire a repository_dispatch event. Reuses the GITHUB_TOKEN from Script Properties.
+ * Returns true on success (HTTP 204), false otherwise — callers that need
+ * transactional behavior (e.g. checkForRevenueReports' mark-as-read) rely on it.
  */
 function fireDispatch_(eventType) {
   var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!token) {
     Logger.log('ERROR: GITHUB_TOKEN not set in Script Properties');
-    return;
+    return false;
   }
 
   var url = 'https://api.github.com/repos/' + REPO + '/dispatches';
@@ -426,9 +433,123 @@ function fireDispatch_(eventType) {
 
   if (code === 204) {
     Logger.log('Dispatched ' + eventType + ' successfully');
+    return true;
   } else {
     Logger.log('ERROR dispatching ' + eventType + ': HTTP ' + code + ' — ' + response.getContentText());
+    return false;
   }
+}
+
+/**
+ * Gmail watcher: unread "Daily Revenue Report" emails → gmail-revenue-report.
+ *
+ * Runs every 5 minutes on a time-driven trigger. When the daily revenue email
+ * (AR Aging Detail + Sales by Product/Service attachments) lands, fires ONE
+ * repository_dispatch so gmail-pipeline.yml loads aging + sales; the pipeline's
+ * SUCCESS email then triggers the Daily Finance report + COP invoice forecast
+ * chains from the ontel.co Apps Script project.
+ *
+ * ROOT CAUSE of the 2026-08-07→14 outage — DO NOT REMOVE THIS FUNCTION FROM
+ * SOURCE: this function previously lived only in gmail_trigger.gs, and a
+ * redeploy of this project dropped that file. The 5-min trigger kept firing
+ * into "Script function not found" and the whole revenue/finance chain went
+ * silently stale for a week (same failure mode as the 2026-06-22 OIR outage
+ * documented at triggerOpenItemsData). It now lives HERE, in the same
+ * committed file as every other trigger function, so a whole-file redeploy
+ * can never lose it. gmail_trigger.gs is retired.
+ *
+ * Failure semantics: if the dispatch fails, threads stay UNREAD so the next
+ * 5-min tick retries. markRead only happens after a 204.
+ */
+var GMAIL_REVENUE_QUERY = 'subject:"Daily Revenue Report" has:attachment is:unread';
+
+function checkForRevenueReports() {
+  var threads = GmailApp.search(GMAIL_REVENUE_QUERY, 0, 10);
+
+  if (threads.length === 0) {
+    return;
+  }
+
+  var dispatched = false;
+
+  for (var i = 0; i < threads.length; i++) {
+    var thread = threads[i];
+    Logger.log('Found unread revenue report: ' + thread.getFirstMessageSubject());
+
+    // Fire dispatch only once per invocation (all unread emails trigger the same pipeline)
+    if (!dispatched) {
+      if (!fireDispatch_('gmail-revenue-report')) {
+        Logger.log('ERROR: repository_dispatch failed — skipping mark-as-read (will retry next cycle)');
+        return;
+      }
+      dispatched = true;
+    }
+
+    // Mark thread as read so it doesn't re-trigger
+    thread.markRead();
+  }
+
+  Logger.log('Dispatched gmail-revenue-report event, marked ' + threads.length + ' thread(s) as read');
+}
+
+/**
+ * Idempotently (re)create the every-5-minute time-driven trigger for
+ * checkForRevenueReports(). Deletes any existing triggers bound to the handler
+ * first (orphaned-trigger gotcha — see setupCalendarEventsTriggers), so it is
+ * safe to re-run. If a working 5-min trigger already exists, you do NOT need
+ * to run this.
+ */
+function setupRevenueWatchTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'checkForRevenueReports') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('checkForRevenueReports')
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+
+  Logger.log('Created checkForRevenueReports trigger: every 5 minutes.');
+}
+
+/**
+ * Run this function ONCE after rotating the GITHUB_TOKEN PAT to schedule a
+ * calendar reminder 5 days before the 90-day expiry (all-day event with email
+ * reminders on the nanoninth.com default calendar). Carried over from the
+ * retired gmail_trigger.gs.
+ */
+function scheduleTokenRotationReminder() {
+  var EXPIRY_DAYS = 90;
+  var REMINDER_DAYS_BEFORE = 5;
+
+  var reminderDate = new Date();
+  reminderDate.setDate(reminderDate.getDate() + EXPIRY_DAYS - REMINDER_DAYS_BEFORE);
+
+  var event = CalendarApp.getDefaultCalendar().createAllDayEvent(
+    'Rotate GitHub PAT for Pipeline Triggers',
+    reminderDate,
+    {
+      description:
+        'The fine-grained GitHub PAT (local-pipeline repo, contents:read+write) expires in 5 days.\n\n' +
+        'This PAT is used by ALL pipeline triggers in this Apps Script project\n' +
+        '(pipeline_trigger.gs — time-driven dispatches + the Gmail revenue watcher).\n\n' +
+        'Steps:\n' +
+        '1. Go to https://github.com/settings/tokens and generate a new 90-day PAT\n' +
+        '   - Repository: local-pipeline only\n' +
+        '   - Permissions: Contents → Read and Write\n' +
+        '   - Expiration: 90 days\n' +
+        '2. Update GITHUB_TOKEN in Apps Script project settings (Script Properties)\n' +
+        '3. Run scheduleTokenRotationReminder() again to set the next reminder'
+    }
+  );
+
+  event.addEmailReminder(0);       // At start of day
+  event.addEmailReminder(24 * 60); // 1 day before
+
+  Logger.log('Rotation reminder created for ' + reminderDate.toDateString());
 }
 
 /**
