@@ -183,6 +183,10 @@ so the feed wins whenever the two disagree.
   is never mutated; corrections auto-resolve when task and feed re-agree.
 - Alerts ("Pipeline Alerts" → Jamil): once per entry per breakage — new
   anomaly or an open one whose stored value changed and is still wrong.
+  The registry row is the alert queue (2026-08-20 review): `ops_alerted_at`
+  / `notice_sent_at` / `resolved_notice_sent_at` stamp only on successful
+  send and reset on reopen/re-break, so failed sends retry on later runs
+  instead of being lost (migrations 238-239).
   Fresh feed events (<1h old) get an in-run recheck instead of a next-run
   punt (changed 2026-08-20, was a skip-to-next-run grace): wait 120s,
   re-pull the report, re-classify; still inconsistent ⇒ alert in the same
@@ -207,7 +211,9 @@ so the feed wins whenever the two disagree.
   `.github/workflows/schedule-feed-audit.yml`, which also keeps an hourly
   GHA cron backstop (at :17) + nightly full (07:17 UTC). Runs with
   `--notify-schedulers` (member notices approved 2026-08-14). Double-fires
-  are harmless: the script's overlap guard exits the second run.
+  are harmless: the script's overlap guard exits the second run (orphaned
+  'running' rows reaped after 45 min). If no full run succeeded in 26h the
+  next incremental self-upgrades to full (cron-drift/supersede insurance).
 
 ### Other extractors
 

@@ -48,6 +48,10 @@ Alerting (Gmail, "Pipeline Alerts" mask, jamil.mendez@ontel.co):
   - fresh feed events (< FRESH_EVENT_WINDOW) are NOT punted to the next run:
     they get an in-run recheck (RECHECK_DELAY wait + report re-pull) and
     alert in the same run if still inconsistent (alarm ASAP, 2026-08-20)
+  - the registry row is the alert QUEUE (pre-merge review 2026-08-20):
+    ops_alerted_at / notice_sent_at / resolved_notice_sent_at are stamped
+    only on successful send and reset by the upsert on reopen/re-break, so
+    a failed or killed send stays owed and retries on later runs
   - always email when the run FAILS (auth, coverage < FLOOR, db errors)
   - silent otherwise; run history in pipeline.schedule_audit_runs
 
@@ -94,6 +98,10 @@ NOTICE_TEAM_POSITIONS = ("Data Analyst%", "Project Associate%")
 # the report, re-classify; still inconsistent -> alert in THIS run.
 FRESH_EVENT_WINDOW = timedelta(hours=1)
 RECHECK_DELAY = timedelta(seconds=120)
+# Alert-queue cutoff: anomalies first seen before this predate the notice
+# system entirely (the seeded backlog is handled via the manual repair
+# worklist) - they must never be mass-emailed by the retry queue.
+NOTICES_SINCE = datetime(2026, 8, 20, tzinfo=timezone.utc)
 
 _token_lock = threading.Lock()
 _tokens = {"fb": None, "id": None}
@@ -461,16 +469,32 @@ def main():
 
         # Self-heal runs orphaned by a kill/sleep (their 'running' row never
         # gets finished), then bail if another audit genuinely looks live.
+        # 45 min, not hours: a real run finishes well under 20 min (GHA kills
+        # at 30), and an orphaned row blinds every overlap-guarded run until
+        # it's reaped - at the 15-min cadence a 3h window was 12 missed runs.
         db.execute(
             "UPDATE pipeline.schedule_audit_runs SET status = 'failed', "
             "finished_at = now(), error = 'stale running row - process died' "
-            "WHERE status = 'running' AND started_at < now() - interval '3 hours'")
+            "WHERE status = 'running' AND started_at < now() - interval '45 minutes'")
         live = db.fetchval(
             "SELECT count(*) FROM pipeline.schedule_audit_runs "
             "WHERE status = 'running'")
         if live:
             logger.info("another audit run appears live; exiting (no overlap)")
             return 0
+
+        # Nightly-full self-heal: GHA cron drift past 07:59 UTC resolves the
+        # run to incremental, and a pending cron full can be superseded by a
+        # 15-min dispatch in the concurrency queue - either way the nightly
+        # full silently doesn't happen. Upgrade this run if none succeeded
+        # in the last 26h.
+        if args.mode == "incremental":
+            last_full = db.fetchval(
+                "SELECT max(started_at) FROM pipeline.schedule_audit_runs "
+                "WHERE mode = 'full' AND status = 'ok'")
+            if last_full is None or started - last_full > timedelta(hours=26):
+                logger.info("no successful full run in 26h - upgrading this run to full")
+                args.mode = "full"
 
         run_id = db.fetchval(
             "INSERT INTO pipeline.schedule_audit_runs (mode) VALUES ($1) RETURNING run_id",
@@ -511,21 +535,14 @@ def main():
         logger.info(f"mode={args.mode}: {len(candidates)} of {len(scheduled)} "
                     f"scheduled tasks to audit ({len(open_dids)} anomalies open)")
 
-        resolve_sql = (
-            "UPDATE pipeline.schedule_audit_anomalies SET status = 'resolved', "
-            "resolved_at = now() WHERE task_did = $1 AND status = 'open' "
-            "RETURNING task_did, task_name, asset_name, notice_thread_id, "
-            "notice_message_id, notice_subject, notice_recipients, "
-            "resolved_notice_sent_at")
-        all_clear = []
-
         def resolve_anomaly(did):
-            """Mark resolved; if the original member notice went out and has
-            no follow-up yet, queue the all-clear reply on its thread."""
-            row = db.fetchrow(resolve_sql, did)
-            if (row and row["notice_thread_id"]
-                    and row["resolved_notice_sent_at"] is None):
-                all_clear.append(row)
+            """Mark resolved. The all-clear follow-up is NOT queued here:
+            the alerting phase reads owed follow-ups straight from the DB
+            (resolved + noticed + resolved_notice_sent_at IS NULL), so a
+            failed or skipped send retries on every later run."""
+            db.execute(
+                "UPDATE pipeline.schedule_audit_anomalies SET status = 'resolved', "
+                "resolved_at = now() WHERE task_did = $1 AND status = 'open'", did)
 
         # Open anomalies whose task vanished from the report (completed /
         # unscheduled / status moved on): nothing left to correct.
@@ -548,20 +565,32 @@ def main():
         fetched = sum(1 for v, _ in results.values() if v != "fetch_error")
         coverage = fetched / len(candidates) if candidates else 1.0
 
-        new_alerts = []
         n_new = n_resolved = 0
 
         def record_anomaly(did, verdict, rec, stored, d):
-            """Upsert one confirmed anomaly; queue alerts per the
-            once-per-entry-per-breakage rule."""
+            """Upsert one confirmed anomaly. Alert obligations live in the
+            row, not in memory: the send stamps (ops_alerted_at,
+            notice_sent_at, resolved_notice_sent_at) are reset to NULL when
+            a resolved anomaly re-opens or an open one re-breaks (stored
+            value changed), so each breakage owes exactly one ops mention,
+            one member notice, and one all-clear - and a failed send stays
+            owed for the next run instead of dying with this process."""
             nonlocal n_new
-            was_open = did in open_dids
             db.execute(
                 "INSERT INTO pipeline.schedule_audit_anomalies "
                 "(task_did, class, status, stored_scheduled, feed_scheduled, offset_hours, "
                 " last_feed_event, last_event_at, last_event_by, task_name, asset_name, project) "
                 "VALUES ($1, $2, 'open', $3, $4, $5, $6, $7, $8, $9, $10, $11) "
                 "ON CONFLICT (task_did) DO UPDATE SET "
+                "ops_alerted_at = CASE WHEN schedule_audit_anomalies.status = 'resolved' "
+                "  OR schedule_audit_anomalies.stored_scheduled IS DISTINCT FROM EXCLUDED.stored_scheduled "
+                "  THEN NULL ELSE schedule_audit_anomalies.ops_alerted_at END, "
+                "notice_sent_at = CASE WHEN schedule_audit_anomalies.status = 'resolved' "
+                "  OR schedule_audit_anomalies.stored_scheduled IS DISTINCT FROM EXCLUDED.stored_scheduled "
+                "  THEN NULL ELSE schedule_audit_anomalies.notice_sent_at END, "
+                "resolved_notice_sent_at = CASE WHEN schedule_audit_anomalies.status = 'resolved' "
+                "  OR schedule_audit_anomalies.stored_scheduled IS DISTINCT FROM EXCLUDED.stored_scheduled "
+                "  THEN NULL ELSE schedule_audit_anomalies.resolved_notice_sent_at END, "
                 "class = EXCLUDED.class, status = 'open', resolved_at = NULL, "
                 "stored_scheduled = EXCLUDED.stored_scheduled, "
                 "feed_scheduled = EXCLUDED.feed_scheduled, "
@@ -573,20 +602,8 @@ def main():
                 did, verdict, stored, d["feed_scheduled"], d["offset_hours"],
                 d["last_feed_event"], d["last_event_at"], d["last_event_by"],
                 rec.get("Task Name"), rec.get("Asset Name"), rec.get("Project"))
-            # Alert on (a) a brand-new anomaly, or (b) an open anomaly whose
-            # stored value CHANGED and is still wrong - i.e. the scheduler
-            # rescheduled and Swift flipped it again. An unchanged open
-            # anomaly stays silent: one email per entry per breakage.
-            rebroken = was_open and open_dids[did] != stored
-            if not was_open:
+            if did not in open_dids:
                 n_new += 1
-            if not was_open or rebroken:
-                # Only for current schedules where the wrong value can still
-                # mislead someone (due recently or in the future).
-                relevant = max(filter(None, [stored, d["feed_scheduled"]]))
-                if (verdict in ("timed_mismatch", "ghost_schedule")
-                        and relevant >= started - timedelta(days=1)):
-                    new_alerts.append((verdict, rec, stored, d))
 
         recheck = {}
         for did, (verdict, d) in results.items():
@@ -618,13 +635,18 @@ def main():
             logger.info(f"rechecking {len(recheck)} fresh-event disagreement(s) "
                         f"after {int(RECHECK_DELAY.total_seconds())}s")
             time.sleep(RECHECK_DELAY.total_seconds())
-            report2 = fetch_report_rows()
-            # A truncated second pull must not silently swallow alerts:
-            # confirm with first-pass data instead of "clearing" on absence.
-            degraded = len(report2) < 0.7 * len(report)
+            # Neither a truncated nor a FAILED second pull may swallow alerts
+            # (or abort a run whose registry writes already committed):
+            # confirm with first-pass data instead.
+            try:
+                report2 = fetch_report_rows()
+                degraded = len(report2) < 0.7 * len(report)
+            except Exception as e:
+                logger.warning(f"recheck report re-pull failed ({e}); "
+                               f"confirming with first-pass data")
+                report2, degraded = {}, True
             if degraded:
-                logger.warning("recheck report pull looks truncated; "
-                               "confirming with first-pass data")
+                logger.warning("recheck degraded - confirming with first-pass data")
             for did, (rec, stored, verdict, d) in recheck.items():
                 if degraded:
                     record_anomaly(did, verdict, rec, stored, d)
@@ -653,45 +675,69 @@ def main():
         logger.info(f"done: {len(candidates)} checked, coverage {coverage:.0%}, "
                     f"{n_new} new, {n_resolved} resolved, {n_open} open")
 
-        if not args.no_email:
-            if new_alerts:
-                items = []
-                team = notice_team(db)
-                for v, r, s, d in new_alerts:
-                    sched_email = resolve_scheduler_email(db, d["last_event_by"])
+        # Alerting phase. The DB is the queue (pre-merge review 2026-08-20):
+        # each breakage owes one ops mention (ops_alerted_at), one member
+        # notice (notice_sent_at) and, once resolved, one all-clear
+        # (resolved_notice_sent_at); stamps are set only on successful send,
+        # so anything unsent is retried by every later run. Wrapped so an
+        # email failure can never fail (or re-finish) the completed run.
+        try:
+            if not args.no_email:
+                pending = db.fetch(
+                    "SELECT * FROM pipeline.schedule_audit_anomalies "
+                    "WHERE status = 'open' "
+                    "AND class IN ('timed_mismatch', 'ghost_schedule') "
+                    "AND first_seen_at >= $1 "
+                    "AND GREATEST(COALESCE(stored_scheduled, feed_scheduled), "
+                    "             COALESCE(feed_scheduled, stored_scheduled)) "
+                    "      >= now() - interval '1 day' "
+                    "AND (ops_alerted_at IS NULL OR notice_sent_at IS NULL) "
+                    "ORDER BY first_seen_at", NOTICES_SINCE)
+                team = notice_team(db) if pending else []
+                items, ops_dids = [], []
+                for row in pending:
+                    v, s = row["class"], row["stored_scheduled"]
+                    rec = {"Task DID": row["task_did"], "Task Name": row["task_name"],
+                           "Asset Name": row["asset_name"], "Project": row["project"]}
+                    d = {"last_event_by": row["last_event_by"],
+                         "last_feed_event": row["last_feed_event"],
+                         "feed_scheduled": row["feed_scheduled"]}
+                    sched_email = resolve_scheduler_email(db, row["last_event_by"])
+                    recips = list(team)
+                    if sched_email and sched_email not in recips:
+                        recips.append(sched_email)
                     notified = ""
-                    if v in ("timed_mismatch", "ghost_schedule"):
-                        # Full audience for BOTH classes since 2026-08-20
-                        # (ghosts were briefly Jamil-only the same day, until
-                        # he approved the wording via inbox samples).
-                        recips = list(team)
-                        if sched_email and sched_email not in recips:
-                            recips.append(sched_email)
+                    if row["notice_sent_at"] is None:
                         if args.notify_schedulers:
                             subject = (f"Schedule needs a quick re-do: "
-                                       f"{r.get('Task Name')} - {r.get('Asset Name')}")
+                                       f"{row['task_name']} - {row['asset_name']}")
                             res = send_alert(
                                 subject,
-                                scheduler_notice_html(v, r, s, d),
+                                scheduler_notice_html(v, rec, s, d),
                                 recipients=recips,
                                 sender_name="Ontel Schedule Check")
                             if res:
-                                # Remember the thread so the resolution
+                                # Remember the thread so the all-clear
                                 # follow-up replies on it.
                                 db.execute(
                                     "UPDATE pipeline.schedule_audit_anomalies SET "
                                     "notice_thread_id = $2, notice_message_id = $3, "
                                     "notice_subject = $4, notice_recipients = $5, "
                                     "notice_sent_at = now() WHERE task_did = $1",
-                                    r.get("Task DID"), res["thread_id"],
+                                    row["task_did"], res["thread_id"],
                                     res["message_id"], subject, recips)
-                            notified = f" - notice sent to: {', '.join(recips)}"
+                                notified = f" - notice sent to: {', '.join(recips)}"
+                            else:
+                                notified = " - notice send FAILED; retrying next run"
                         else:
                             notified = (f" - would send notice to: {', '.join(recips)} "
                                         f"(enable --notify-schedulers)")
-                    if d["last_event_by"] and not sched_email:
-                        notified += (f" - scheduler '{d['last_event_by']}' not uniquely "
+                    if row["last_event_by"] and not sched_email:
+                        notified += (f" - scheduler '{row['last_event_by']}' not uniquely "
                                      f"matched in directory; manual follow-up")
+                    if row["ops_alerted_at"] is not None:
+                        continue  # already announced to ops; only the notice was owed
+                    ops_dids.append(row["task_did"])
                     if v == "ghost_schedule":
                         # feed_scheduled on a ghost is the REMOVED value
                         # (p_schedule of the remove event) - phrasing it as
@@ -700,49 +746,66 @@ def main():
                         compare = (
                             f"task record still says <b>{_fmt_et(s)}</b>, but the "
                             f"feed shows the schedule was <b>removed</b>"
-                            + (f" (removed value: {_fmt_et(d['feed_scheduled'])})"
-                               if d["feed_scheduled"] else ""))
+                            + (f" (removed value: {_fmt_et(row['feed_scheduled'])})"
+                               if row["feed_scheduled"] else ""))
                     else:
                         compare = (f"task record says <b>{_fmt_et(s)}</b>, "
-                                   f"activity feed says <b>{_fmt_et(d['feed_scheduled'])}</b>")
+                                   f"activity feed says <b>{_fmt_et(row['feed_scheduled'])}</b>")
                     items.append(
-                        f"<li><b>{r.get('Task Name')}</b> / {r.get('Asset Name')} "
-                        f"({r.get('Project')})<br>"
+                        f"<li><b>{row['task_name']}</b> / {row['asset_name']} "
+                        f"({row['project']})<br>"
                         f"class: {v} - {compare} "
-                        f"(last feed event: {d['last_feed_event']} by {d['last_event_by']})"
+                        f"(last feed event: {row['last_feed_event']} by {row['last_event_by']})"
                         f"{notified}<br>"
-                        f"Fix: <a href=\"{swift_task_url(r.get('Task DID'))}\">open "
+                        f"Fix: <a href=\"{swift_task_url(row['task_did'])}\">open "
                         f"in Swift</a> and reschedule via the <b>Reschedule dialog</b> "
                         f"(saves correctly); the warehouse view already serves the "
                         f"feed value.</li>")
-                send_alert(
-                    f"Swift schedule audit: {len(new_alerts)} new schedule anomal"
-                    f"{'y' if len(new_alerts) == 1 else 'ies'}",
-                    f"<p>New Swift task-vs-feed schedule disagreements "
-                    f"(the 12h calendar-path bug or a one-store reschedule):</p>"
-                    f"<ul>{''.join(items)}</ul>"
-                    f"<p>Registry: pipeline.schedule_audit_anomalies | corrected data: "
-                    f"analytics.v_user_priorities_effective</p>")
-            # All-clear follow-ups: reply on the original notice thread once
-            # the anomaly resolves, so members know it's fixed.
-            if args.notify_schedulers:
-                for row in all_clear:
+                if items:
                     res = send_alert(
-                        f"Re: {row['notice_subject']}",
-                        all_clear_html(row),
-                        recipients=list(row["notice_recipients"] or []) or None,
-                        sender_name="Ontel Schedule Check",
-                        thread_id=row["notice_thread_id"],
-                        in_reply_to=row["notice_message_id"])
+                        f"Swift schedule audit: {len(items)} new schedule anomal"
+                        f"{'y' if len(items) == 1 else 'ies'}",
+                        f"<p>New Swift task-vs-feed schedule disagreements "
+                        f"(the 12h calendar-path bug or a one-store reschedule):</p>"
+                        f"<ul>{''.join(items)}</ul>"
+                        f"<p>Registry: pipeline.schedule_audit_anomalies | corrected data: "
+                        f"analytics.v_user_priorities_effective</p>")
                     if res:
                         db.execute(
                             "UPDATE pipeline.schedule_audit_anomalies SET "
-                            "resolved_notice_sent_at = now() WHERE task_did = $1",
-                            row["task_did"])
-            if status == "failed":
-                send_alert("Swift schedule audit FAILED",
-                           f"<p>{err}</p><p>run_id: {run_id}, mode: {args.mode}, "
-                           f"checked {len(candidates)}, fetched {fetched}.</p>")
+                            "ops_alerted_at = now() WHERE task_did = ANY($1)",
+                            ops_dids)
+                # All-clear follow-ups: reply on the original notice thread
+                # once the anomaly resolves, so members know it's fixed.
+                # Read from the DB, not this run's memory - a follow-up whose
+                # send failed (or whose run died) stays owed.
+                if args.notify_schedulers:
+                    clears = db.fetch(
+                        "SELECT task_did, task_name, asset_name, notice_thread_id, "
+                        "notice_message_id, notice_subject, notice_recipients "
+                        "FROM pipeline.schedule_audit_anomalies "
+                        "WHERE status = 'resolved' AND notice_thread_id IS NOT NULL "
+                        "AND notice_subject IS NOT NULL "
+                        "AND resolved_notice_sent_at IS NULL")
+                    for row in clears:
+                        res = send_alert(
+                            f"Re: {row['notice_subject']}",
+                            all_clear_html(row),
+                            recipients=list(row["notice_recipients"] or []) or None,
+                            sender_name="Ontel Schedule Check",
+                            thread_id=row["notice_thread_id"],
+                            in_reply_to=row["notice_message_id"])
+                        if res:
+                            db.execute(
+                                "UPDATE pipeline.schedule_audit_anomalies SET "
+                                "resolved_notice_sent_at = now() WHERE task_did = $1",
+                                row["task_did"])
+                if status == "failed":
+                    send_alert("Swift schedule audit FAILED",
+                               f"<p>{err}</p><p>run_id: {run_id}, mode: {args.mode}, "
+                               f"checked {len(candidates)}, fetched {fetched}.</p>")
+        except Exception:
+            logger.exception("alerting phase failed; queued sends retry next run")
         return 0 if status == "ok" else 1
 
     except Exception as e:

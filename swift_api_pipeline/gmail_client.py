@@ -68,6 +68,16 @@ def authenticate():
                     f"Gmail credentials not found at {CREDENTIALS_FILE}. "
                     "Download from Google Cloud Console → OAuth 2.0 Client IDs."
                 )
+            # Headless guard (2026-08-20 resilience review): under GHA the
+            # token pickle exists but a scope-stale/refresh-less token falls
+            # through to run_local_server(), which blocks on a browser
+            # redirect that never comes until the job timeout SIGKILLs the
+            # run. Fail fast instead so the run errors visibly.
+            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("GMAIL_NO_INTERACTIVE"):
+                raise RuntimeError(
+                    "Gmail token unusable (stale scopes or no refresh token) "
+                    "and interactive OAuth is impossible headless - re-mint "
+                    "the token locally and update the GHA secret")
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE), SCOPES
             )
@@ -131,6 +141,16 @@ def authenticate_drive():
                     f"Gmail credentials not found at {CREDENTIALS_FILE}. "
                     "Download from Google Cloud Console."
                 )
+            # Headless guard (2026-08-20 resilience review): under GHA the
+            # token pickle exists but a scope-stale/refresh-less token falls
+            # through to run_local_server(), which blocks on a browser
+            # redirect that never comes until the job timeout SIGKILLs the
+            # run. Fail fast instead so the run errors visibly.
+            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("GMAIL_NO_INTERACTIVE"):
+                raise RuntimeError(
+                    "Gmail token unusable (stale scopes or no refresh token) "
+                    "and interactive OAuth is impossible headless - re-mint "
+                    "the token locally and update the GHA secret")
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE), SCOPES
             )
