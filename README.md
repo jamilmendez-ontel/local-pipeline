@@ -182,7 +182,10 @@ so the feed wins whenever the two disagree.
   remove/reschedule is Swift still propagating, not an anomaly — it only
   flags if it persists into the next run.
   `--notify-schedulers` additionally emails the scheduler ("Ontel Schedule
-  Check" mask, directory-matched address; unique first+last match required).
+  Check" mask, directory-matched address; unique first+last match required)
+  for `timed_mismatch` AND `ghost_schedule` anomalies (ghosts added
+  2026-08-20: a remove-then-reschedule left a member's task falsely
+  "Overdue" and only the ops email fired).
 - Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d
   window) / `--mode full` (~5.2k feed fetches, ~4 min). Coverage <90% ⇒ run
   FAILED (never silently green). Logs carry counts/DIDs only — no member

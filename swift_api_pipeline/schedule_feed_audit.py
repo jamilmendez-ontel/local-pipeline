@@ -31,6 +31,10 @@ Modes:
 Alerting (Gmail, "Pipeline Alerts" mask, jamil.mendez@ontel.co):
   - immediate email when a NEW timed_mismatch/ghost appears on a task whose
     schedule is current (due within the past day or in the future)
+  - with --notify-schedulers, the scheduler (last_event_by) is ALSO emailed
+    directly for both timed_mismatch and ghost_schedule (ghosts added
+    2026-08-20 after the TENASKA - Horvath miss: members saw a false
+    "Overdue" and nobody was told)
   - always email when the run FAILS (auth, coverage < FLOOR, db errors)
   - silent otherwise; run history in pipeline.schedule_audit_runs
 
@@ -286,19 +290,35 @@ def resolve_scheduler_email(db, swift_name):
     return rows[0]["email"] if len(rows) == 1 else None
 
 
-def scheduler_notice_html(rec, stored, d):
+def scheduler_notice_html(verdict, rec, stored, d):
     """Friendly per-scheduler notice (Abbie-message style): blameless, names
     both times, tells them the one safe fix."""
+    if verdict == "ghost_schedule":
+        if d["feed_scheduled"]:
+            situation = (
+                f"you changed its schedule (Swift's activity feed correctly shows "
+                f"<b>{_fmt_et(d['feed_scheduled'])}</b>), but Swift kept the old copy "
+                f"<b>{_fmt_et(stored)}</b> on the task record. Alarms and reports "
+                f"read that old copy, so the task can wrongly show \"past due\".")
+        else:
+            situation = (
+                f"you removed its schedule, but Swift kept a leftover copy "
+                f"<b>{_fmt_et(stored)}</b> on the task record. Alarms and reports "
+                f"read that leftover copy, so the task can wrongly show \"past due\". "
+                f"If you meant to remove the schedule entirely, use the Reschedule "
+                f"dialog once to set and clear it so the leftover copy goes away.")
+    else:  # timed_mismatch
+        situation = (
+            f"you scheduled it for <b>{_fmt_et(d['feed_scheduled'])}</b> (Swift's activity "
+            f"feed shows this correctly), but Swift saved a hidden second copy as "
+            f"<b>{_fmt_et(stored)}</b>. Alarms and reports read the hidden copy, so the "
+            f"task will show \"due soon\"/\"past due\" about 12 hours early.")
     return (
         f"<p>Hi {(d['last_event_by'] or 'there').split()[0]},</p>"
         f"<p>Heads up on a schedule you set in Swift. This is a known Swift bug, "
         f"not a mistake on your side, and your computer settings are fine.</p>"
         f"<p><b>{rec.get('Task Name')}</b> on <b>{rec.get('Asset Name')}</b> "
-        f"({rec.get('Project')}):<br>"
-        f"you scheduled it for <b>{_fmt_et(d['feed_scheduled'])}</b> (Swift's activity "
-        f"feed shows this correctly), but Swift saved a hidden second copy as "
-        f"<b>{_fmt_et(stored)}</b>. Alarms and reports read the hidden copy, so the "
-        f"task will show \"due soon\"/\"past due\" about 12 hours early.</p>"
+        f"({rec.get('Project')}):<br>{situation}</p>"
         f"<p><b>The fix takes a minute:</b> open the task and use the "
         f"<b>Reschedule</b> dialog to set the time again. That path always saves "
         f"correctly. Scheduling from the calendar view is what triggers the bug.</p>"
@@ -493,12 +513,12 @@ def main():
                 for v, r, s, d in new_alerts:
                     sched_email = resolve_scheduler_email(db, d["last_event_by"])
                     notified = ""
-                    if sched_email and v == "timed_mismatch":
+                    if sched_email and v in ("timed_mismatch", "ghost_schedule"):
                         if args.notify_schedulers:
                             send_alert(
                                 f"Schedule needs a quick re-do: {r.get('Task Name')} "
                                 f"- {r.get('Asset Name')}",
-                                scheduler_notice_html(r, s, d),
+                                scheduler_notice_html(v, r, s, d),
                                 recipients=[sched_email],
                                 sender_name="Ontel Schedule Check")
                             notified = f" - scheduler notified: {sched_email}"
