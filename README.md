@@ -178,12 +178,15 @@ so the feed wins whenever the two disagree.
   is never mutated; corrections auto-resolve when task and feed re-agree.
 - Alerts ("Pipeline Alerts" → Jamil): once per entry per breakage — new
   anomaly or an open one whose stored value changed and is still wrong.
-  1h grace on fresh feed events: a disagreement seen minutes after a
-  remove/reschedule is Swift still propagating, not an anomaly — it only
-  flags if it persists into the next run.
-  `--notify-schedulers` additionally emails the scheduler ("Ontel Schedule
-  Check" mask, directory-matched address; unique first+last match required)
-  for `timed_mismatch` AND `ghost_schedule` anomalies (ghosts added
+  Fresh feed events (<1h old) get an in-run recheck instead of a next-run
+  punt (changed 2026-08-20, was a skip-to-next-run grace): wait 120s,
+  re-pull the report, re-classify; still inconsistent ⇒ alert in the same
+  run. Propagation false alarms stay suppressed, worst-case alert lag drops
+  from ~2h to one run cycle.
+  `--notify-schedulers` additionally sends a member-facing notice ("Ontel
+  Schedule Check" mask) to the notice team (jamil, abbie, hajie, sheena)
+  plus the directory-matched scheduler (unique first+last match) for
+  `timed_mismatch` AND `ghost_schedule` anomalies (ghosts + team list added
   2026-08-20: a remove-then-reschedule left a member's task falsely
   "Overdue" and only the ops email fired).
 - Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d

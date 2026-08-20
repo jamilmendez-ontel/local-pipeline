@@ -31,10 +31,14 @@ Modes:
 Alerting (Gmail, "Pipeline Alerts" mask, jamil.mendez@ontel.co):
   - immediate email when a NEW timed_mismatch/ghost appears on a task whose
     schedule is current (due within the past day or in the future)
-  - with --notify-schedulers, the scheduler (last_event_by) is ALSO emailed
-    directly for both timed_mismatch and ghost_schedule (ghosts added
+  - with --notify-schedulers, a member-facing notice ALSO goes to
+    SCHEDULER_NOTICE_TEAM + the directory-matched scheduler (last_event_by)
+    for both timed_mismatch and ghost_schedule (ghosts + team list added
     2026-08-20 after the TENASKA - Horvath miss: members saw a false
     "Overdue" and nobody was told)
+  - fresh feed events (< FRESH_EVENT_WINDOW) are NOT punted to the next run:
+    they get an in-run recheck (RECHECK_DELAY wait + report re-pull) and
+    alert in the same run if still inconsistent (alarm ASAP, 2026-08-20)
   - always email when the run FAILS (auth, coverage < FLOOR, db errors)
   - silent otherwise; run history in pipeline.schedule_audit_runs
 
@@ -68,13 +72,19 @@ TOLERANCE_MS = 2000
 WORKERS = 8
 COVERAGE_FLOOR = 0.90
 ALERT_RECIPIENTS = ["jamil.mendez@ontel.co"]
+# Member-facing scheduler notices always include this team list, plus the
+# directory-matched scheduler (Jamil's recipient list, 2026-08-20).
+SCHEDULER_NOTICE_TEAM = ["jamil.mendez@ontel.co", "abbie@ontel.co",
+                         "hajie@ontel.co", "sheena@ontel.co"]
 # A feed event younger than this at detection time means Swift may still be
 # propagating a legit change (remove/reschedule) to the task record - the
-# report lags the feed by minutes. Skip flagging entirely and let the next
-# run decide: a real anomaly persists, a propagating change clears itself.
-# (First observed 2026-08-14: John Versoza's schedule removal was flagged as
-# a ghost 2 minutes after the fact.)
-FEED_EVENT_GRACE = timedelta(hours=1)
+# report lags the feed by minutes. (First observed 2026-08-14: John Versoza's
+# schedule removal was flagged as a ghost 2 minutes after the fact.)
+# Until 2026-08-20 these were skipped until the NEXT run (worst case ~2h to
+# alarm). Now they get an in-run recheck instead: wait RECHECK_DELAY, re-pull
+# the report, re-classify; still inconsistent -> alert in THIS run.
+FRESH_EVENT_WINDOW = timedelta(hours=1)
+RECHECK_DELAY = timedelta(seconds=120)
 
 _token_lock = threading.Lock()
 _tokens = {"fb": None, "id": None}
@@ -441,26 +451,11 @@ def main():
 
         new_alerts = []
         n_new = n_resolved = 0
-        for did, (verdict, d) in results.items():
-            rec = candidates[did]
-            stored = parse_scheduled(rec)
-            if verdict in ("ok", "fetch_error"):
-                if verdict == "ok" and did in open_dids:
-                    db.execute(
-                        "UPDATE pipeline.schedule_audit_anomalies SET status = 'resolved', "
-                        "resolved_at = now() WHERE task_did = $1 AND status = 'open'", did)
-                    n_resolved += 1
-                continue
 
-            # Grace: a NOT-yet-open disagreement whose latest feed event is
-            # very fresh is most likely a legit change still propagating to
-            # the task record. Skip it; the next run flags it if it stuck.
-            if (did not in open_dids and d["last_event_at"] is not None
-                    and started - d["last_event_at"] < FEED_EVENT_GRACE):
-                logger.info(f"grace-skip {did}: feed event "
-                            f"{started - d['last_event_at']} old ({verdict})")
-                continue
-
+        def record_anomaly(did, verdict, rec, stored, d):
+            """Upsert one confirmed anomaly; queue alerts per the
+            once-per-entry-per-breakage rule."""
+            nonlocal n_new
             was_open = did in open_dids
             db.execute(
                 "INSERT INTO pipeline.schedule_audit_anomalies "
@@ -494,6 +489,60 @@ def main():
                         and relevant >= started - timedelta(days=1)):
                     new_alerts.append((verdict, rec, stored, d))
 
+        recheck = {}
+        for did, (verdict, d) in results.items():
+            rec = candidates[did]
+            stored = parse_scheduled(rec)
+            if verdict in ("ok", "fetch_error"):
+                if verdict == "ok" and did in open_dids:
+                    db.execute(
+                        "UPDATE pipeline.schedule_audit_anomalies SET status = 'resolved', "
+                        "resolved_at = now() WHERE task_did = $1 AND status = 'open'", did)
+                    n_resolved += 1
+                continue
+
+            # A NOT-yet-open disagreement on a very fresh feed event is often
+            # a legit change still propagating to the task record. Hold it for
+            # the in-run recheck below (alarm ASAP, 2026-08-20) instead of
+            # punting to the next run.
+            if (did not in open_dids and d["last_event_at"] is not None
+                    and started - d["last_event_at"] < FRESH_EVENT_WINDOW):
+                logger.info(f"recheck-hold {did}: feed event "
+                            f"{started - d['last_event_at']} old ({verdict})")
+                recheck[did] = (rec, stored, verdict, d)
+                continue
+
+            record_anomaly(did, verdict, rec, stored, d)
+
+        # In-run recheck: give Swift RECHECK_DELAY to finish propagating,
+        # re-pull the report, re-classify. Still inconsistent -> real anomaly,
+        # alert in THIS run. Cleared -> it was propagation, stay silent.
+        if recheck:
+            logger.info(f"rechecking {len(recheck)} fresh-event disagreement(s) "
+                        f"after {int(RECHECK_DELAY.total_seconds())}s")
+            time.sleep(RECHECK_DELAY.total_seconds())
+            report2 = fetch_report_rows()
+            # A truncated second pull must not silently swallow alerts:
+            # confirm with first-pass data instead of "clearing" on absence.
+            degraded = len(report2) < 0.7 * len(report)
+            if degraded:
+                logger.warning("recheck report pull looks truncated; "
+                               "confirming with first-pass data")
+            for did, (rec, stored, verdict, d) in recheck.items():
+                if degraded:
+                    record_anomaly(did, verdict, rec, stored, d)
+                    continue
+                rec2 = report2.get(did)
+                stored2 = parse_scheduled(rec2) if rec2 else None
+                if stored2 is None:
+                    logger.info(f"recheck-clear {did}: no longer scheduled on record")
+                    continue
+                verdict2, d2 = classify(did, stored2)
+                if verdict2 in ("ok", "fetch_error"):
+                    logger.info(f"recheck-clear {did}: now {verdict2}")
+                    continue
+                record_anomaly(did, verdict2, rec2, stored2, d2)
+
         n_resolved += len(vanished)
         n_open = db.fetchval(
             "SELECT count(*) FROM pipeline.schedule_audit_anomalies WHERE status = 'open'")
@@ -513,21 +562,24 @@ def main():
                 for v, r, s, d in new_alerts:
                     sched_email = resolve_scheduler_email(db, d["last_event_by"])
                     notified = ""
-                    if sched_email and v in ("timed_mismatch", "ghost_schedule"):
+                    if v in ("timed_mismatch", "ghost_schedule"):
+                        recips = list(SCHEDULER_NOTICE_TEAM)
+                        if sched_email and sched_email not in recips:
+                            recips.append(sched_email)
                         if args.notify_schedulers:
                             send_alert(
                                 f"Schedule needs a quick re-do: {r.get('Task Name')} "
                                 f"- {r.get('Asset Name')}",
                                 scheduler_notice_html(v, r, s, d),
-                                recipients=[sched_email],
+                                recipients=recips,
                                 sender_name="Ontel Schedule Check")
-                            notified = f" - scheduler notified: {sched_email}"
+                            notified = f" - notice sent to: {', '.join(recips)}"
                         else:
-                            notified = (f" - would notify scheduler: {sched_email} "
+                            notified = (f" - would send notice to: {', '.join(recips)} "
                                         f"(enable --notify-schedulers)")
-                    elif d["last_event_by"] and not sched_email:
-                        notified = (f" - scheduler '{d['last_event_by']}' not uniquely "
-                                    f"matched in directory; manual follow-up")
+                    if d["last_event_by"] and not sched_email:
+                        notified += (f" - scheduler '{d['last_event_by']}' not uniquely "
+                                     f"matched in directory; manual follow-up")
                     items.append(
                         f"<li><b>{r.get('Task Name')}</b> / {r.get('Asset Name')} "
                         f"({r.get('Project')})<br>"
