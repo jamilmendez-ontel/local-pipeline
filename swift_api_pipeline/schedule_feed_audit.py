@@ -12,8 +12,12 @@ User Priorities report against its Firebase activity feed and maintains
 pipeline.schedule_audit_anomalies:
 
   timed_mismatch   task and feed disagree on a real time (incl. the -12h flip
-                   and reschedules that only reached one store)
+                   and reschedules that only reached one store; ALSO includes
+                   half-applied removes where the record keeps exactly the
+                   12h flip of the removed TIMED value - TENASKA 2026-08-18
+                   showed the schedule stays live in one store there)
   ghost_schedule   feed says the schedule was removed; task still scheduled
+                   (record keeps the removed value itself, not its flip)
   no_feed_schedule task is scheduled but the feed has no schedule events
 
 Benign and excluded: date-only schedules stored midnight-ET on the task vs
@@ -241,8 +245,25 @@ def classify(task_did, stored):
         if last["type"] == "schedule_remove":
             p = data.get("p_schedule")
             if isinstance(p, dict) and "date" in p:
-                detail["feed_scheduled"] = datetime.fromtimestamp(
-                    p["date"] / 1000, tz=timezone.utc)
+                feed_dt = datetime.fromtimestamp(p["date"] / 1000, tz=timezone.utc)
+                detail["feed_scheduled"] = feed_dt
+                # Half-applied removes (TENASKA, 2026-08-18): Swift can drop a
+                # schedule from one store only - Mary's remove left the task
+                # record holding the 12h-FLIPPED copy of her add, and the
+                # schedule store still had the original (Esther
+                # schedule_change'd it FROM that value the next morning). When
+                # the record holds exactly removed-value-minus-12h on a TIMED
+                # schedule, the schedule effectively still exists and members
+                # see the flip symptom (false overdue), so classify as
+                # timed_mismatch: full notice audience + the view serves the
+                # feed value instead of NULL. Date-only removes are excluded
+                # (record midnight == feed noon - 12h by CONVENTION, not flip).
+                f_et = feed_dt.astimezone(ET)
+                diff_ms = (stored - feed_dt).total_seconds() * 1000
+                if ((f_et.hour, f_et.minute) != (12, 0)
+                        and abs(diff_ms + 12 * 3600 * 1000) <= TOLERANCE_MS):
+                    detail["offset_hours"] = round(diff_ms / 3600000, 2)
+                    return "timed_mismatch", detail
             return "ghost_schedule", detail
 
         c = data.get("c_schedule")

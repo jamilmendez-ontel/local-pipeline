@@ -169,9 +169,14 @@ applied unconditionally) while the activity feed keeps the correct instant —
 so the feed wins whenever the two disagree.
 
 - Registry: `pipeline.schedule_audit_anomalies` (+ `schedule_audit_runs`),
-  migrations 236-237. Classes: `timed_mismatch`, `ghost_schedule`
+  migrations 236-238. Classes: `timed_mismatch`, `ghost_schedule`
   (feed says removed, task still scheduled), `no_feed_schedule`.
   Date-only midnight-ET (task) vs noon-ET (feed) is benign and excluded.
+  A remove whose leftover record value is exactly the 12h flip of the
+  removed TIMED value counts as `timed_mismatch`, not ghost (2026-08-20
+  TENASKA finding: such removes are half-applied - the schedule stays live
+  in one store, so members see the flip symptom and the feed value is the
+  truth to serve).
 - Serving: `analytics.v_user_priorities_effective` overlays
   `scheduled_effective` (feed value) while an anomaly is open AND the stored
   value is unchanged since detection (reschedule guard). `stg_user_priorities`
