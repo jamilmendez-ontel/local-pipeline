@@ -312,7 +312,11 @@ Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes.
+migrations/` for recent changes. Latest: 240 `analytics.v_timer_task_mix_daily`
+(+ `analytics.task_mix_category(text)`), completed-timer minutes per member per
+ET day per task-type bucket (production/admin/post-fill) for the ontel-people
+weekly/monthly ops report; classification is a SQL port of the app's Gantt
+buckets, drift-guarded by ontel-people's `task-mix.sql-sync.test.ts`.
 
 ## Performance (typical nightly)
 
