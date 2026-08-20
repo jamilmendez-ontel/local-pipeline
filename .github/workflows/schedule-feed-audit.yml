@@ -3,12 +3,11 @@ name: "Audit: Swift Schedule Feed"
 # Cross-checks task-record schedules against each task's activity feed
 # (Swift 12h calendar-path flip; see swift_api_pipeline/schedule_feed_audit.py).
 #
-# Cadence: GHA cron as the driver (hourly incremental + one nightly full at
-# 07:17 UTC = 3:17 AM ET; hourly since 2026-08-14, free on a public repo).
-# This is an advisory audit, so occasional GHA cron drift/skips are
-# acceptable; an Apps Script repository_dispatch trigger
-# (types: [schedule-feed-audit]) can be layered on later if cron proves too
-# flaky, per the house convention for time-critical jobs.
+# Cadence: Apps Script repository_dispatch every 15 min is the primary
+# driver since 2026-08-20 (alarm-ASAP; see triggerScheduleFeedAudit() in
+# scripts/pipeline_trigger.gs). The hourly GHA cron below stays as a
+# backstop (plus the nightly full at 07:17 UTC = 3:17 AM ET); double-fires
+# are harmless - the script's overlap guard exits the second run.
 #
 # Overlap safety: GHA concurrency group here + the script's own DB-side
 # 'running' row check. Logs carry counts and task DIDs only (public repo).

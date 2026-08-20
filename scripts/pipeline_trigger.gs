@@ -19,6 +19,8 @@
  *                                    setupPriorityRefreshTrigger() once to create it
  *      - checkForRevenueReports()  → Every 5 min (Gmail watcher → gmail-revenue-report;
  *                                    create via setupRevenueWatchTrigger())
+ *      - triggerScheduleFeedAudit() → Every 15 min (Swift schedule feed audit;
+ *                                    create via setupScheduleFeedAuditTrigger())
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
  * Schedules (EST):
@@ -362,6 +364,53 @@ function setupAssetTasksIncFullWalkTrigger() {
 }
 
 /**
+ * Trigger the Swift schedule feed audit (incremental mode) every 15 minutes.
+ *
+ * Alarm-ASAP request (Jamil 2026-08-20, after the TENASKA - Horvath miss):
+ * hourly GHA cron drifts 20-40 min under load, so a member's bad schedule
+ * could sit unalerted for ~2 hours. Apps Script dispatch fires with zero
+ * delay; combined with the audit's in-run recheck (which replaced the
+ * skip-to-next-run grace) worst case member-notice lag is now ~20 min.
+ *
+ * The hourly GHA cron in schedule-feed-audit.yml stays as a backstop (the
+ * audit's overlap guard makes double-fires harmless: the second run exits).
+ * Create the trigger by running setupScheduleFeedAuditTrigger() once.
+ */
+function triggerScheduleFeedAudit() {
+  fireDispatch_('schedule-feed-audit');
+}
+
+/**
+ * Cadence (minutes) for the schedule feed audit trigger.
+ * Apps Script minute-based triggers allow 1, 5, 10, 15, or 30.
+ */
+var SCHEDULE_AUDIT_MINUTES = 15;
+
+/**
+ * Idempotently (re)create the every-15-minute time-driven trigger for
+ * triggerScheduleFeedAudit(). RUN THIS ONCE from the Apps Script editor after
+ * deploying this file. Deletes existing triggers bound to the handler first
+ * (orphaned-trigger gotcha — see setupCalendarEventsTriggers), so it is safe
+ * to re-run after changing SCHEDULE_AUDIT_MINUTES.
+ */
+function setupScheduleFeedAuditTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerScheduleFeedAudit') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerScheduleFeedAudit')
+    .timeBased()
+    .everyMinutes(SCHEDULE_AUDIT_MINUTES)
+    .create();
+
+  Logger.log('Created triggerScheduleFeedAudit trigger: every ' +
+             SCHEDULE_AUDIT_MINUTES + ' minutes.');
+}
+
+/**
  * Like fireDispatch_ but allows passing a client_payload — required when the
  * receiving workflow's `on: repository_dispatch` reads inputs via
  * github.event.client_payload.* (which is how we gate dispatch_downstream).
@@ -565,5 +614,6 @@ function testAllDispatches() {
   fireDispatch_('pipeline-forms');
   fireDispatch_('pipeline-open-items-data');
   fireDispatch_('pipeline-calendar-events');
-  Logger.log('All 6 dispatches fired — check GitHub Actions.');
+  fireDispatch_('schedule-feed-audit');
+  Logger.log('All 7 dispatches fired — check GitHub Actions.');
 }

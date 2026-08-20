@@ -184,19 +184,25 @@ so the feed wins whenever the two disagree.
   run. Propagation false alarms stay suppressed, worst-case alert lag drops
   from ~2h to one run cycle.
   `--notify-schedulers` additionally sends a member-facing notice ("Ontel
-  Schedule Check" mask) to the notice team (jamil, abbie, hajie, sheena)
-  plus the directory-matched scheduler (unique first+last match) for
-  `timed_mismatch` AND `ghost_schedule` anomalies (ghosts + team list added
+  Schedule Check" mask) to the notice team (all active Data Analysts +
+  Project Associates, LIVE from `analytics.v_employee_directory`) plus the
+  directory-matched scheduler (unique first+last match) for
+  `timed_mismatch` AND `ghost_schedule` anomalies (ghosts + team added
   2026-08-20: a remove-then-reschedule left a member's task falsely
-  "Overdue" and only the ops email fired).
+  "Overdue" and only the ops email fired). When a noticed anomaly resolves,
+  an all-clear follow-up replies on the SAME Gmail thread (thread ids on
+  the anomaly row, migration 238), so members know the fix landed.
 - Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d
   window) / `--mode full` (~5.2k feed fetches, ~4 min). Coverage <90% ⇒ run
   FAILED (never silently green). Logs carry counts/DIDs only — no member
   names (public repo).
-- Scheduling: `.github/workflows/schedule-feed-audit.yml` — hourly
-  incremental (at :17) + nightly full (07:17 UTC), runs with
-  `--notify-schedulers` (member notices approved 2026-08-14). Also accepts
-  `repository_dispatch` type `schedule-feed-audit` and manual dispatch.
+- Scheduling: Apps Script `triggerScheduleFeedAudit()` every 15 min
+  (primary since 2026-08-20, alarm-ASAP; `scripts/pipeline_trigger.gs`,
+  create via `setupScheduleFeedAuditTrigger()`) →
+  `.github/workflows/schedule-feed-audit.yml`, which also keeps an hourly
+  GHA cron backstop (at :17) + nightly full (07:17 UTC). Runs with
+  `--notify-schedulers` (member notices approved 2026-08-14). Double-fires
+  are harmless: the script's overlap guard exits the second run.
 
 ### Other extractors
 
