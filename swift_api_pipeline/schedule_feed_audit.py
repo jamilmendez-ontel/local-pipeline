@@ -355,19 +355,15 @@ def scheduler_notice_html(verdict, rec, stored, d):
     """Friendly per-scheduler notice (Abbie-message style): blameless, names
     both times, tells them the one safe fix."""
     if verdict == "ghost_schedule":
-        if d["feed_scheduled"]:
-            situation = (
-                f"you changed its schedule (Swift's activity feed correctly shows "
-                f"<b>{_fmt_et(d['feed_scheduled'])}</b>), but Swift kept the old copy "
-                f"<b>{_fmt_et(stored)}</b> on the task record. Alarms and reports "
-                f"read that old copy, so the task can wrongly show \"past due\".")
-        else:
-            situation = (
-                f"you removed its schedule, but Swift kept a leftover copy "
-                f"<b>{_fmt_et(stored)}</b> on the task record. Alarms and reports "
-                f"read that leftover copy, so the task can wrongly show \"past due\". "
-                f"If you meant to remove the schedule entirely, use the Reschedule "
-                f"dialog once to set and clear it so the leftover copy goes away.")
+        # Post flip-signature reclass (2026-08-20), ghosts are TRUE removals:
+        # feed_scheduled is the REMOVED value (usually == stored), never a
+        # newer schedule - so always the "removed but leftover" wording.
+        situation = (
+            f"you removed its schedule, but Swift kept a leftover copy "
+            f"<b>{_fmt_et(stored)}</b> on the task record. Alarms and reports "
+            f"read that leftover copy, so the task can wrongly show \"past due\". "
+            f"If you meant to remove the schedule entirely, use the Reschedule "
+            f"dialog once to set and clear it so the leftover copy goes away.")
     else:  # timed_mismatch
         situation = (
             f"you scheduled it for <b>{_fmt_et(d['feed_scheduled'])}</b> (Swift's activity "
