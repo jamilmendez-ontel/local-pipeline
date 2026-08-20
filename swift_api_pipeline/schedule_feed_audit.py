@@ -375,15 +375,23 @@ def scheduler_notice_html(verdict, rec, stored, d):
         f"not a mistake on your side, and your computer settings are fine.</p>"
         f"<p><b>{rec.get('Task Name')}</b> on <b>{rec.get('Asset Name')}</b> "
         f"({rec.get('Project')}):<br>{situation}</p>"
-        f"<p><b>The fix takes a minute:</b> open the task and use the "
-        f"<b>Reschedule</b> dialog to set the time again. That path always saves "
-        f"correctly. Scheduling from the calendar view is what triggers the bug.</p>"
+        f"<p><b>The fix takes a minute:</b> "
+        f"<a href=\"{swift_task_url(rec.get('Task DID'))}\">open the task in "
+        f"Swift</a> and use the <b>Reschedule</b> dialog to set the time again. "
+        f"That path always saves correctly. Scheduling from the calendar view "
+        f"is what triggers the bug.</p>"
         f"<p>(Automated notice from the Ontel data team's schedule check. "
         f"Questions: reply to this email.)</p>")
 
 
 def _fmt_et(dt):
     return dt.astimezone(ET).strftime("%Y-%m-%d %I:%M %p ET") if dt else "(none)"
+
+
+def swift_task_url(task_did):
+    """Swift web deep link to the task (pattern proven in ontel-people
+    lib/swift.ts - approval cockpit + reminder emails resolve it fine)."""
+    return f"https://swiftprojects.io/#/app/assets/tasks/{task_did}/requirements"
 
 
 def notice_team(db):
@@ -412,6 +420,8 @@ def all_clear_html(row):
         f"<b>{row['asset_name']}</b> no longer has a schedule inconsistency - "
         f"the task record and Swift's activity feed agree again (rescheduled, "
         f"completed, or cleared). Nothing more to do on your side.</p>"
+        f"<p><a href=\"{swift_task_url(row['task_did'])}\">View the task in "
+        f"Swift</a></p>"
         f"<p>(Automated notice from the Ontel data team's schedule check.)</p>")
 
 
@@ -701,8 +711,10 @@ def main():
                         f"class: {v} - {compare} "
                         f"(last feed event: {d['last_feed_event']} by {d['last_event_by']})"
                         f"{notified}<br>"
-                        f"Fix: reschedule via the <b>Reschedule dialog</b> (saves correctly); "
-                        f"the warehouse view already serves the feed value.</li>")
+                        f"Fix: <a href=\"{swift_task_url(r.get('Task DID'))}\">open "
+                        f"in Swift</a> and reschedule via the <b>Reschedule dialog</b> "
+                        f"(saves correctly); the warehouse view already serves the "
+                        f"feed value.</li>")
                 send_alert(
                     f"Swift schedule audit: {len(new_alerts)} new schedule anomal"
                     f"{'y' if len(new_alerts) == 1 else 'ies'}",
