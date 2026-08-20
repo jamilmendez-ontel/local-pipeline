@@ -191,11 +191,10 @@ so the feed wins whenever the two disagree.
   `--notify-schedulers` additionally sends a member-facing notice ("Ontel
   Schedule Check" mask; added 2026-08-20 after a remove-then-reschedule
   left a member's task falsely "Overdue" with only the ops email firing).
-  Audience by class: `timed_mismatch` → the notice team (all active Data
-  Analysts + Project Associates, LIVE from
-  `analytics.v_employee_directory`) plus the directory-matched scheduler
-  (unique first+last match); `ghost_schedule` → Jamil only for now
-  (2026-08-20, pending his confirmation with the team). When a noticed anomaly resolves,
+  Audience for both classes: the notice team (all active Data Analysts +
+  Project Associates, LIVE from `analytics.v_employee_directory`) plus the
+  directory-matched scheduler (unique first+last match). Wording approved
+  via inbox samples 2026-08-20. When a noticed anomaly resolves,
   an all-clear follow-up replies on the SAME Gmail thread (thread ids on
   the anomaly row, migration 238), so members know the fix landed.
 - Modes: `--mode incremental` (open anomalies + schedules in a −3d/+45d

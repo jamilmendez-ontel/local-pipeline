@@ -35,14 +35,13 @@ Modes:
 Alerting (Gmail, "Pipeline Alerts" mask, jamil.mendez@ontel.co):
   - immediate email when a NEW timed_mismatch/ghost appears on a task whose
     schedule is current (due within the past day or in the future)
-  - with --notify-schedulers, a member-facing notice ALSO goes out (added
-    2026-08-20 after the TENASKA - Horvath miss: members saw a false
-    "Overdue" and nobody was told). Audience by class:
-      timed_mismatch -> notice team (all active Data Analysts + Project
-        Associates, LIVE from analytics.v_employee_directory) + the
-        directory-matched scheduler (last_event_by)
-      ghost_schedule -> Jamil ONLY for now (2026-08-20): he confirms these
-        with the team before the audience widens
+  - with --notify-schedulers, a member-facing notice ALSO goes out for
+    timed_mismatch AND ghost_schedule (added 2026-08-20 after the
+    TENASKA - Horvath miss: members saw a false "Overdue" and nobody was
+    told; wording approved via inbox samples same day). Audience: the
+    notice team (all active Data Analysts + Project Associates, LIVE from
+    analytics.v_employee_directory) + the directory-matched scheduler
+    (last_event_by)
   - when a noticed anomaly resolves, an all-clear follow-up is sent as a
     REPLY on the original notice's Gmail thread (thread ids stored on the
     anomaly row, migration 238), so members know the fix landed
@@ -652,16 +651,12 @@ def main():
                     sched_email = resolve_scheduler_email(db, d["last_event_by"])
                     notified = ""
                     if v in ("timed_mismatch", "ghost_schedule"):
-                        if v == "ghost_schedule":
-                            # Ghost notices go to Jamil ONLY for now
-                            # (2026-08-20): he confirms them with the team
-                            # before the audience widens. timed_mismatch keeps
-                            # the full DA+PA+scheduler audience.
-                            recips = list(ALERT_RECIPIENTS)
-                        else:
-                            recips = list(team)
-                            if sched_email and sched_email not in recips:
-                                recips.append(sched_email)
+                        # Full audience for BOTH classes since 2026-08-20
+                        # (ghosts were briefly Jamil-only the same day, until
+                        # he approved the wording via inbox samples).
+                        recips = list(team)
+                        if sched_email and sched_email not in recips:
+                            recips.append(sched_email)
                         if args.notify_schedulers:
                             subject = (f"Schedule needs a quick re-do: "
                                        f"{r.get('Task Name')} - {r.get('Asset Name')}")
