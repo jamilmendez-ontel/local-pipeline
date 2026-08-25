@@ -12,8 +12,12 @@
 -- Row-level preflight 2026-08-24: two prince groups survive in clean for
 -- exactly this reason (2026-07-29 22.9h next to 3.5h; 2026-08-19 21.9h x2
 -- next to 2.2h), 66.7h total; no duplicate_reviews rows on either start-key.
--- Expected effect of applying: those three rows leave clean, nothing else
--- changes. The email side of the fix (running timers no longer actionable,
+-- APPLIED to prod 2026-08-24 23:24 ET via MCP apply_migration (preflight DO
+-- block passed). Verified the same night with a full rebuild_timer_clean():
+-- 393,963 -> 393,960 rows, exactly the three prince rows gone (07-29 group
+-- now 3.5h only; 08-19 group now 2.2h only), Step 5 leftover count 0.
+-- Expected effect of applying was: those three rows leave clean, nothing
+-- else changes. The email side of the fix (running timers no longer actionable,
 -- "timer still running" notice) ships in the same branch:
 -- docs/superpowers/specs/2026-08-24-timer-running-entries-design.md
 --
