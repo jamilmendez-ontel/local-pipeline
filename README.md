@@ -312,11 +312,14 @@ Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 240 `analytics.v_timer_task_mix_daily`
-(+ `analytics.task_mix_category(text)`), completed-timer minutes per member per
-ET day per task-type bucket (production/admin/post-fill) for the ontel-people
-weekly/monthly ops report; classification is a SQL port of the app's Gantt
-buckets, drift-guarded by ontel-people's `task-mix.sql-sync.test.ts`.
+migrations/` for recent changes. Latest: 242 `analytics.member_weekly_task_mix(p_from
+date, p_to date)`, a set-returning function: completed-timer minutes per (member
+email, ET ISO week start, task-type bucket) with single timers over 12h excluded
+(runaway rule), one aggregate call for the ontel-people per-member weekly Timer &
+Daily Report Summary packs. Classification is still `analytics.task_mix_category(text)`
+from 240 (`analytics.v_timer_task_mix_daily`, ops report, drift-guarded by
+ontel-people's `task-mix.sql-sync.test.ts`); 241 is the `rebuild_timer_clean()`
+Step 5 fix described in the timer review row above.
 
 ## Performance (typical nightly)
 
