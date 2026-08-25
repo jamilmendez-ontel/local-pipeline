@@ -77,7 +77,8 @@ def e(start, minutes, task, site, site_id, end="auto"):
         "user_email": U, "start_time": start, "end_time": end,
         "duration_min": minutes if end is not None else 0,
         "site_name": site, "site_id": site_id, "task": task,
-        "task_clean": task.split(". ", 1)[-1], "asset_did": "-OvptiE2IlrkuMb8GUA7",
+        "task_clean": task.split(". ", 1)[-1],
+        "asset_did": "-OvptiE2IlrkuMb8GUA7" if site else None,   # no-asset timers have no task to link
     }
 
 
