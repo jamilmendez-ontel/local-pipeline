@@ -209,3 +209,52 @@ def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
     monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: [settled_a, running_b])
     assert tcr.find_days_needing_resend(None) == []
     assert "bootstrap" in captured.get("description", "")
+
+
+# ---------------------------------------------------------------------------
+# Swift deep link per running timer (DRMC pattern)
+# ---------------------------------------------------------------------------
+
+def test_notice_links_task_when_did_known_else_root():
+    from timer_correction_review import _task_link_key
+    on_asset = _e(end=None)                                   # asset_did "-OwTP"
+    admin = _e(start=T0 + timedelta(hours=2), end=None, site=None, site_id=None,
+               asset_did=None, task="1. General Admin and Support")
+    dids = {_task_link_key(on_asset): "-OTaskDid123"}
+    html = _build_running_notice_html([on_asset, admin], now=T0 + timedelta(hours=3), task_dids=dids)
+    assert "https://swiftprojects.io/#/app/assets/tasks/-OTaskDid123/requirements" in html
+    assert "Open in Swift" in html
+    assert html.count("<a ") == 2
+    assert 'href="https://swiftprojects.io/"' in html        # admin timer: root link
+    assert "docs.google.com/forms" not in html
+
+
+def test_task_link_key_requires_asset_and_task():
+    from timer_correction_review import _task_link_key
+    assert _task_link_key(_e(asset_did=None)) is None
+    assert _task_link_key(_e(task="")) is None
+    assert _task_link_key(_e(task=" 6. Final COP Complete ")) == ("-OwTP", "6. Final COP Complete")
+
+
+def test_lookup_task_dids_batches_unique_keys_and_skips_no_asset(monkeypatch):
+    import timer_correction_review as tcr
+    seen = {}
+
+    def fake_retry_db(fn, description=""):
+        seen["description"] = description
+        return [{"asset_did": "-OwTP", "task": "6. Final COP Complete", "task_did": "-OTask"}]
+
+    monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
+    entries = [_e(end=None), _e(end=None),                       # same key twice
+               _e(end=None, site=None, site_id=None, asset_did=None,
+                  task="1. General Admin and Support")]           # no asset
+    out = tcr._lookup_task_dids(None, entries)
+    assert out == {("-OwTP", "6. Final COP Complete"): "-OTask"}
+    assert "1 running timers" in seen["description"]
+
+
+def test_lookup_task_dids_empty_without_assets(monkeypatch):
+    import timer_correction_review as tcr
+    monkeypatch.setattr(tcr, "retry_db", lambda fn, description="": (_ for _ in ()).throw(AssertionError("no query expected")))
+    assert tcr._lookup_task_dids(None, [_e(end=None, asset_did=None)]) == {}
+    assert tcr._lookup_task_dids(None, []) == {}
