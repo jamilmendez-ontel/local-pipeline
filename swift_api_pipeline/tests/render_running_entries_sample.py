@@ -61,6 +61,9 @@ class _FakeDb:
 gmail_client.authenticate = lambda: _Service()
 gmail_client.masked_sender = lambda service, name: f"{name} <timer@ontel.co>"
 tcr.retry_db = lambda fn, description="": None
+# Pretend the IVORY task resolved to a Swift task DID; the admin timer has no asset.
+tcr._lookup_task_dids = lambda db, entries: {
+    k: "-OwTPtaskDidSample" for k in (tcr._task_link_key(e) for e in entries) if k}
 
 T = datetime(2026, 8, 23, 13, 40, 39, tzinfo=timezone.utc)
 U = "prince@ontel.co"
@@ -74,7 +77,8 @@ def e(start, minutes, task, site, site_id, end="auto"):
         "user_email": U, "start_time": start, "end_time": end,
         "duration_min": minutes if end is not None else 0,
         "site_name": site, "site_id": site_id, "task": task,
-        "task_clean": task.split(". ", 1)[-1], "asset_did": "-OvptiE2IlrkuMb8GUA7",
+        "task_clean": task.split(". ", 1)[-1],
+        "asset_did": "-OvptiE2IlrkuMb8GUA7" if site else None,   # no-asset timers have no task to link
     }
 
 

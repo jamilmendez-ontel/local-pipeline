@@ -663,7 +663,7 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT DISTINCT project_did, project, user_email, start_time, end_time,
-                   duration_min, site_name, site_id, task, task_clean
+                   duration_min, site_name, site_id, task, task_clean, asset_did
             FROM {SCHEMA_STAGING}.stg_timer_activities
             WHERE DATE(start_time AT TIME ZONE 'America/New_York') = $1
             ORDER BY user_email, site_name, task, start_time
@@ -810,6 +810,78 @@ def _build_entries_html(entries: list[dict]) -> str:
 SWIFT_APP_URL = "https://swiftprojects.io/"
 
 
+def _swift_task_url(task_did: str) -> str:
+    """Swift deep link to a task, same pattern DRMC uses for its "Open in
+    Swift" buttons (ontel-people lib/swift.ts swiftTaskUrl)."""
+    return f"https://swiftprojects.io/#/app/assets/tasks/{task_did}/requirements"
+
+
+def _task_link_key(entry: dict) -> tuple | None:
+    """(asset_did, task) key used to resolve a timer entry to a Swift task."""
+    asset_did = entry.get("asset_did")
+    task = (entry.get("task") or "").strip()
+    if not asset_did or not task:
+        return None
+    return (asset_did, task)
+
+
+def _lookup_task_dids(db, entries: list[dict]) -> dict[tuple, str]:
+    """Resolve (asset_did, task) of the given timer entries to Swift task
+    DIDs via data_staging.stg_asset_tasks in ONE batched query.
+
+    Timer rows carry asset_did and the task NAME, not the task DID. Exact
+    task_name match wins; the cleaned name (number prefix stripped) is the
+    fallback. When an asset carries the same task name twice, prefer the one
+    still open, then the most recently loaded. Measured 2026-08-24 over the
+    last 14 days: 2,926 distinct pairs, 2,852 exact-unique, 12 rescued by the
+    cleaned name, 59 multi-match, 0 unmatched. Entries without asset_did
+    (General Admin and Support, Training, ...) have no task to link to.
+    """
+    keys = sorted({k for k in (_task_link_key(e) for e in entries) if k})
+    if not keys:
+        return {}
+    assets = [k[0] for k in keys]
+    tasks = [k[1] for k in keys]
+    rows = retry_db(
+        lambda: db.fetch(f"""
+            WITH want AS (
+                SELECT * FROM unnest($1::text[], $2::text[]) AS w(asset_did, task)
+            )
+            SELECT DISTINCT ON (w.asset_did, w.task)
+                   w.asset_did, w.task, a.task_did
+            FROM want w
+            JOIN {SCHEMA_STAGING}.stg_asset_tasks a
+              ON a.asset_did = w.asset_did
+             AND (btrim(a.task_name) = w.task
+                  OR btrim(a.task_name_clean) = btrim(regexp_replace(w.task, '^\\d+\\.\\s+', '')))
+            WHERE a.task_did IS NOT NULL
+            ORDER BY w.asset_did, w.task,
+                     (btrim(a.task_name) = w.task) DESC,
+                     (a.task_status IN ('approved', 'cancelled', 'rejected')) ASC,
+                     a.loaded_at DESC
+        """, assets, tasks),
+        description=f"lookup swift task dids for {len(keys)} running timers",
+    )
+    return {(r["asset_did"], r["task"]): r["task_did"] for r in rows or []}
+
+
+def _safe_task_dids(db, entries: list[dict]) -> dict[tuple, str]:
+    """_lookup_task_dids that degrades to {} (root links) instead of raising.
+
+    The lookup runs before the per-recipient send try/except; without this
+    guard one transient stg_asset_tasks failure would abort the daily send
+    for every remaining tech. A missing deep link is cosmetic, a missing
+    email is not.
+    """
+    if not entries:
+        return {}
+    try:
+        return _lookup_task_dids(db, entries)
+    except Exception as e:  # noqa: BLE001 - deliberate degrade
+        logger.warning(f"Swift task-did lookup failed, falling back to root links: {e}")
+        return {}
+
+
 def _start_key(entry: dict) -> tuple:
     """Stable identity of a timer entry independent of end_time/duration."""
     return (entry["project_did"], entry["user_email"], entry["start_time"],
@@ -850,13 +922,15 @@ def _split_running_entries(entries: list[dict]) -> tuple[list[dict], list[dict]]
     return settled, running
 
 
-def _build_running_notice_html(running: list[dict], now=None) -> str:
+def _build_running_notice_html(running: list[dict], now=None,
+                               task_dids: dict[tuple, str] | None = None) -> str:
     """Amber callout listing timers that were still running at send time.
 
-    No Edit / Remove buttons on purpose (see _split_running_entries). One
-    plain "Open Swift" link: Swift has no verified deep link for a timer
-    entry (only the task-requirements URL is proven and timer rows carry
-    asset_did, not task_did), so the link goes to the app root.
+    No Edit / Remove buttons on purpose (see _split_running_entries). Each
+    item carries an "Open in Swift" link to the task (the DRMC deep-link
+    pattern) when `task_dids` resolves its (asset_did, task); otherwise a
+    plain "Open Swift" link to the app root (no-asset timers such as
+    General Admin and Support).
     """
     if not running:
         return ""
@@ -879,8 +953,17 @@ def _build_running_notice_html(running: list[dict], now=None) -> str:
         elapsed_min = max(0.0, (now - start).total_seconds() / 60.0)
         site = _escape_html(e.get("site_name") or "(no site)")
         task = _escape_html(e.get("task") or "(no task)")
+        key = _task_link_key(e)
+        did = (task_dids or {}).get(key) if key else None
+        link_style = ('display:inline-block;padding:3px 10px;background:#1565c0;color:white;'
+                      'text-decoration:none;border-radius:4px;font-size:11px;font-weight:bold;'
+                      'margin-left:6px;vertical-align:middle;')
+        if did:
+            link = f'<a href="{_swift_task_url(did)}" style="{link_style}">Open in Swift</a>'
+        else:
+            link = f'<a href="{SWIFT_APP_URL}" style="{link_style}">Open Swift</a>'
         items.append(
-            f'<li style="margin:4px 0;"><strong>{site}</strong> &middot; {task}<br>'
+            f'<li style="margin:4px 0;"><strong>{site}</strong> &middot; {task}{link}<br>'
             f'<span style="color:#555;">started {started}, running for '
             f'<strong>{_fmt_duration(elapsed_min)}</strong> as of {as_of}</span></li>'
         )
@@ -894,11 +977,10 @@ def _build_running_notice_html(running: list[dict], now=None) -> str:
         f'<p style="margin:0 0 6px;font-weight:bold;color:#e65100;">{title}</p>'
         f'<ul style="margin:0 0 8px;padding-left:20px;line-height:1.5;">{"".join(items)}</ul>'
         '<p style="margin:0;line-height:1.5;">'
-        'If you are not actually working on it, please stop the timer in Swift now: '
-        f'<a href="{SWIFT_APP_URL}" style="color:#1565c0;font-weight:bold;">Open Swift</a>. '
-        'Running timers are not listed in the table below. Once the timer has an end '
-        'time, the completed entry will arrive as a follow-up on this same email thread '
-        'and you can fix or delete it from there.</p>'
+        'If you are not actually working on it, please open the task in Swift and stop '
+        'the timer now. Running timers are not listed in the table below. Once the timer '
+        'has an end time, the completed entry will arrive as a follow-up on this same '
+        'email thread and you can fix or delete it from there.</p>'
         '</div>'
     )
 
@@ -946,7 +1028,8 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         settled, running = _split_running_entries(user_entries)
         n = len(settled)
         has_duplicates = _has_duplicate_entries(settled)
-        running_notice = _build_running_notice_html(running)
+        running_notice = _build_running_notice_html(
+            running, task_dids=_safe_task_dids(db, running))
 
         table_rows = _build_entries_html(settled)
 
@@ -2901,7 +2984,7 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
             SELECT
                 c.project_did, c.project, c.user_email,
                 c.start_time, c.end_time, c.duration_min,
-                c.site_name, c.site_id, c.task, c.task_clean,
+                c.site_name, c.site_id, c.task, c.task_clean, c.asset_did,
                 (corr.id IS NOT NULL) AS is_edited
             FROM {SCHEMA_STAGING}.stg_timer_activities_clean c
             LEFT JOIN {SCHEMA_TIMER}.corrections corr
@@ -3151,7 +3234,8 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(entries)
         date_str = send_date.strftime("%B %d, %Y")
-        running_notice = _build_running_notice_html(running)
+        running_notice = _build_running_notice_html(
+            running, task_dids=_safe_task_dids(db, running))
 
         table_rows = _build_resend_entries_html(entries, snapshot_ids)
         has_duplicates = _has_duplicate_entries(entries)

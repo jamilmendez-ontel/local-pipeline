@@ -209,3 +209,98 @@ def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
     monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: [settled_a, running_b])
     assert tcr.find_days_needing_resend(None) == []
     assert "bootstrap" in captured.get("description", "")
+
+
+# ---------------------------------------------------------------------------
+# Swift deep link per running timer (DRMC pattern)
+# ---------------------------------------------------------------------------
+
+def test_notice_links_task_when_did_known_else_root():
+    from timer_correction_review import _task_link_key
+    on_asset = _e(end=None)                                   # asset_did "-OwTP"
+    admin = _e(start=T0 + timedelta(hours=2), end=None, site=None, site_id=None,
+               asset_did=None, task="1. General Admin and Support")
+    dids = {_task_link_key(on_asset): "-OTaskDid123"}
+    html = _build_running_notice_html([on_asset, admin], now=T0 + timedelta(hours=3), task_dids=dids)
+    assert "https://swiftprojects.io/#/app/assets/tasks/-OTaskDid123/requirements" in html
+    assert "Open in Swift" in html
+    assert html.count("<a ") == 2
+    assert 'href="https://swiftprojects.io/"' in html        # admin timer: root link
+    assert "docs.google.com/forms" not in html
+
+
+def test_task_link_key_requires_asset_and_task():
+    from timer_correction_review import _task_link_key
+    assert _task_link_key(_e(asset_did=None)) is None
+    assert _task_link_key(_e(task="")) is None
+    assert _task_link_key(_e(task=" 6. Final COP Complete ")) == ("-OwTP", "6. Final COP Complete")
+
+
+def test_lookup_task_dids_batches_unique_keys_and_skips_no_asset(monkeypatch):
+    import timer_correction_review as tcr
+    seen = {}
+
+    def fake_retry_db(fn, description=""):
+        seen["description"] = description
+        return [{"asset_did": "-OwTP", "task": "6. Final COP Complete", "task_did": "-OTask"}]
+
+    monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
+    entries = [_e(end=None), _e(end=None),                       # same key twice
+               _e(end=None, site=None, site_id=None, asset_did=None,
+                  task="1. General Admin and Support")]           # no asset
+    out = tcr._lookup_task_dids(None, entries)
+    assert out == {("-OwTP", "6. Final COP Complete"): "-OTask"}
+    assert "1 running timers" in seen["description"]
+
+
+def test_lookup_task_dids_empty_without_assets(monkeypatch):
+    import timer_correction_review as tcr
+    monkeypatch.setattr(tcr, "retry_db", lambda fn, description="": (_ for _ in ()).throw(AssertionError("no query expected")))
+    assert tcr._lookup_task_dids(None, [_e(end=None, asset_did=None)]) == {}
+    assert tcr._lookup_task_dids(None, []) == {}
+
+
+def test_safe_task_dids_degrades_to_root_links(monkeypatch):
+    import timer_correction_review as tcr
+
+    def boom(fn, description=""):
+        raise RuntimeError("stg_asset_tasks unavailable")
+
+    monkeypatch.setattr(tcr, "retry_db", boom)
+    assert tcr._safe_task_dids(None, [_e(end=None)]) == {}
+    assert tcr._safe_task_dids(None, []) == {}
+
+
+def test_daily_send_survives_task_lookup_failure(monkeypatch):
+    """A DB hiccup resolving Swift task DIDs must not abort the send loop."""
+    import timer_correction_review as tcr
+    import gmail_client
+
+    sent = []
+
+    class _Exec:
+        def __init__(self, p): self._p = p
+        def execute(self): return self._p
+
+    class _Msgs:
+        def send(self, userId, body):
+            sent.append(body["raw"]); return _Exec({"threadId": "t", "id": "m"})
+        def get(self, **kw): return _Exec({"payload": {"headers": []}})
+
+    class _Svc:
+        def users(self): return self
+        def messages(self): return _Msgs()
+
+    monkeypatch.setattr(gmail_client, "authenticate", lambda: _Svc())
+    monkeypatch.setattr(gmail_client, "masked_sender", lambda s, n: "x <x@ontel.co>")
+    monkeypatch.setattr(tcr, "retry_db", lambda fn, description="": None)
+
+    def boom(db, entries):
+        raise RuntimeError("stg_asset_tasks unavailable")
+    monkeypatch.setattr(tcr, "_lookup_task_dids", boom)
+
+    from datetime import date
+    entries = [_e(), _e(start=T0 + timedelta(hours=3), end=None),
+               _e(user="other@ontel.co"), _e(user="other@ontel.co", start=T0 + timedelta(hours=1), end=None)]
+    tcr.send_daily_emails(None, entries, test_mode=True, target_date=date(2026, 8, 23))
+    assert len(sent) == 2, "both techs' emails still go out when the deep-link lookup fails"
