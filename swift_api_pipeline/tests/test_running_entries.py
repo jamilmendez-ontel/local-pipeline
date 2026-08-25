@@ -258,3 +258,49 @@ def test_lookup_task_dids_empty_without_assets(monkeypatch):
     monkeypatch.setattr(tcr, "retry_db", lambda fn, description="": (_ for _ in ()).throw(AssertionError("no query expected")))
     assert tcr._lookup_task_dids(None, [_e(end=None, asset_did=None)]) == {}
     assert tcr._lookup_task_dids(None, []) == {}
+
+
+def test_safe_task_dids_degrades_to_root_links(monkeypatch):
+    import timer_correction_review as tcr
+
+    def boom(fn, description=""):
+        raise RuntimeError("stg_asset_tasks unavailable")
+
+    monkeypatch.setattr(tcr, "retry_db", boom)
+    assert tcr._safe_task_dids(None, [_e(end=None)]) == {}
+    assert tcr._safe_task_dids(None, []) == {}
+
+
+def test_daily_send_survives_task_lookup_failure(monkeypatch):
+    """A DB hiccup resolving Swift task DIDs must not abort the send loop."""
+    import timer_correction_review as tcr
+    import gmail_client
+
+    sent = []
+
+    class _Exec:
+        def __init__(self, p): self._p = p
+        def execute(self): return self._p
+
+    class _Msgs:
+        def send(self, userId, body):
+            sent.append(body["raw"]); return _Exec({"threadId": "t", "id": "m"})
+        def get(self, **kw): return _Exec({"payload": {"headers": []}})
+
+    class _Svc:
+        def users(self): return self
+        def messages(self): return _Msgs()
+
+    monkeypatch.setattr(gmail_client, "authenticate", lambda: _Svc())
+    monkeypatch.setattr(gmail_client, "masked_sender", lambda s, n: "x <x@ontel.co>")
+    monkeypatch.setattr(tcr, "retry_db", lambda fn, description="": None)
+
+    def boom(db, entries):
+        raise RuntimeError("stg_asset_tasks unavailable")
+    monkeypatch.setattr(tcr, "_lookup_task_dids", boom)
+
+    from datetime import date
+    entries = [_e(), _e(start=T0 + timedelta(hours=3), end=None),
+               _e(user="other@ontel.co"), _e(user="other@ontel.co", start=T0 + timedelta(hours=1), end=None)]
+    tcr.send_daily_emails(None, entries, test_mode=True, target_date=date(2026, 8, 23))
+    assert len(sent) == 2, "both techs' emails still go out when the deep-link lookup fails"

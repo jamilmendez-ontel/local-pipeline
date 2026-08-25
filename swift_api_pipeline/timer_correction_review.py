@@ -865,6 +865,23 @@ def _lookup_task_dids(db, entries: list[dict]) -> dict[tuple, str]:
     return {(r["asset_did"], r["task"]): r["task_did"] for r in rows or []}
 
 
+def _safe_task_dids(db, entries: list[dict]) -> dict[tuple, str]:
+    """_lookup_task_dids that degrades to {} (root links) instead of raising.
+
+    The lookup runs before the per-recipient send try/except; without this
+    guard one transient stg_asset_tasks failure would abort the daily send
+    for every remaining tech. A missing deep link is cosmetic, a missing
+    email is not.
+    """
+    if not entries:
+        return {}
+    try:
+        return _lookup_task_dids(db, entries)
+    except Exception as e:  # noqa: BLE001 - deliberate degrade
+        logger.warning(f"Swift task-did lookup failed, falling back to root links: {e}")
+        return {}
+
+
 def _start_key(entry: dict) -> tuple:
     """Stable identity of a timer entry independent of end_time/duration."""
     return (entry["project_did"], entry["user_email"], entry["start_time"],
@@ -1012,7 +1029,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         n = len(settled)
         has_duplicates = _has_duplicate_entries(settled)
         running_notice = _build_running_notice_html(
-            running, task_dids=_lookup_task_dids(db, running))
+            running, task_dids=_safe_task_dids(db, running))
 
         table_rows = _build_entries_html(settled)
 
@@ -3218,7 +3235,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         n = len(entries)
         date_str = send_date.strftime("%B %d, %Y")
         running_notice = _build_running_notice_html(
-            running, task_dids=_lookup_task_dids(db, running))
+            running, task_dids=_safe_task_dids(db, running))
 
         table_rows = _build_resend_entries_html(entries, snapshot_ids)
         has_duplicates = _has_duplicate_entries(entries)
