@@ -802,6 +802,107 @@ def _build_entries_html(entries: list[dict]) -> str:
     return "\n".join(rows_html)
 
 
+# --------------------------------------------------------------------------
+# Still-running timers (end_time IS NULL) are not actionable in the email.
+# Design: docs/superpowers/specs/2026-08-24-timer-running-entries-design.md
+# --------------------------------------------------------------------------
+
+SWIFT_APP_URL = "https://swiftprojects.io/"
+
+
+def _start_key(entry: dict) -> tuple:
+    """Stable identity of a timer entry independent of end_time/duration."""
+    return (entry["project_did"], entry["user_email"], entry["start_time"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"))
+
+
+def _split_running_entries(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split a day's rows into (settled, running).
+
+    settled: rows with an end_time, in their original order. These are the
+             only rows that get Edit / Remove buttons, feed the Daily Task
+             Summary, and are written to the resend snapshot.
+    running: rows with end_time IS NULL that have NO settled sibling on the
+             same start-key, deduped by start-key. A NULL-end row next to a
+             completed row with the same start-key is a stale extract
+             snapshot (a "ghost"), not a running timer, and is dropped.
+
+    Why running rows leave the table: a Remove clicked on a running row is
+    stored keyed to end_time NULL and stops matching the moment the timer
+    completes (every removals anti-join in rebuild_timer_clean matches the
+    exact natural key), so the entry comes back as NEW in the resend and the
+    member's click was silently wasted. Editing a duration that does not
+    exist yet has the same problem. The member's real action is to stop the
+    timer in Swift; the completed row then arrives via the resend pass.
+    """
+    settled = [e for e in entries if e.get("end_time") is not None]
+    settled_keys = {_start_key(e) for e in settled}
+    running: list[dict] = []
+    seen: set[tuple] = set()
+    for e in entries:
+        if e.get("end_time") is not None:
+            continue
+        key = _start_key(e)
+        if key in settled_keys or key in seen:
+            continue
+        seen.add(key)
+        running.append(e)
+    return settled, running
+
+
+def _build_running_notice_html(running: list[dict], now=None) -> str:
+    """Amber callout listing timers that were still running at send time.
+
+    No Edit / Remove buttons on purpose (see _split_running_entries). One
+    plain "Open Swift" link: Swift has no verified deep link for a timer
+    entry (only the task-requirements URL is proven and timer rows carry
+    asset_did, not task_did), so the link goes to the app root.
+    """
+    if not running:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_et = now.astimezone(TZ_EASTERN)
+    as_of = f"{now_et:%b %d}, {now_et.strftime('%I:%M %p').lstrip('0')} ET"
+
+    items = []
+    for e in running:
+        start = e["start_time"]
+        if isinstance(start, str):
+            start = datetime.fromisoformat(start)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        start_et = start.astimezone(TZ_EASTERN)
+        started = f"{start_et:%b %d}, {start_et.strftime('%I:%M %p').lstrip('0')} ET"
+        elapsed_min = max(0.0, (now - start).total_seconds() / 60.0)
+        site = _escape_html(e.get("site_name") or "(no site)")
+        task = _escape_html(e.get("task") or "(no task)")
+        items.append(
+            f'<li style="margin:4px 0;"><strong>{site}</strong> &middot; {task}<br>'
+            f'<span style="color:#555;">started {started}, running for '
+            f'<strong>{_fmt_duration(elapsed_min)}</strong> as of {as_of}</span></li>'
+        )
+
+    n = len(items)
+    title = ("You have a timer still running" if n == 1
+             else f"You have {n} timers still running")
+    return (
+        '<div style="background:#fff8e1;border-left:4px solid #f9a825;'
+        'border-radius:4px;padding:12px 16px;margin:12px 0 18px;font-size:13px;color:#333;">'
+        f'<p style="margin:0 0 6px;font-weight:bold;color:#e65100;">{title}</p>'
+        f'<ul style="margin:0 0 8px;padding-left:20px;line-height:1.5;">{"".join(items)}</ul>'
+        '<p style="margin:0;line-height:1.5;">'
+        'If you are not actually working on it, please stop the timer in Swift now: '
+        f'<a href="{SWIFT_APP_URL}" style="color:#1565c0;font-weight:bold;">Open Swift</a>. '
+        'Running timers are not listed in the table below. Once the timer has an end '
+        'time, the completed entry will arrive as a follow-up on this same email thread '
+        'and you can fix or delete it from there.</p>'
+        '</div>'
+    )
+
+
 def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                       target_date=None):
     """Send one email per tech with their entries for `target_date`.
@@ -842,10 +943,12 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
 
     for user_email, user_entries in by_user.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
-        n = len(user_entries)
-        has_duplicates = _has_duplicate_entries(user_entries)
+        settled, running = _split_running_entries(user_entries)
+        n = len(settled)
+        has_duplicates = _has_duplicate_entries(settled)
+        running_notice = _build_running_notice_html(running)
 
-        table_rows = _build_entries_html(user_entries)
+        table_rows = _build_entries_html(settled)
 
         duplicate_notes = (
             "<li>You'll receive daily reminders until all duplicate entries are resolved.</li>"
@@ -854,18 +957,12 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
             if has_duplicates else ""
         )
 
-        html_body = f"""
-        <html>
-        <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
-            <div style="background:#1565c0;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Activity Entries - {date_str}</h2>
-            </div>
-            <div style="padding:24px;">
-                <p>Hi {_first_name(user_email)},</p>
-                <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
-                   from <strong>{date_str}</strong>.</p>
+        if n:
+            intro = (f"Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}"
+                     f" from <strong>{date_str}</strong>.")
+            entries_section = f"""
                 <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Daily Task Summary</h3>
-                {_build_summary_html(user_entries)}
+                {_build_summary_html(settled)}
 
                 <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Entry Details</h3>
                 <ul style="font-size:13px;color:#555;margin:8px 0 16px;">
@@ -889,7 +986,16 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                         {table_rows}
                     </tbody>
                 </table>
+            """
+        else:
+            # Only running timers for the day: nothing to edit or remove yet.
+            intro = (f"You have no completed timer entries for <strong>{date_str}</strong> yet. "
+                     "The completed entry will follow on this thread once the timer stops.")
+            entries_section = ""
 
+        # The notes box talks about buttons and color-coding; it only makes
+        # sense when the table is present.
+        notes_html = f"""
                 <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
                     <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
                     <ul style="margin:0;padding-left:20px;line-height:1.8;">
@@ -902,6 +1008,20 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                         Links remain valid &mdash; you can correct or remove entries from older emails too.
                     </p>
                 </div>
+        """ if n else ""
+
+        html_body = f"""
+        <html>
+        <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
+            <div style="background:#1565c0;color:white;padding:16px 24px;">
+                <h2 style="margin:0;">Timer Activity Entries - {date_str}</h2>
+            </div>
+            <div style="padding:24px;">
+                <p>Hi {_first_name(user_email)},</p>
+                {running_notice}
+                <p>{intro}</p>
+                {entries_section}
+                {notes_html}
             </div>
         </body>
         </html>
@@ -936,7 +1056,9 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                 # asyncpg's JSONB codec json.dumps the value on the way out;
                 # pass the raw Python list so the result is a proper JSONB
                 # array, not a JSONB string containing JSON text.
-                entry_ids_snapshot = _collect_entry_ids(user_entries)
+                # Settled rows only: a running timer has no stable key yet,
+                # and its completion must read as NEW at resend time.
+                entry_ids_snapshot = _collect_entry_ids(settled)
                 retry_db(
                     lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
@@ -955,7 +1077,8 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                     description=f"store notification thread for {user_email}",
                 )
 
-            logger.info(f"Sent daily entries email to {recipient} ({n} entries, thread={thread_id})")
+            logger.info(f"Sent daily entries email to {recipient} ({n} entries, "
+                        f"{len(running)} running, thread={thread_id})")
         except Exception as e:
             logger.error(f"Failed to send email to {recipient}: {e}")
 
@@ -2833,7 +2956,11 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     for r in rows:
         user_email = r["user_email"]
         send_date = r["send_date"]
-        current = _fetch_current_day_entries(db, user_email, send_date)
+        current_all = _fetch_current_day_entries(db, user_email, send_date)
+        # Running timers never count toward the trigger or the snapshot: a
+        # NULL-end row has no stable key in a settled-only snapshot and
+        # would otherwise re-send the day every night until it stops.
+        current, _running = _split_running_entries(current_all)
         if not current:
             continue
         # Pure corrections (is_edited) already trigger a "Timer Entries
@@ -2883,7 +3010,9 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
                 "thread_id": r["thread_id"],
                 "message_id": r["message_id"],
                 "snapshot_ids": snapshot_ids,
-                "current_entries": current,
+                # Full set (running included) so the resend body can show
+                # the "timer still running" notice; the sender splits again.
+                "current_entries": current_all,
             })
 
     if len(candidates) > LARGE_BATCH_THRESHOLD:
@@ -3017,11 +3146,12 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         send_date = c["send_date"]
         thread_id = c["thread_id"]
         message_id = c["message_id"]
-        entries = c["current_entries"]
+        entries, running = _split_running_entries(c["current_entries"])
         snapshot_ids = c["snapshot_ids"]
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(entries)
         date_str = send_date.strftime("%B %d, %Y")
+        running_notice = _build_running_notice_html(running)
 
         table_rows = _build_resend_entries_html(entries, snapshot_ids)
         has_duplicates = _has_duplicate_entries(entries)
@@ -3043,6 +3173,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
                 {callout_html}
+                {running_notice}
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
                    from <strong>{date_str}</strong>.</p>
 
