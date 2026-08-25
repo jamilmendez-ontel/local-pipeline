@@ -22,6 +22,13 @@
 -- (latest last_seen wins), the mv_timer_day_rollup rule (migration 170).
 --
 -- Rollback: DROP FUNCTION analytics.member_weekly_task_mix(date, date);
+-- APPLIED + VERIFIED 2026-08-25 ~06:10 ET against voqfjfngdpcvevbkikud via Supabase
+-- MCP apply_migration (controller, member weekly plan Task 10/19). Verification 1:
+-- almond.sarreal@ontel.co returned the locked 10 rows (2026-07-20 postfill 226.46 ...
+-- 2026-08-17 standard 3198.41), identical to mix.json. Verification 2: svc_exec=true,
+-- week_rows=184, week_members=80, bad_categories=0, bad_weeks=0, metadata_rows=1.
+-- Verification 3 (PostgREST rpc) is exercised by ontel-people's
+-- member-week-queries.sql-sync.test.ts with a live env.
 
 -- Deliberately no SET search_path (same note as 217/222/240): schema-qualified
 -- throughout, and a proconfig entry would block inlining.
@@ -61,13 +68,8 @@ VALUES (
 ON CONFLICT DO NOTHING;
 
 -- =============================================================================
--- NOT YET APPLIED. This migration was authored and reviewed but deliberately
--- NOT run against the live database (Supabase MCP apply_migration) as part of
--- this task; applying it, plus the verification below and the "APPLIED +
--- VERIFIED" header annotation, is Task 19 (rollout) in the member weekly
--- report plan. Task 19: run the queries below verbatim after apply_migration,
--- then insert an "-- APPLIED + VERIFIED <date time> ET ..." block directly
--- after the "-- Rollback:" line above with the actual counts.
+-- Applied 2026-08-25 (see the APPLIED + VERIFIED block in the header). The
+-- verification queries below were run verbatim after apply_migration.
 --
 -- Preflight (before apply_migration) -- prove the function does not exist yet:
 --   SELECT * FROM analytics.member_weekly_task_mix('2026-07-20', '2026-08-23') LIMIT 1;
