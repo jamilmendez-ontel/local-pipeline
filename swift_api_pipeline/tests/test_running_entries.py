@@ -142,3 +142,70 @@ def test_entries_table_has_no_running_rows_after_split():
     settled, _ = _split_running_entries([_e(), run])
     html = _build_entries_html(settled)
     assert html.count("<tr") == 1
+
+
+# ---------------------------------------------------------------------------
+# Resend trigger math (find_days_needing_resend) with the DB stubbed out
+# ---------------------------------------------------------------------------
+
+def test_resend_trigger_ignores_running_timer_and_fires_on_completion(monkeypatch):
+    import timer_correction_review as tcr
+    from datetime import date
+
+    settled_a = _e()
+    running_b = _e(start=T0 + timedelta(hours=3), end=None, task="7. Training")
+    completed_b = _e(start=T0 + timedelta(hours=3), minutes=95, task="7. Training")
+    for x in (settled_a, running_b, completed_b):
+        x["is_edited"] = False
+
+    rows = [{
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23),
+        "thread_id": "thread-1", "message_id": "<m@x>", "last_sent_at": None,
+        "last_sent_entry_ids": _collect_entry_ids([settled_a]),  # settled-only snapshot
+    }]
+    writes = []
+
+    def fake_retry_db(fn, description=""):
+        if "candidates" in description:
+            return rows
+        writes.append(description)
+        return None
+
+    monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
+
+    current = [settled_a, running_b]
+    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: list(current))
+    assert tcr.find_days_needing_resend(None) == [], "a still-running timer must not trigger a resend"
+    assert writes == [], "no bootstrap write when a snapshot already exists"
+
+    current[:] = [settled_a, completed_b]
+    cands = tcr.find_days_needing_resend(None)
+    assert len(cands) == 1
+    assert cands[0]["current_entries"] == [settled_a, completed_b]
+    assert tcr._resend_has_new_rows(
+        _split_running_entries(cands[0]["current_entries"])[0], cands[0]["snapshot_ids"])
+
+
+def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
+    import timer_correction_review as tcr
+    from datetime import date
+
+    settled_a = _e(); settled_a["is_edited"] = False
+    running_b = _e(start=T0 + timedelta(hours=3), end=None); running_b["is_edited"] = False
+    rows = [{
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23),
+        "thread_id": "thread-1", "message_id": None, "last_sent_at": None,
+        "last_sent_entry_ids": None,  # never snapshotted -> bootstrap path
+    }]
+    captured = {}
+
+    def fake_retry_db(fn, description=""):
+        if "candidates" in description:
+            return rows
+        captured["description"] = description
+        return None
+
+    monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
+    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: [settled_a, running_b])
+    assert tcr.find_days_needing_resend(None) == []
+    assert "bootstrap" in captured.get("description", "")
