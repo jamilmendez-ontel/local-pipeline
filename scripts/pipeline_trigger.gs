@@ -21,6 +21,9 @@
  *                                    create via setupRevenueWatchTrigger())
  *      - triggerScheduleFeedAudit() → Every 15 min (Swift schedule feed audit;
  *                                    create via setupScheduleFeedAuditTrigger())
+ *      - triggerHolidayFeedWatch() → Mondays 6 PM EST (PH holiday proclamation
+ *                                    watch vs reference.ref_holidays; create via
+ *                                    setupHolidayFeedWatchTrigger())
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
  * Schedules (EST):
@@ -408,6 +411,41 @@ function setupScheduleFeedAuditTrigger() {
 
   Logger.log('Created triggerScheduleFeedAudit trigger: every ' +
              SCHEDULE_AUDIT_MINUTES + ' minutes.');
+}
+
+/**
+ * Holiday feed watch (weekly): fires holiday-feed-watch, which runs
+ * swift_api_pipeline/holiday_feed_watcher.py (Official Gazette + Nager.Date
+ * vs reference.ref_holidays; emails Jamil proposed SQL, never edits the table).
+ * The weekly GHA cron in holiday-feed-watch.yml is the backstop; the watermark
+ * in pipeline.holiday_watch_runs makes a double fire a no-op.
+ * Create the trigger by running setupHolidayFeedWatchTrigger() once.
+ */
+function triggerHolidayFeedWatch() {
+  fireDispatch_('holiday-feed-watch');
+}
+
+/**
+ * Idempotently (re)create the weekly trigger for triggerHolidayFeedWatch():
+ * Mondays, 6 PM script time (EST) = Tuesday 7 AM PHT. RUN THIS ONCE from the
+ * Apps Script editor after deploying this file. Deletes existing triggers
+ * bound to the handler first (orphaned-trigger gotcha).
+ */
+function setupHolidayFeedWatchTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerHolidayFeedWatch') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerHolidayFeedWatch')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(18)
+    .create();
+
+  Logger.log('Created triggerHolidayFeedWatch trigger: Mondays 6 PM.');
 }
 
 /**

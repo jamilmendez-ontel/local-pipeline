@@ -34,3 +34,6 @@ every 10 minutes, the workflow now emails **only on failure**:
 and the retry with `--email-on-failure-only`. The FAILED email uses the same
 template as this sample but with the red `#c62828` header and the error/log
 attachment. This `.eml` documents the SUCCESS format that is no longer sent.
+
+## appscript/ (gitignored exports of the live nanoninth Apps Script project)
+- `pipeline_trigger_LIVE_2026-08-26.gs.txt` — Jamil's export of the live "Pipeline Triggers" Apps Script file (618 lines, 22 functions) taken 2026-08-26. Verified 2026-08-27 identical to `scripts/pipeline_trigger.gs` at commit HEAD before the holiday-watch edit (0 diff lines ignoring CR/whitespace), so `scripts/pipeline_trigger.gs` is the source of truth for whole-file pastes. Use it to prove an edit is additive: `git diff --numstat scripts/pipeline_trigger.gs` must show 0 deletions.
