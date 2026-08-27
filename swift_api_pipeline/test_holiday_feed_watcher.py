@@ -8,10 +8,32 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from holiday_feed_watcher import (
-    parse_feed_page, parse_gazette_feed, classify_subject, evaluate_gazette,
-    evaluate_nager, evaluate_staleness, build_email_body, fetch_gazette,
-    coverage_gap_finding, item_key,
+    parse_feed_page, parse_gazette_feed, parse_lawphil_index, merge_items,
+    classify_subject, evaluate_gazette, evaluate_nager, evaluate_staleness,
+    build_email_body, fetch_gazette, coverage_gap_finding, item_key,
 )
+
+LAWPHIL = """<html><body><table>
+<tr class="xy"><td>
+<a href="proc_1264_2026.html">Proclamation No. 1264</a> <br /> May 21, 2026
+</td><td>
+Declaring Wednesday, 27 May 2026, a Regular Holiday Throughout the Country, in Observance of the Eid\x92l Adha (Feast of Sacrifice)
+</td><td>
+<a href="pdf/proc_1264_2026.pdf"><img src="../../../imgs/p.png"></a>
+</td></tr>
+<tr class="xy"><td>
+<a href="proc_1263_2026.html">Proclamation No. 1263</a><br />May 21, 2026
+</td><td>
+Declaring Wednesday, 17 June 2026, a Special (Non-working) Day in the Municipality of Maco, Province of Davao De Oro<a class=tenure>Ferdinand Marcos, Jr. Bongbong BBM</a>
+</td><td>
+<a href="pdf/proc_1263_2026.pdf"><img src="../../../imgs/p.png"></a>
+</td></tr>
+<tr class="xy"><td>
+<a href="proc_1006_2025.html">Proclamation No. 1006</a><br />September 3, 2025
+</td><td>
+Declaring the Regular Holidays and Special (Non-Working) Days for the Year 2026
+</td><td></td></tr>
+</table></body></html>"""
 
 FEED = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>Official Gazette</title>
@@ -70,6 +92,29 @@ def test_parse_feed_rejects_non_rss_bodies(body):
         parse_feed_page(body)
 
 
+def test_parse_lawphil_index_rows_dates_apostrophes_and_year_filter():
+    items = parse_lawphil_index(LAWPHIL, 2026)
+    assert [i["proc_no"] for i in items] == [1264, 1263]        # 2025 row filtered by year
+    assert items[0]["published"] == datetime(2026, 5, 21, tzinfo=timezone.utc)
+    assert items[0]["subject"].endswith("in Observance of the Eid'l Adha (Feast of Sacrifice)")
+    assert items[0]["link"] == "https://lawphil.net/executive/proc/proc2026/proc_1264_2026.html"
+    assert "tenure" not in items[1]["subject"] and items[1]["subject"].endswith("Davao De Oro")
+    c = classify_subject(items[0]["subject"])
+    assert c["scope"] == "nationwide" and c["holiday_type"] == "regular" and c["name"] == "Eid'l Adha"
+    annual = parse_lawphil_index(LAWPHIL, 2025)
+    assert classify_subject(annual[0]["subject"])["kind"] == "annual_list"
+    with pytest.raises(ValueError):
+        parse_lawphil_index("<html><body>moved</body></html>", 2026)
+
+
+def test_merge_items_dedupes_by_key_primary_wins():
+    a = item(1264, "lawphil wording")
+    b = item(1264, "gazette wording")
+    c = item(1409, "gazette only")
+    merged = merge_items([a], [b, c])
+    assert [(i["proc_no"], i["subject"]) for i in merged] == [(1409, "gazette only"), (1264, "lawphil wording")]
+
+
 # --- classification ------------------------------------------------------------
 
 def test_classify_local_special_day():
@@ -79,6 +124,17 @@ def test_classify_local_special_day():
     assert c["scope"] == "local"
     assert c["holiday_type"] == "special_non_working"
     assert c["dates"] == ["2026-09-07"]
+
+
+@pytest.mark.parametrize("subject", [
+    "Declaring Tuesday, 07 April 2026, a Special (Non-Working) Day in Mountain Province",
+    "Declaring Saturday, 16 July 2026, A Special (Non-Working) Day in the Municpality of Asuncion, Province of Davao del Norte",
+    "DECLARING FRIDAY, 11 SEPTEMBER 2026, A SPECIAL (NON-WORKING) DAY IN THE CORDILLERA ADMINISTRATIVE REGION",
+    "DECLARING TUESDAY, 25 AUGUST 2026, A SPECIAL (NON-WORKING) DAY IN THE CITY ILOILO",
+    "DECLARING SATURDAY, 29 AUGUST 2026, A SPECIAL (NON-WORKING) DAY IN THE FOURTH LEGISLATIVE DISTRICT OF CAVITE",
+])
+def test_classify_locality_forms_are_local(subject):
+    assert classify_subject(subject)["scope"] == "local"
 
 
 def test_classify_nationwide_regular_with_name():
@@ -288,7 +344,9 @@ def test_email_body_lists_sql_and_footer():
     findings, _ = evaluate_gazette(items, DB, set(), TODAY)
     findings += evaluate_staleness(DB, date(2026, 9, 10))
     findings.append(coverage_gap_finding(30, 300, d(21)))
-    body = build_email_body(findings, NOW, {"pages": 30, "items": 300, "new_items": 12,
+    body = build_email_body(findings, NOW, {"lawphil_years": "2026", "lawphil_items": 249,
+                                            "gazette_note": "blocked (403) from this network",
+                                            "items": 300, "new_items": 12,
                                             "cutoff": d(21).date(), "nager_years": "2026+2027",
                                             "nager_dates": 21})
     assert body.startswith("Holiday feed watch: 3 finding(s)  (checked 2026-08-27 06:00 ET)")
@@ -297,5 +355,6 @@ def test_email_body_lists_sql_and_footer():
     assert "UPDATE reference.ref_holidays" in body
     assert "2. STALE" in body
     assert "3. REVIEW - (coverage gap)" in body
-    assert "300 proclamation(s) back to 2026-08-06, 12 not seen before" in body
+    assert ("lawphil 2026: 249 proclamation(s); Official Gazette: blocked (403) from this network; "
+            "300 distinct, 12 not seen before") in body
     assert body.endswith("(holiday_feed_watcher.py; silent when nothing new)")

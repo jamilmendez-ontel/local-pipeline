@@ -15,7 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (print findings, no email, watermark not advanced)"
+        description: "Dry run (print findings, no email, coverage not advanced)"
+        required: false
+        default: "false"
+      probe:
+        description: "Probe only: print HTTP status of each source from the runner (no DB, no email)"
         required: false
         default: "false"
 
@@ -71,5 +75,8 @@ jobs:
           DRY_ARG=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             DRY_ARG="--dry-run"
+          fi
+          if [ "${{ github.event.inputs.probe }}" = "true" ]; then
+            DRY_ARG="--probe"
           fi
           python -u holiday_feed_watcher.py $DRY_ARG

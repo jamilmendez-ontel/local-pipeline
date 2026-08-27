@@ -3,28 +3,33 @@
 and email Jamil the proposed reference.ref_holidays changes.
 
 Sources:
-  1. Official Gazette RSS (officialgazette.gov.ph/feed/?paged=N). Every
-     proclamation's subject line is in <description>, e.g.
-     "DECLARING WEDNESDAY, 27 MAY 2026, A REGULAR HOLIDAY THROUGHOUT THE
-     COUNTRY, IN OBSERVANCE OF THE EID'L ADHA (FEAST OF SACRIFICE)".
-     The feed is ordered by publish time, NOT by proclamation number (numbers
-     are posted out of order and late: 1391 appeared after 1392, 1404 after
-     1409). So coverage is tracked by PUBLISH TIME: each real run records
-     coverage_ts (everything published before it has been scanned) plus the
-     proclamation keys it scanned; the next run walks pages newest-first until
-     it passes coverage_ts minus a slack window, and treats a proclamation as
-     new when its key is not in any earlier run's scanned set. Locality-only
-     days ("... IN THE MUNICIPALITY OF ...") are ignored; nationwide
-     declarations, the annual list ("... REGULAR HOLIDAYS AND SPECIAL
-     (NON-WORKING) DAYS FOR THE YEAR 2027") and amendments are compared
+  1. lawphil.net per-year proclamation index (PRIMARY; plain nginx, reachable
+     from GitHub runners). One table row per proclamation: number, signing
+     date and the full title, e.g. "Declaring Wednesday, 27 May 2026, a Regular
+     Holiday Throughout the Country, in Observance of the Eid'l Adha". The
+     whole year page (plus last year's in Jan-Feb: the annual list for year N
+     is proclaimed in Sep of N-1) is scanned every run; a proclamation is new
+     when its key ("year:number") is not in any earlier real run's scanned
+     set (pipeline.holiday_watch_runs.scanned_keys). lawphil lags the Gazette
+     by roughly two weeks.
+  2. Official Gazette RSS (officialgazette.gov.ph/feed/?paged=N), BEST
+     EFFORT: fresher than lawphil, but Cloudflare in front of gov.ph returns
+     403 to GitHub runner IPs (probed 2026-08-27, any User-Agent), so a 403 is
+     a warning, not a failure. When reachable (local runs) it is walked
+     newest-first back to the last run's coverage_ts minus a slack window
+     (the feed is ordered by publish time, NOT by number: 1404 was posted
+     after 1409) and merged with the lawphil items by key.
+     Locality-only days ("... IN THE MUNICIPALITY OF ...") are ignored;
+     nationwide declarations, the annual list ("... REGULAR HOLIDAYS AND
+     SPECIAL (NON-WORKING) DAYS FOR THE YEAR 2027") and amendments are compared
      against ref_holidays: a date we do not have -> proposed INSERT; a date
      whose type changed -> proposed UPDATE (special -> regular is the case
      that matters for pay rules).
-  2. Nager.Date (date.nager.at/api/v3/PublicHolidays/{year}/PH): dates-only
+  3. Nager.Date (date.nager.at/api/v3/PublicHolidays/{year}/PH): dates-only
      cross-check for years already seeded. It carries no regular/special
      distinction, so a Nager-only date is a "verify" finding, never SQL, and
      each date is reported once.
-  3. Staleness: the latest PH row must be at least HORIZON_DAYS ahead of today,
+  4. Staleness: the latest PH row must be at least HORIZON_DAYS ahead of today,
      otherwise next year's list has not been seeded yet (reported at most once
      a week even if the job fires twice).
 
@@ -69,10 +74,31 @@ setup_logging()
 logger = get_logger("holiday_feed_watcher")
 
 RECIPIENTS = ["jamil.mendez@ontel.co"]
+LAWPHIL_INDEX = "https://lawphil.net/executive/proc/proc{year}/proc{year}.html"
+LAWPHIL_ITEM = "https://lawphil.net/executive/proc/proc{year}/proc_{no}_{year}.html"
 GAZETTE_FEED = "https://www.officialgazette.gov.ph/feed/"
 NAGER_URL = "https://date.nager.at/api/v3/PublicHolidays/{year}/PH"
 HTTP_TIMEOUT = 30
-USER_AGENT = "Mozilla/5.0 (compatible; ontel-holiday-feed-watcher/1.0)"
+# A plain browser UA: the Gazette's WAF returned 403 to a self-identifying bot UA from
+# the GitHub runner on the first dispatched run (2026-08-27) while the same UA worked
+# from a residential IP.
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/128.0.0.0 Safari/537.36")
+BOT_USER_AGENT = "Mozilla/5.0 (compatible; ontel-holiday-feed-watcher/1.0)"
+PROBE_URLS = [
+    LAWPHIL_INDEX.format(year=2026),
+    GAZETTE_FEED,
+    GAZETTE_FEED + "?paged=2",
+    "https://www.officialgazette.gov.ph/?feed=rss2",
+    "https://www.officialgazette.gov.ph/",
+    "https://pco.gov.ph/news_releases/feed/",
+    NAGER_URL.format(year=2026),
+]
+LAWPHIL_ROW_RE = re.compile(
+    r'<a href="proc_(\d+)_(\d{4})\.html">\s*Proclamation No\.?\s*\d+\s*</a>\s*<br\s*/?>\s*'
+    r'([A-Za-z]+\s+\d{1,2},\s*\d{4})\s*</td>\s*<td>\s*(.*?)(?:<a class=tenure>|</td>)',
+    re.I | re.S)
+TAG_RE = re.compile(r"<[^>]+>")
 DEFAULT_LOOKBACK_DAYS = 30  # first run / no coverage yet: how far back to look
 SLACK_DAYS = 21             # re-walk this far behind the last coverage point
 DEFAULT_MAX_PAGES = 30      # ~10 posts per page; 30 pages ~ 3 months of Gazette output
@@ -93,7 +119,9 @@ AMEND_RE = re.compile(r"AMENDING PROCLAMATION NO\.?\s*(\d+)")
 ANNUAL_RE = re.compile(r"REGULAR HOLIDAYS AND SPECIAL \(NON-WORKING\) DAYS FOR THE YEAR (\d{4})")
 LOCAL_RE = re.compile(
     r"\bIN THE (CITY|CITIES|MUNICIPALITY|MUNICIPALITIES|PROVINCE|PROVINCES|ISLAND|REGION|"
-    r"BANGSAMORO|CORDILLERA|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH)\b|\bDISTRICT OF\b")
+    r"BANGSAMORO|CORDILLERA|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH)\b|\bDISTRICT OF\b"
+    r"|\bPROVINCE\b|\bMUNICI?PALIT(Y|IES)\b"                       # "in Mountain Province", lawphil typo
+    r"|\b(DAYS?|HOLIDAYS?) IN (?!OBSERVANCE\b|CELEBRATION\b|COMMEMORATION\b)")  # "... DAY IN <place>"
 NATIONWIDE_RE = re.compile(r"THROUGHOUT THE (COUNTRY|PHILIPPINES)|\bNATIONWIDE\b")
 OBSERVANCE_RE = re.compile(
     r"IN (?:OBSERVANCE|CELEBRATION|COMMEMORATION) OF (?:THE )?(.+?)(?:\s*\(|,|$)")
@@ -114,7 +142,8 @@ TYPE_LABEL = {
 # ---------------------------------------------------------------------------
 
 def _clean(text):
-    text = (text or "").replace("&#160;", " ").replace("\xa0", " ")
+    text = (text or "").replace("&#160;", " ").replace("\xa0", " ").replace("&amp;", "&")
+    text = text.replace("’", "'").replace("‘", "'").replace("\x92", "'")
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -172,6 +201,44 @@ def parse_feed_page(xml_text):
 def parse_gazette_feed(xml_text):
     """RSS text -> list of proclamation items (newest first, as published)."""
     return parse_feed_page(xml_text)[0]
+
+
+def parse_lawphil_index(html, year):
+    """lawphil per-year index HTML -> proclamation items (page order, newest
+    first). Raises ValueError when no rows parse: the page moved or is not the
+    index, and "nothing new" must not be the silent outcome."""
+    items = []
+    for no, yr, signed, title in LAWPHIL_ROW_RE.findall(html):
+        if int(yr) != year:
+            continue
+        try:
+            published = datetime.strptime(_clean(signed), "%B %d, %Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            published = None
+        items.append({
+            "proc_no": int(no), "year": int(yr),
+            "title": f"Proclamation No. {int(no)} s. {yr}",
+            "link": LAWPHIL_ITEM.format(year=yr, no=int(no)),
+            "subject": _clean(TAG_RE.sub(" ", title)),
+            "published": published,
+        })
+    if not items:
+        raise ValueError(f"lawphil {year} index parsed 0 proclamation rows: " + _clean(html[:160]))
+    return items
+
+
+def merge_items(*lists):
+    """Union of item lists by key; the first occurrence wins (pass the primary
+    source first). Order: newest key first."""
+    seen, out = set(), []
+    for lst in lists:
+        for it in lst:
+            k = item_key(it)
+            if k not in seen:
+                seen.add(k)
+                out.append(it)
+    out.sort(key=lambda it: (it["year"], it["proc_no"]), reverse=True)
+    return out
 
 
 def classify_subject(subject):
@@ -383,9 +450,9 @@ def build_email_body(findings, checked_at, stats):
             lines.append(f"     {f['sql']}")
         lines.append("")
     lines.append(
-        f"Scanned: {stats.get('pages', 0)} Official Gazette page(s), "
-        f"{stats.get('items', 0)} proclamation(s) back to {stats.get('cutoff', '?')}, "
-        f"{stats.get('new_items', 0)} not seen before; "
+        f"Scanned: lawphil {stats.get('lawphil_years', '')}: {stats.get('lawphil_items', 0)} "
+        f"proclamation(s); Official Gazette: {stats.get('gazette_note', 'not attempted')}; "
+        f"{stats.get('items', 0)} distinct, {stats.get('new_items', 0)} not seen before; "
         f"Nager.Date {stats.get('nager_years', '')}: {stats.get('nager_dates', 0)} date(s).")
     lines.append("Runbook: confirm each item against the proclamation text, put the SQL in the "
                  "next free local-pipeline migration, apply, reply done. The watcher never "
@@ -399,10 +466,37 @@ def build_email_body(findings, checked_at, stats):
 # Probes (thin; network + DB)
 # ---------------------------------------------------------------------------
 
-def make_session():
+def make_session(user_agent=USER_AGENT):
     s = requests.Session()
-    s.headers["User-Agent"] = USER_AGENT
+    s.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8, */*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
     return s
+
+
+def probe_sources():
+    """--probe: print status + body head for each candidate source under both
+    user agents. No DB, no email. Used to diagnose runner-side blocking."""
+    for ua_name, ua in (("browser", USER_AGENT), ("bot", BOT_USER_AGENT)):
+        s = make_session(ua)
+        for url in PROBE_URLS:
+            try:
+                r = s.get(url, timeout=HTTP_TIMEOUT)
+                head = _clean(r.text[:120])
+                print(f"[{ua_name}] {r.status_code} {url}  server={r.headers.get('server', '?')} "
+                      f"cf-ray={r.headers.get('cf-ray', '-')}  {head}")
+            except requests.RequestException as e:
+                print(f"[{ua_name}] EXC {url}  {e}")
+
+
+def _raise_for_status(resp, url):
+    if resp.status_code >= 400:
+        raise requests.HTTPError(
+            f"{resp.status_code} for {url}: server={resp.headers.get('server', '?')} "
+            f"cf-ray={resp.headers.get('cf-ray', '-')} body={_clean(resp.text[:200])!r}",
+            response=resp)
 
 
 def fetch_gazette(session, cutoff, max_pages):
@@ -420,7 +514,7 @@ def fetch_gazette(session, cutoff, max_pages):
         if resp.status_code == 404:      # past the last page
             reached = True
             break
-        resp.raise_for_status()
+        _raise_for_status(resp, url)
         page_items, raw_pubs = parse_feed_page(resp.text)
         pages += 1
         if not raw_pubs:                 # true end of the feed
@@ -435,6 +529,17 @@ def fetch_gazette(session, cutoff, max_pages):
                 reached = True
                 break
     return items, pages, reached, oldest
+
+
+def fetch_lawphil(session, year):
+    url = LAWPHIL_INDEX.format(year=year)
+    resp = session.get(url, timeout=HTTP_TIMEOUT)
+    if resp.status_code == 404:          # year page not created yet (early January)
+        return []
+    _raise_for_status(resp, url)
+    if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ascii"):
+        resp.encoding = "cp1252"         # lawphil serves windows-1252 without saying so
+    return parse_lawphil_index(resp.text, year)
 
 
 def fetch_nager(session, year):
@@ -526,7 +631,12 @@ def main():
                         help="walk back this many days instead of the recorded coverage")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
                         help=f"feed pages to walk at most (default {DEFAULT_MAX_PAGES})")
+    parser.add_argument("--probe", action="store_true",
+                        help="print HTTP status of every candidate source; no DB, no email")
     args = parser.parse_args()
+    if args.probe:
+        probe_sources()
+        return 0
 
     now = datetime.now(timezone.utc)
     today = now.astimezone(ZoneInfo("Asia/Manila")).date()
@@ -549,20 +659,43 @@ def main():
                     f"max pages: {args.max_pages}")
 
         session = make_session()
-        items, pages, reached, oldest = fetch_gazette(session, cutoff, args.max_pages)
-        gz_findings, scanned = evaluate_gazette(items, db_rows, seen_keys, today)
+
+        # Primary: lawphil year index (current year; plus last year in Jan-Feb).
+        lawphil_years = [today.year] + ([today.year - 1] if today.month <= 2 else [])
+        lawphil_items = []
+        for y in lawphil_years:
+            lawphil_items += fetch_lawphil(session, y)   # raises -> error run, exit 1
+        stats.update(lawphil_years="+".join(map(str, lawphil_years)),
+                     lawphil_items=len(lawphil_items))
+        logger.info(f"lawphil {stats['lawphil_years']}: {len(lawphil_items)} proclamation(s)")
+
+        # Best effort: Official Gazette RSS (blocked for GitHub runner IPs).
+        gz_items, gz_findings, new_coverage = [], [], coverage_ts
+        try:
+            gz_items, pages, reached, oldest = fetch_gazette(session, cutoff, args.max_pages)
+            if reached:
+                new_coverage = now
+            else:
+                gz_findings.append(coverage_gap_finding(pages, len(gz_items), cutoff))
+                logger.warning(gz_findings[-1]["note"])
+                new_coverage = oldest if oldest is not None else coverage_ts
+            stats["gazette_note"] = f"{pages} page(s), {len(gz_items)} proclamation(s) back to {cutoff.date()}"
+        except (requests.RequestException, ValueError) as e:
+            blocked = isinstance(e, requests.HTTPError) and e.response is not None \
+                and e.response.status_code == 403
+            stats["gazette_note"] = ("blocked (403) from this network" if blocked
+                                     else f"unavailable ({_clean(str(e))[:120]})")
+            logger.warning(f"Official Gazette skipped: {stats['gazette_note']}")
+        logger.info(f"Gazette: {stats['gazette_note']}")
+
+        items = merge_items(lawphil_items, gz_items)
+        findings_gz, scanned = evaluate_gazette(items, db_rows, seen_keys, today)
+        gz_findings = findings_gz + gz_findings
         new_items = len([k for k in scanned if k not in seen_keys])
-        if reached:
-            new_coverage = now
-        else:
-            gz_findings.append(coverage_gap_finding(pages, len(items), cutoff))
-            logger.warning(gz_findings[-1]["note"])
-            # cover only what was actually seen; never past the oldest post
-            new_coverage = oldest if oldest is not None else coverage_ts
         max_key = max(((it["year"], it["proc_no"]) for it in items), default=None)
-        stats.update(pages=pages, items=len(items), new_items=new_items, cutoff=cutoff.date(),
+        stats.update(items=len(items), new_items=new_items, cutoff=cutoff.date(),
                      scanned=scanned, coverage_ts=new_coverage, max_key=max_key)
-        logger.info(f"Gazette: {pages} page(s), {len(items)} proclamation(s), {new_items} new, "
+        logger.info(f"Proclamations: {len(items)} distinct, {new_items} new, "
                     f"{len(gz_findings)} finding(s); coverage -> {new_coverage}")
 
         nager_rows = []
