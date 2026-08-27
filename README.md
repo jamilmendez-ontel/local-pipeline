@@ -45,7 +45,7 @@ Script time-driven triggers under the notifier account. See
 | `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
 | `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 | `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
-| `holiday-feed-watch.yml` | Apps Script Mon 6 PM ET + cron Thu 22:00 UTC backstop | PH holiday proclamation watch: Official Gazette RSS + Nager.Date vs `reference.ref_holidays`; emails Jamil proposed INSERT/UPDATE SQL (never writes the table), silent when nothing new (see below) |
+| `holiday-feed-watch.yml` | Apps Script Mon 6 PM ET + cron Thu 22:00 UTC backstop | PH holiday proclamation watch: lawphil proclamation index (+ Official Gazette RSS when not 403-blocked) + Nager.Date vs `reference.ref_holidays`; emails Jamil proposed INSERT/UPDATE SQL (never writes the table), silent when nothing new (see below) |
 
 Exact trigger times live in `scripts/pipeline_trigger.gs`. The
 `pipeline-asset-tasks` workflow fires downstream dispatches at end-of-run
@@ -239,19 +239,25 @@ by trigger. Seeded PH 2025-2026 (Proclamations 727 s.2024, 1006 s.2025, Eid
 `scorecard.holidays`). Use it, not `analytics.v_calendar_holiday` (Google
 Calendar mirror, incomplete, no type).
 
-`holiday_feed_watcher.py` keeps it current without ever writing it: weekly it
-walks the Official Gazette RSS (ordered by publish time, NOT by proclamation
-number; numbers post out of order and late) back to the last run's
-`coverage_ts` minus 21 days, treats a proclamation as new when no earlier real
-run scanned its key (`pipeline.holiday_watch_runs.scanned_keys`), parses the
-subject line (type, dates, "THROUGHOUT THE COUNTRY" vs "IN THE MUNICIPALITY
-OF", annual list, "AMENDING PROCLAMATION NO."), and emails Jamil the proposed
-INSERT/UPDATE SQL. Mixed-type subjects, unparseable dates and coverage gaps
-(page cap hit before the cutoff: coverage is NOT advanced) become "review"
-items, never SQL. Nager.Date is a dates-only cross-check for seeded years,
-each date reported once. `--dry-run` never emails or advances coverage;
-`--lookback-days N` re-walks further back. Adding a year is still a hand-seeded
-migration block (the watcher tells you when the annual list is published).
+`holiday_feed_watcher.py` keeps it current without ever writing it. Weekly it
+scans **lawphil.net's per-year proclamation index** (primary: number, signing
+date, full title; plain nginx, reachable from GitHub runners; lags the Gazette
+by ~2 weeks) plus, best effort, the **Official Gazette RSS** (fresher, but
+Cloudflare in front of gov.ph returns 403 to GitHub runner IPs with any
+User-Agent, probed 2026-08-27, so a 403 is a warning; when reachable it is
+walked back to the last run's `coverage_ts` minus 21 days because the feed is
+ordered by publish time, not number). Items are merged by key; a proclamation
+is new when no earlier real run scanned its key
+(`pipeline.holiday_watch_runs.scanned_keys`). The subject line is parsed
+(type, dates, "THROUGHOUT THE COUNTRY" vs "IN THE MUNICIPALITY OF", annual
+list, "AMENDING PROCLAMATION NO.") and Jamil gets the proposed INSERT/UPDATE
+SQL by email. Mixed-type subjects, unparseable dates and Gazette coverage gaps
+become "review" items, never SQL. Nager.Date is a dates-only cross-check for
+seeded years, each date reported once. `--dry-run` never emails or advances
+coverage; `--lookback-days N` re-walks the Gazette further back; `--probe`
+prints each source's HTTP status from wherever it runs. Adding a year is still
+a hand-seeded migration block (the watcher tells you when the annual list is
+published).
 
 ## Key files (`swift_api_pipeline/`)
 
@@ -269,7 +275,7 @@ migration block (the watcher tells you when the annual list is published).
 | `sheets_client.py` | Drive API authentication (used for Google Forms responses) |
 | `timer_correction_review.py` | Daily timer review emails + form-response apply (corrections/removals -> `app_timer.*` -> `rebuild_timer_clean()`). Since 2026-08-10 (#44): stale-response removals are surgical (duration-matched to the snapshot the member saw; no match = skip for manual review, never bulk group removal) and form prefill entry ids carry an `id:` prefix so Google Sheets can't mangle hex hashes into scientific notation. Since 2026-08-24: still-running timers (`end_time IS NULL`) are not actionable rows; they get an amber "timer still running" notice (site/task, start, elapsed, an "Open in Swift" task deep link resolved via `stg_asset_tasks` (DRMC `swiftTaskUrl` pattern; root link when the timer has no asset), no Edit/Remove) and the completed entry arrives via the resend pass as NEW. Ghost NULL-end rows with a completed sibling are dropped silently. Migration 241 stops a NULL-end removal from shielding Step 5 runaway-duplicate cleanup. Design: `docs/superpowers/specs/2026-08-24-timer-running-entries-design.md`. |
 | `schedule_feed_audit.py` | Swift task-record vs activity-feed schedule audit (12h calendar-path flip); maintains `pipeline.schedule_audit_anomalies`, serves corrections via `analytics.v_user_priorities_effective` |
-| `holiday_feed_watcher.py` | Weekly PH holiday proclamation watch (Official Gazette RSS subject-line parser + Nager.Date cross-check + staleness) against `reference.ref_holidays`; emails proposed SQL, never writes the table; run log `pipeline.holiday_watch_runs` |
+| `holiday_feed_watcher.py` | Weekly PH holiday proclamation watch (lawphil index + best-effort Official Gazette RSS subject-line parser + Nager.Date cross-check + staleness) against `reference.ref_holidays`; emails proposed SQL, never writes the table; run log `pipeline.holiday_watch_runs` |
 | `migrations/*.sql` | Numbered SQL migrations (000-064 at time of writing) |
 
 ## CLI
