@@ -3,12 +3,13 @@ name: "Watch: Holiday Feeds"
 # Weekly check of the Official Gazette (new / amended PH holiday proclamations)
 # and Nager.Date against reference.ref_holidays. Emails Jamil proposed SQL;
 # never edits the table. Apps Script triggerHolidayFeedWatch() fires the
-# repository_dispatch on Mondays; this cron is the backstop (GHA cron can lag
-# 1-2 h, harmless at weekly cadence; the watermark makes double runs no-ops).
+# repository_dispatch on Mondays 6 PM ET; this cron is the backstop on a
+# different day so the two never collide (GHA cron can lag 1-2 h, harmless at
+# weekly cadence; scanned-key memory makes a second run a no-op).
 
 on:
   schedule:
-    - cron: '0 22 * * 1'   # Monday 22:00 UTC = 6:00 PM ET / Tuesday 6:00 AM PHT
+    - cron: '0 22 * * 4'   # Thursday 22:00 UTC = 6:00 PM ET / Friday 6:00 AM PHT
   repository_dispatch:
     types: [holiday-feed-watch]
   workflow_dispatch:
@@ -28,7 +29,7 @@ env:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20   # worst case: 30 feed pages x 30 s timeout + Nager
 
     steps:
       - name: Checkout

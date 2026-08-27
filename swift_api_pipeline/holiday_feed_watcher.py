@@ -7,23 +7,33 @@ Sources:
      proclamation's subject line is in <description>, e.g.
      "DECLARING WEDNESDAY, 27 MAY 2026, A REGULAR HOLIDAY THROUGHOUT THE
      COUNTRY, IN OBSERVANCE OF THE EID'L ADHA (FEAST OF SACRIFICE)".
-     Pages are walked newest-first until the (year, number) watermark stored by
-     the last real run is reached (cap --max-pages). Locality-only days
-     ("... IN THE MUNICIPALITY OF ...") are ignored. Nationwide declarations,
-     the annual list ("... REGULAR HOLIDAYS AND SPECIAL (NON-WORKING) DAYS FOR
-     THE YEAR 2027") and amendments are compared against ref_holidays: a date we
-     do not have -> proposed INSERT; a date whose type changed -> proposed
-     UPDATE (special -> regular is the case that matters for pay rules).
+     The feed is ordered by publish time, NOT by proclamation number (numbers
+     are posted out of order and late: 1391 appeared after 1392, 1404 after
+     1409). So coverage is tracked by PUBLISH TIME: each real run records
+     coverage_ts (everything published before it has been scanned) plus the
+     proclamation keys it scanned; the next run walks pages newest-first until
+     it passes coverage_ts minus a slack window, and treats a proclamation as
+     new when its key is not in any earlier run's scanned set. Locality-only
+     days ("... IN THE MUNICIPALITY OF ...") are ignored; nationwide
+     declarations, the annual list ("... REGULAR HOLIDAYS AND SPECIAL
+     (NON-WORKING) DAYS FOR THE YEAR 2027") and amendments are compared
+     against ref_holidays: a date we do not have -> proposed INSERT; a date
+     whose type changed -> proposed UPDATE (special -> regular is the case
+     that matters for pay rules).
   2. Nager.Date (date.nager.at/api/v3/PublicHolidays/{year}/PH): dates-only
-     cross-check for this year and next. It carries no regular/special
-     distinction, so a Nager-only date is a "verify" finding, never SQL.
+     cross-check for years already seeded. It carries no regular/special
+     distinction, so a Nager-only date is a "verify" finding, never SQL, and
+     each date is reported once.
   3. Staleness: the latest PH row must be at least HORIZON_DAYS ahead of today,
-     otherwise next year's list has not been seeded yet.
+     otherwise next year's list has not been seeded yet (reported at most once
+     a week even if the job fires twice).
 
 The watcher NEVER writes reference.ref_holidays. Every finding carries the SQL
 to run once the proclamation text is confirmed; a human applies it as a
-migration. Run rows go to pipeline.holiday_watch_runs (migration 245); the
-watermark is the highest (year, proclamation number) seen by a non-dry run.
+migration. Run rows go to pipeline.holiday_watch_runs (migrations 245/246).
+Coverage advances only on a real (non-dry) run that recorded an email or had
+nothing to say; an error run (feed down, DB down after start, Gmail failure)
+never advances it, so findings are re-sent next week rather than lost.
 
 Behavior: nothing new = one log line, run row status 'ok', no email, exit 0.
 Findings = one plain-text email to Jamil, status 'findings', exit 0. Crash =
@@ -31,9 +41,9 @@ status 'error' when the DB is reachable, exit 1 (GitHub's workflow-failure
 notification covers watcher self-death).
 
 Usage:
-    python holiday_feed_watcher.py               # check + email findings
-    python holiday_feed_watcher.py --dry-run     # check + print; no email, watermark not advanced
-    python holiday_feed_watcher.py --since 1300  # override the watermark (proclamation number, current year)
+    python holiday_feed_watcher.py                    # check + email findings
+    python holiday_feed_watcher.py --dry-run          # check + print; no email, coverage not advanced
+    python holiday_feed_watcher.py --lookback-days 60 # walk back this far instead of the recorded coverage
     python holiday_feed_watcher.py --max-pages 10
 """
 
@@ -43,8 +53,9 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.mime.text import MIMEText
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -60,11 +71,16 @@ logger = get_logger("holiday_feed_watcher")
 RECIPIENTS = ["jamil.mendez@ontel.co"]
 GAZETTE_FEED = "https://www.officialgazette.gov.ph/feed/"
 NAGER_URL = "https://date.nager.at/api/v3/PublicHolidays/{year}/PH"
-HTTP_TIMEOUT = 60
+HTTP_TIMEOUT = 30
 USER_AGENT = "Mozilla/5.0 (compatible; ontel-holiday-feed-watcher/1.0)"
-DEFAULT_MAX_PAGES = 6       # first run / no watermark: how far back to look (~10 items per page)
-HARD_MAX_PAGES = 30
+DEFAULT_LOOKBACK_DAYS = 30  # first run / no coverage yet: how far back to look
+SLACK_DAYS = 21             # re-walk this far behind the last coverage point
+DEFAULT_MAX_PAGES = 30      # ~10 posts per page; 30 pages ~ 3 months of Gazette output
+SEEN_KEYS_DAYS = 180        # scanned-key memory window (walk never goes further back)
 HORIZON_DAYS = 120          # latest PH holiday must be at least this far ahead
+STALE_REPEAT_DAYS = 6       # STALE reported at most once per this many days
+DATE_SANITY_PAST_DAYS = 365
+DATE_SANITY_FUTURE_DAYS = 730
 
 MONTHS = {m: i for i, m in enumerate(
     ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST",
@@ -73,7 +89,6 @@ DATE_RE = re.compile(
     r"\b(\d{1,2})\s+(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|"
     r"OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})\b")
 TITLE_RE = re.compile(r"Proclamation No\.?\s*(\d+)\s*,?\s*s\.?\s*(\d{4})", re.I)
-PROC_RE = re.compile(r"PROCLAMATION NO\.?\s*(\d+)")
 AMEND_RE = re.compile(r"AMENDING PROCLAMATION NO\.?\s*(\d+)")
 ANNUAL_RE = re.compile(r"REGULAR HOLIDAYS AND SPECIAL \(NON-WORKING\) DAYS FOR THE YEAR (\d{4})")
 LOCAL_RE = re.compile(
@@ -82,6 +97,11 @@ LOCAL_RE = re.compile(
 NATIONWIDE_RE = re.compile(r"THROUGHOUT THE (COUNTRY|PHILIPPINES)|\bNATIONWIDE\b")
 OBSERVANCE_RE = re.compile(
     r"IN (?:OBSERVANCE|CELEBRATION|COMMEMORATION) OF (?:THE )?(.+?)(?:\s*\(|,|$)")
+TYPE_PHRASES = [
+    ("regular", re.compile(r"REGULAR HOLIDAY")),
+    ("special_non_working", re.compile(r"SPECIAL \(?NON-WORKING\)?")),
+    ("special_working", re.compile(r"SPECIAL \(?WORKING\)? (?:DAY|HOLIDAY)")),
+]
 TYPE_LABEL = {
     "regular": "regular holiday",
     "special_non_working": "special (non-working) day",
@@ -98,16 +118,42 @@ def _clean(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_gazette_feed(xml_text):
-    """RSS text -> list of proclamation items (newest first, as published).
-    Non-proclamation issuances (EOs, AOs, memoranda) are skipped."""
-    items = []
+def _pubdate(text):
+    try:
+        dt = parsedate_to_datetime(_clean(text))
+    except (TypeError, ValueError, IndexError):
+        return None
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def item_key(it):
+    return f"{it['year']}:{it['proc_no']}"
+
+
+def parse_feed_page(xml_text):
+    """RSS text -> (proclamation items newest first, raw <item> pubdates).
+    The raw list tells a page full of EOs/AOs (no proclamations) apart from
+    the true end of the feed and drives the publish-time stop condition.
+    Raises ValueError when the body is not an RSS document (Cloudflare
+    challenge, maintenance page, feed moved) so the run fails loudly instead
+    of reporting "nothing new"."""
+    text = xml_text.lstrip("﻿ \r\n\t")   # BOM / leading whitespace (WordPress plugin defect)
+    head = text[:512].lower()
+    if head.startswith("<!doctype html") or head.startswith("<html"):
+        raise ValueError("Official Gazette returned HTML, not RSS: " + _clean(text[:160]))
     # stdlib XML guard: an RSS feed never needs a DTD; refuse entity tricks
     # (billion laughs / XXE) instead of pulling in defusedxml.
-    if re.search(r"<!(DOCTYPE|ENTITY)", xml_text[:4096], re.I):
+    if re.search(r"<!(DOCTYPE|ENTITY)", text, re.I):
         raise ValueError("feed contains a DTD/entity declaration; refusing to parse")
-    root = ET.fromstring(xml_text)
+    root = ET.fromstring(text)
+    if root.tag.lower() != "rss":
+        raise ValueError(f"Official Gazette body is not RSS (root <{root.tag}>)")
+    items, raw_pubs = [], []
     for node in root.iter("item"):
+        pub = _pubdate(node.findtext("pubDate"))
+        raw_pubs.append(pub)
         title = _clean(node.findtext("title"))
         m = TITLE_RE.search(title)
         if not m:
@@ -118,14 +164,22 @@ def parse_gazette_feed(xml_text):
             "title": title,
             "link": _clean(node.findtext("link")),
             "subject": _clean(node.findtext("description")),
-            "published": _clean(node.findtext("pubDate")),
+            "published": pub,
         })
-    return items
+    return items, raw_pubs
+
+
+def parse_gazette_feed(xml_text):
+    """RSS text -> list of proclamation items (newest first, as published)."""
+    return parse_feed_page(xml_text)[0]
 
 
 def classify_subject(subject):
     """Subject line -> what it declares. kind: annual_list | holiday_declaration |
-    other. scope: nationwide | local | unknown (declarations only)."""
+    other. scope: nationwide | local | unknown (declarations only).
+    holiday_type is None when the subject names more than one type (an
+    amendment quoting the old type, or a two-date mixed declaration): such
+    items become "review" findings, never SQL."""
     s = _clean(subject).upper()
     out = {"kind": "other", "holiday_type": None, "dates": [], "scope": None,
            "annual_year": None, "amends": None, "name": None}
@@ -135,12 +189,8 @@ def classify_subject(subject):
         return out
     if "HOLIDAY" not in s and "NON-WORKING" not in s and "WORKING) DAY" not in s:
         return out
-    if "REGULAR HOLIDAY" in s:
-        out["holiday_type"] = "regular"
-    elif "SPECIAL (NON-WORKING)" in s or "SPECIAL NON-WORKING" in s:
-        out["holiday_type"] = "special_non_working"
-    elif "SPECIAL (WORKING)" in s or "SPECIAL WORKING" in s:
-        out["holiday_type"] = "special_working"
+    types = [t for t, rx in TYPE_PHRASES if rx.search(s)]
+    out["holiday_type"] = types[0] if len(types) == 1 else None
     dates = set()
     for d, mo, y in DATE_RE.findall(s):
         try:
@@ -195,18 +245,19 @@ def sql_update(iso_date, holiday_type, item):
     )
 
 
-def evaluate_gazette(items, db_rows, watermark):
-    """items: parse_gazette_feed output. db_rows: {iso_date: {holiday_type, name,
-    proclamation_ref}} for calendar PH. watermark: (year, proc_no) or None.
-    Returns (findings, new_watermark). Items at or below the watermark are
-    already reviewed and produce nothing."""
+def evaluate_gazette(items, db_rows, seen_keys, today):
+    """items: parse_feed_page output. db_rows: {iso_date: {holiday_type, name,
+    proclamation_ref}} for calendar PH. seen_keys: proclamation keys scanned by
+    earlier real runs. Returns (findings, keys scanned this run). Items whose
+    key is already in seen_keys were reviewed before and produce nothing."""
     findings = []
-    new_wm = watermark
+    scanned = []
+    lo = (today - timedelta(days=DATE_SANITY_PAST_DAYS)).isoformat()
+    hi = (today + timedelta(days=DATE_SANITY_FUTURE_DAYS)).isoformat()
     for it in items:
-        key = (it["year"], it["proc_no"])
-        if new_wm is None or key > new_wm:
-            new_wm = key
-        if watermark is not None and key <= watermark:
+        key = item_key(it)
+        scanned.append(key)
+        if key in seen_keys:
             continue
         c = classify_subject(it["subject"])
         base = {"proc": _proc_ref(it), "link": it["link"], "subject": it["subject"]}
@@ -219,7 +270,14 @@ def evaluate_gazette(items, db_rows, watermark):
             continue
         if c["scope"] == "unknown" or not c["dates"] or not c["holiday_type"]:
             findings.append({**base, "kind": "review",
-                             "note": "Holiday wording but scope/date/type not parseable; read it."})
+                             "note": "Holiday wording but scope, date or a single type could "
+                                     "not be parsed (amendments quoting the old type land "
+                                     "here on purpose); read the proclamation."})
+            continue
+        if any(iso < lo or iso > hi for iso in c["dates"]):
+            findings.append({**base, "kind": "review",
+                             "note": f"Parsed date(s) {', '.join(c['dates'])} fall outside "
+                                     f"{lo}..{hi}; read the proclamation."})
             continue
         for iso in c["dates"]:
             have = db_rows.get(iso)
@@ -234,7 +292,7 @@ def evaluate_gazette(items, db_rows, watermark):
                                  "previous_type": have["holiday_type"],
                                  "sql": sql_update(iso, c["holiday_type"], it)})
             # else: already known with the same type; nothing to do
-    return findings, new_wm
+    return findings, scanned
 
 
 def evaluate_nager(nager_rows, db_rows, today, already_reported=frozenset()):
@@ -247,13 +305,17 @@ def evaluate_nager(nager_rows, db_rows, today, already_reported=frozenset()):
     findings = []
     seen = set()
     seeded_years = {iso[:4] for iso in db_rows}
+    if not isinstance(nager_rows, list):
+        return findings
     for r in nager_rows:
+        if not isinstance(r, dict):
+            continue
         iso = r.get("date")
-        if (not iso or iso in seen or iso < today.isoformat() or iso in db_rows
+        if (not isinstance(iso, str) or iso in seen or iso < today.isoformat() or iso in db_rows
                 or iso[:4] not in seeded_years or iso in already_reported):
             continue
         seen.add(iso)
-        findings.append({"kind": "nager_only", "date": iso, "name": r.get("name") or "",
+        findings.append({"kind": "nager_only", "date": iso, "name": str(r.get("name") or ""),
                          "note": "Nager.Date lists this date; ref_holidays does not. "
                                  "Verify against a proclamation before adding (Nager "
                                  "over-includes and carries no regular/special type)."})
@@ -271,6 +333,13 @@ def evaluate_staleness(db_rows, today, horizon_days=HORIZON_DAYS):
                          f"threshold {horizon_days}). Next year's proclamation list is "
                          f"probably out or due; seed it."}]
     return []
+
+
+def coverage_gap_finding(pages, n_items, cutoff):
+    return {"kind": "review", "proc": "(coverage gap)", "link": GAZETTE_FEED,
+            "note": f"Walked {pages} page(s) ({n_items} proclamations) without getting back "
+                    f"to {cutoff.date()}; coverage was NOT advanced past the oldest post "
+                    f"seen. Re-run with a larger --max-pages, or review the gap by hand."}
 
 
 def _dow(iso):
@@ -302,6 +371,9 @@ def build_email_body(findings, checked_at, stats):
         elif k == "stale":
             lines.append(f"{i}. STALE")
             lines.append(f"   {f['note']}")
+        else:
+            lines.append(f"{i}. {k.upper()}")
+            lines.append(f"   {f.get('note', '')}")
         if f.get("subject"):
             lines.append(f"   Subject: {f['subject']}")
         if f.get("link"):
@@ -312,8 +384,8 @@ def build_email_body(findings, checked_at, stats):
         lines.append("")
     lines.append(
         f"Scanned: {stats.get('pages', 0)} Official Gazette page(s), "
-        f"{stats.get('items', 0)} proclamation(s), watermark "
-        f"{stats.get('watermark_before') or 'none'} -> {stats.get('watermark_after') or 'none'}; "
+        f"{stats.get('items', 0)} proclamation(s) back to {stats.get('cutoff', '?')}, "
+        f"{stats.get('new_items', 0)} not seen before; "
         f"Nager.Date {stats.get('nager_years', '')}: {stats.get('nager_dates', 0)} date(s).")
     lines.append("Runbook: confirm each item against the proclamation text, put the SQL in the "
                  "next free local-pipeline migration, apply, reply done. The watcher never "
@@ -321,10 +393,6 @@ def build_email_body(findings, checked_at, stats):
     lines.append("")
     lines.append("(holiday_feed_watcher.py; silent when nothing new)")
     return "\n".join(lines)
-
-
-def fmt_watermark(wm):
-    return f"{wm[1]} s.{wm[0]}" if wm else None
 
 
 # ---------------------------------------------------------------------------
@@ -337,25 +405,36 @@ def make_session():
     return s
 
 
-def fetch_gazette(session, watermark, max_pages):
-    """Walk feed pages newest-first. Stop after the page that reaches the
-    watermark (or after max_pages / an empty page). Returns (items, pages)."""
-    items, pages = [], 0
+def fetch_gazette(session, cutoff, max_pages):
+    """Walk feed pages newest-first until every post on a page is older than
+    cutoff (the feed is ordered by publish time). Returns (items, pages,
+    reached, oldest_seen). reached is True only when coverage back to cutoff is
+    provable: a page entirely older than cutoff, or the true end of the feed
+    (404 / a page with no <item>). A page with no proclamations but other
+    issuances does NOT end the walk. When reached is False the caller must not
+    advance coverage past oldest_seen, or the gap is skipped forever."""
+    items, pages, reached, oldest = [], 0, False, None
     for page in range(1, max_pages + 1):
         url = GAZETTE_FEED if page == 1 else f"{GAZETTE_FEED}?paged={page}"
         resp = session.get(url, timeout=HTTP_TIMEOUT)
         if resp.status_code == 404:      # past the last page
+            reached = True
             break
         resp.raise_for_status()
-        page_items = parse_gazette_feed(resp.text)
+        page_items, raw_pubs = parse_feed_page(resp.text)
         pages += 1
-        if not page_items:
+        if not raw_pubs:                 # true end of the feed
+            reached = True
             break
         items.extend(page_items)
-        if watermark is not None and any(
-                (it["year"], it["proc_no"]) <= watermark for it in page_items):
-            break
-    return items, pages
+        known = [p for p in raw_pubs if p is not None]
+        if known:
+            page_oldest = min(known)
+            oldest = page_oldest if oldest is None else min(oldest, page_oldest)
+            if all(p <= cutoff for p in known):
+                reached = True
+                break
+    return items, pages, reached, oldest
 
 
 def fetch_nager(session, year):
@@ -363,7 +442,8 @@ def fetch_nager(session, year):
     if resp.status_code == 404:          # year not published yet
         return []
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    return data if isinstance(data, list) else []
 
 
 def probe_holidays(db):
@@ -376,36 +456,46 @@ def probe_holidays(db):
         "proclamation_ref": r["proclamation_ref"]} for r in rows}
 
 
-def probe_watermark(db):
+def probe_coverage(db):
+    """(coverage_ts of the latest real run, set of keys scanned by real runs in
+    the memory window). Error and dry runs never count."""
     row = retry_db(lambda: db.fetchrow(
-        "SELECT og_watermark, og_watermark_year FROM pipeline.holiday_watch_runs "
-        "WHERE NOT dry_run AND status <> 'error' AND og_watermark IS NOT NULL "
-        "ORDER BY og_watermark_year DESC, og_watermark DESC LIMIT 1"),
-        description="read watermark")
-    return (row["og_watermark_year"], row["og_watermark"]) if row else None
+        "SELECT max(coverage_ts) AS ts FROM pipeline.holiday_watch_runs "
+        "WHERE NOT dry_run AND status <> 'error'"),
+        description="read coverage")
+    rows = retry_db(lambda: db.fetch(
+        "SELECT DISTINCT k FROM pipeline.holiday_watch_runs r, "
+        "jsonb_array_elements_text(r.scanned_keys) k "
+        "WHERE NOT r.dry_run AND r.status <> 'error' "
+        "AND r.ran_at > now() - make_interval(days => $1)", SEEN_KEYS_DAYS),
+        description="read scanned keys")
+    return (row["ts"] if row else None), {r["k"] for r in rows}
+
+
+def probe_reported(db, kind, within_days=None):
+    """Dates (or a bare count for kinds without a date) of findings of `kind`
+    already emailed by real runs, optionally within the last N days."""
+    sql = ("SELECT f->>'date' AS d FROM pipeline.holiday_watch_runs r, "
+           "jsonb_array_elements(r.findings) f "
+           "WHERE NOT r.dry_run AND r.emailed AND f->>'kind' = $1")
+    args = [kind]
+    if within_days is not None:
+        sql += " AND r.ran_at > now() - make_interval(days => $2)"
+        args.append(within_days)
+    rows = retry_db(lambda: db.fetch(sql, *args), description=f"read reported {kind}")
+    return [r["d"] for r in rows]
 
 
 def record_run(db, status, stats, findings, emailed, dry_run, error=None):
-    wm = stats.get("wm_after")
+    wm = stats.get("max_key")
     retry_db(lambda: db.execute(
         "INSERT INTO pipeline.holiday_watch_runs (status, og_items_scanned, og_watermark, "
-        "og_watermark_year, nager_dates, findings, emailed, error, dry_run) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "og_watermark_year, nager_dates, findings, emailed, error, dry_run, scanned_keys, "
+        "coverage_ts) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         status, stats.get("items", 0), wm[1] if wm else None, wm[0] if wm else None,
         stats.get("nager_dates", 0), json.loads(json.dumps(findings, default=str)), emailed,
-        error, dry_run), description="record run")   # db.py's jsonb codec json.dumps() the object itself
-
-
-def probe_reported_nager(db):
-    """Dates already emailed as nager_only by a real run: report each once, not
-    weekly forever (a date that was verified and added lands in ref_holidays
-    and drops out anyway; one judged noise stays quiet)."""
-    rows = retry_db(lambda: db.fetch(
-        "SELECT DISTINCT f->>'date' AS d FROM pipeline.holiday_watch_runs r, "
-        "jsonb_array_elements(r.findings) f "
-        "WHERE NOT r.dry_run AND r.emailed AND f->>'kind' = 'nager_only'"),
-        description="read reported nager dates")
-    return {r["d"] for r in rows if r["d"]}
+        error, dry_run, list(stats.get("scanned", [])), stats.get("coverage_ts")),
+        description="record run")   # db.py's jsonb codec json.dumps() the objects itself
 
 
 # ---------------------------------------------------------------------------
@@ -424,19 +514,18 @@ def send_email(findings, checked_at, stats):
     msg["From"] = masked_sender(service, "Pipeline Alerts")
     msg["Subject"] = f"Holiday feed watch: {len(findings)} finding(s)"
     raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute(num_retries=3)
     logger.info(f"Findings email sent to {', '.join(RECIPIENTS)}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true",
-                        help="print findings; no email; watermark not advanced")
-    parser.add_argument("--since", type=int, default=None,
-                        help="override watermark: proclamation number (current year)")
-    parser.add_argument("--max-pages", type=int, default=None,
-                        help=f"feed pages to walk (default {DEFAULT_MAX_PAGES} with no "
-                             f"watermark, {HARD_MAX_PAGES} cap when walking to one)")
+                        help="print findings; no email; coverage not advanced")
+    parser.add_argument("--lookback-days", type=int, default=None,
+                        help="walk back this many days instead of the recorded coverage")
+    parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
+                        help=f"feed pages to walk at most (default {DEFAULT_MAX_PAGES})")
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -447,36 +536,51 @@ def main():
     try:
         db = get_db()
         db_rows = probe_holidays(db)
-        watermark = probe_watermark(db)
-        if args.since is not None:
-            watermark = (today.year, args.since)
-        max_pages = args.max_pages or (HARD_MAX_PAGES if watermark else DEFAULT_MAX_PAGES)
-        logger.info(f"ref_holidays PH rows: {len(db_rows)}; watermark: {fmt_watermark(watermark)}; "
-                    f"max pages: {max_pages}")
+        coverage_ts, seen_keys = probe_coverage(db)
+        if args.lookback_days is not None:
+            cutoff = now - timedelta(days=args.lookback_days)
+        elif coverage_ts is not None:
+            cutoff = coverage_ts - timedelta(days=SLACK_DAYS)
+        else:
+            cutoff = now - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+        cutoff = max(cutoff, now - timedelta(days=SEEN_KEYS_DAYS))
+        logger.info(f"ref_holidays PH rows: {len(db_rows)}; coverage: {coverage_ts}; "
+                    f"seen keys: {len(seen_keys)}; walking back to {cutoff.date()}; "
+                    f"max pages: {args.max_pages}")
 
         session = make_session()
-        items, pages = fetch_gazette(session, watermark, max_pages)
-        gz_findings, wm_after = evaluate_gazette(items, db_rows, watermark)
-        stats.update(pages=pages, items=len(items), watermark_before=fmt_watermark(watermark),
-                     watermark_after=fmt_watermark(wm_after), wm_after=wm_after)
-        logger.info(f"Gazette: {pages} page(s), {len(items)} proclamation(s), "
-                    f"{len(gz_findings)} finding(s); watermark -> {fmt_watermark(wm_after)}")
-        if watermark and items and pages >= max_pages and all(
-                (it["year"], it["proc_no"]) > watermark for it in items):
-            logger.warning(f"Walked {pages} pages without reaching watermark "
-                           f"{fmt_watermark(watermark)}; older items may be unreviewed.")
+        items, pages, reached, oldest = fetch_gazette(session, cutoff, args.max_pages)
+        gz_findings, scanned = evaluate_gazette(items, db_rows, seen_keys, today)
+        new_items = len([k for k in scanned if k not in seen_keys])
+        if reached:
+            new_coverage = now
+        else:
+            gz_findings.append(coverage_gap_finding(pages, len(items), cutoff))
+            logger.warning(gz_findings[-1]["note"])
+            # cover only what was actually seen; never past the oldest post
+            new_coverage = oldest if oldest is not None else coverage_ts
+        max_key = max(((it["year"], it["proc_no"]) for it in items), default=None)
+        stats.update(pages=pages, items=len(items), new_items=new_items, cutoff=cutoff.date(),
+                     scanned=scanned, coverage_ts=new_coverage, max_key=max_key)
+        logger.info(f"Gazette: {pages} page(s), {len(items)} proclamation(s), {new_items} new, "
+                    f"{len(gz_findings)} finding(s); coverage -> {new_coverage}")
 
         nager_rows = []
         for y in (today.year, today.year + 1):
             try:
                 nager_rows += fetch_nager(session, y)
-            except requests.RequestException as e:
+            except (requests.RequestException, ValueError) as e:
                 logger.warning(f"Nager.Date {y} unavailable: {e}")
         stats.update(nager_years=f"{today.year}+{today.year + 1}", nager_dates=len(nager_rows))
 
         findings = gz_findings
-        findings += evaluate_nager(nager_rows, db_rows, today, probe_reported_nager(db))
-        findings += evaluate_staleness(db_rows, today)
+        findings += evaluate_nager(nager_rows, db_rows, today,
+                                   set(d for d in probe_reported(db, "nager_only") if d))
+        stale = evaluate_staleness(db_rows, today)
+        if stale and probe_reported(db, "stale", within_days=STALE_REPEAT_DAYS):
+            logger.info("STALE already reported this week; not repeating.")
+            stale = []
+        findings += stale
 
         if not findings:
             logger.info("Nothing new in the holiday feeds; no email.")
