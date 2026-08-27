@@ -3537,3 +3537,46 @@ All three must be within limits for long-running operations to succeed.
 |--------|-------------|
 | `7ebf9d4` | Add `statement_timeout` param to `db.execute()`, set 600s for index creation, install xlsxwriter in venv |
 | `b56e049` | Remove UNLOGGED/LOGGED, fix client-side timeout passthrough via `effective_timeout` |
+
+---
+
+## 2026-08-27 — Holiday calendar with type: `reference.ref_holidays` (migration 244)
+
+**Time**: 05:49–06:00 ET
+
+**Ask**: Jamil asked whether the calendar pipeline has a table of all holidays with their type (regular vs special non-working), e.g. Aug 21 Ninoy Aquino Day = special non-working.
+
+**Finding**: No. `analytics.v_calendar_holiday` only mirrors Google Calendar (8 PH dates in 2026, no type; missing Jan 1, Holy Week, Aug 21, Aug 31, Nov 1/2, Nov 30). `scorecard.holidays` and `reference.ref_scrub_holidays` are date-only company lists (31 rows). `reference.fn_approval_deadline` (158) ignores PH holidays by design.
+
+**Built**: `swift_api_pipeline/migrations/244_ref_holidays.sql`, applied to cloud via MCP `apply_migration`.
+- `reference.ref_holidays` PK (calendar, holiday_date, holiday_type); `calendar` PH/US/ONTEL; `holiday_type` regular / special_non_working / special_working / federal / company; `is_non_working` (false only for special_working); `proclamation_ref`, `source`, `notes`. Check constraints tie type to calendar and the flag to the type. RLS on. Registered in `agent.schema_metadata`.
+- Seeded 97 rows: PH 2025 (23) + 2026 (21) from Proclamation 727 s.2024 / 1006 s.2025 plus Eid proclamations 839, 911, 1189, 1264, election day 878, INC day 729 (all verified online, weekdays cross-checked); US federal 2025-2026 (22, OPM observed dates); ONTEL company days = one-time copy of `scorecard.holidays` (31).
+- Nationwide PH days only; locality-specific special days excluded on purpose.
+
+**Not done / follow-ups**: migration file NOT committed (on main, no commit requested). Nothing consumes the table yet: candidates are `fn_approval_deadline` (payroll deadline skipping PH holidays), `fn_workdays_scrub` (replace `ref_scrub_holidays`), calendar `event_kind = holiday` enrichment, and any weekly-report expected-hours math. Eid dates and each new year need a one-block INSERT when Malacanang issues the proclamation (2027 list usually lands Aug-Oct 2026).
+
+## 2026-08-27 — Holiday proclamation watcher (migration 245 + holiday_feed_watcher.py)
+
+**Time**: 06:00–06:45 ET
+
+**Ask**: Jamil: proclamations get amended (special -> regular, dates added mid-year), so ref_holidays needs an automatic update flow.
+
+**Decision**: detect automatically, apply after human confirmation. Feeds cannot be trusted to rewrite a table that feeds payroll-deadline math; the watcher emails the proposed SQL and never writes ref_holidays.
+
+**Built**:
+- `migrations/245_ref_holidays_amendments.sql` (applied live): PK fixed to (calendar, holiday_date) (244 had holiday_type in the key, which would have let a type change insert a second row); `updated_at`, `amended_by`, `previous_type`; `reference.ref_holidays_history` + BEFORE UPDATE/DELETE trigger (auto-fills previous_type); `pipeline.holiday_watch_runs`. Trigger tested with a throwaway row (UPDATE + DELETE history rows, then purged).
+- `swift_api_pipeline/holiday_feed_watcher.py` (pure evaluators + thin probes, `--dry-run`, `--since`, `--max-pages`): walks the Official Gazette RSS newest-first to the (year, proclamation no.) watermark, parses each subject line (type: regular / special (non-working) / special (working); scope: "THROUGHOUT THE COUNTRY" vs "IN THE MUNICIPALITY/CITY/PROVINCE OF"; dates; annual list; "AMENDING PROCLAMATION NO."), diffs nationwide items against ref_holidays -> INSERT / UPDATE SQL in a plain-text email (sender mask "Pipeline Alerts", jamil only). Nager.Date cross-check for seeded years only (it publishes projected next-year dates, 19 noise items otherwise), each date reported once. Staleness check (latest PH date < 120 days ahead). Silent when nothing new. stdlib XML with a DTD/entity guard; no new deps.
+- `test_holiday_feed_watcher.py`: 12 tests, all pass. Parser also checked against 61 live Gazette items (40 locality days correctly ignored, 0 false nationwide).
+- `.github/workflows/holiday-feed-watch.yml` (Mon 22:00 UTC cron backstop + `holiday-feed-watch` dispatch + manual dry_run) and `scripts/pipeline_trigger.gs` `triggerHolidayFeedWatch()` / `setupHolidayFeedWatchTrigger()` (Mondays 6 PM EST).
+- Live dry run via the pooler: 6 pages, 41 proclamations, 0 Gazette findings, 1 Nager verify item (2026-10-31 All Saints' Day Eve: Nager carries it from 2025, Proclamation 1006 did not declare it for 2026). Watermark seeded at 1409 s.2026 via a seed run row.
+
+**Sources probed and rejected**: pco.gov.ph/feed (stale, 2019 items), Google `en.philippines#holiday` iCal (over-includes: Maulid un-Nabi, second Eid day; "Public holiday" vs "Observance" only). Official Gazette RSS is the only feed whose text carries the holiday type.
+
+**Not done**: nothing committed/pushed (all on main, uncommitted). The flow is live only after: push (cron + dispatch need the workflow on GitHub) and Jamil pastes the whole `pipeline_trigger.gs` into the nanoninth Apps Script project and runs `setupHolidayFeedWatchTrigger()` once. Local `.env` still points at the IPv6 direct host (needs WARP); the dry run used pooler env overrides.
+
+**Pre-merge review (06:45–07:10 ET, PR #52, premerge-review skill):** Lane A (code review) + Lane B (unattended-failure audit) + DB preflight + gates. Fixed before merge:
+- Watermark redesign (both lanes): the Gazette feed is ordered by publish time, not proclamation number, and numbers post out of order/late (1391 after 1392; 1404 absent while 1405-1409 were up), so a numeric watermark would skip late posts forever; and a page of EOs/AOs with no proclamations ended the walk early with the watermark still advancing. Now: `coverage_ts` + `scanned_keys` per real run (migration 246, applied live), walk back to coverage minus 21 days, stop only when a page is entirely older than the cutoff or the feed truly ends; page cap hit = "coverage gap" review finding and coverage advances only to the oldest post seen.
+- Non-RSS body (Cloudflare/maintenance HTML, other XML) now raises -> error run row + exit 1 instead of a silent "nothing new"; BOM/leading whitespace tolerated; DTD/entity guard scans the whole body.
+- Mixed-type subjects (amendment quoting the old type, two-date mixed declaration) -> review, never SQL; `special (working)` is its own type; dates outside today-365..today+730 -> review.
+- `--since` removed (a typo would have poisoned the watermark); `--lookback-days` instead. Nager non-list body ignored; Gmail send `num_retries=3`; STALE reported at most once per 6 days; cron backstop moved to Thursday so it never collides with the Monday Apps Script fire; job timeout 20 min (30 pages x 30 s worst case).
+- Tests 12 -> 21 (mocked-session `fetch_gazette` walk, non-RSS rejection, mixed types, date sanity, Nager hostile shapes). Gates: 45/45 across root watcher tests, py_compile, YAML, Apps Script parses under Node. DB preflight: RLS on all three tables, no policies/grants for anon/authenticated, no schema USAGE, trigger enabled, 3 metadata rows.

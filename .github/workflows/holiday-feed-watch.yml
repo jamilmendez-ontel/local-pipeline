@@ -1,0 +1,75 @@
+name: "Watch: Holiday Feeds"
+
+# Weekly check of the Official Gazette (new / amended PH holiday proclamations)
+# and Nager.Date against reference.ref_holidays. Emails Jamil proposed SQL;
+# never edits the table. Apps Script triggerHolidayFeedWatch() fires the
+# repository_dispatch on Mondays 6 PM ET; this cron is the backstop on a
+# different day so the two never collide (GHA cron can lag 1-2 h, harmless at
+# weekly cadence; scanned-key memory makes a second run a no-op).
+
+on:
+  schedule:
+    - cron: '0 22 * * 4'   # Thursday 22:00 UTC = 6:00 PM ET / Friday 6:00 AM PHT
+  repository_dispatch:
+    types: [holiday-feed-watch]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print findings, no email, watermark not advanced)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: holiday-feed-watch
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20   # worst case: 30 feed pages x 30 s timeout + Nager
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Watch holiday feeds
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          DRY_ARG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_ARG="--dry-run"
+          fi
+          python -u holiday_feed_watcher.py $DRY_ARG
