@@ -72,7 +72,21 @@ RECIPIENTS = ["jamil.mendez@ontel.co"]
 GAZETTE_FEED = "https://www.officialgazette.gov.ph/feed/"
 NAGER_URL = "https://date.nager.at/api/v3/PublicHolidays/{year}/PH"
 HTTP_TIMEOUT = 30
-USER_AGENT = "Mozilla/5.0 (compatible; ontel-holiday-feed-watcher/1.0)"
+# A plain browser UA: the Gazette's WAF returned 403 to a self-identifying bot UA from
+# the GitHub runner on the first dispatched run (2026-08-27) while the same UA worked
+# from a residential IP.
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/128.0.0.0 Safari/537.36")
+BOT_USER_AGENT = "Mozilla/5.0 (compatible; ontel-holiday-feed-watcher/1.0)"
+PROBE_URLS = [
+    GAZETTE_FEED,
+    GAZETTE_FEED + "?paged=2",
+    "https://www.officialgazette.gov.ph/?feed=rss2",
+    "https://www.officialgazette.gov.ph/",
+    "https://pco.gov.ph/news_releases/feed/",
+    "https://lawphil.net/executive/proc/proc2026/proc2026.html",
+    NAGER_URL.format(year=2026),
+]
 DEFAULT_LOOKBACK_DAYS = 30  # first run / no coverage yet: how far back to look
 SLACK_DAYS = 21             # re-walk this far behind the last coverage point
 DEFAULT_MAX_PAGES = 30      # ~10 posts per page; 30 pages ~ 3 months of Gazette output
@@ -399,10 +413,37 @@ def build_email_body(findings, checked_at, stats):
 # Probes (thin; network + DB)
 # ---------------------------------------------------------------------------
 
-def make_session():
+def make_session(user_agent=USER_AGENT):
     s = requests.Session()
-    s.headers["User-Agent"] = USER_AGENT
+    s.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/html;q=0.8, */*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
     return s
+
+
+def probe_sources():
+    """--probe: print status + body head for each candidate source under both
+    user agents. No DB, no email. Used to diagnose runner-side blocking."""
+    for ua_name, ua in (("browser", USER_AGENT), ("bot", BOT_USER_AGENT)):
+        s = make_session(ua)
+        for url in PROBE_URLS:
+            try:
+                r = s.get(url, timeout=HTTP_TIMEOUT)
+                head = _clean(r.text[:120])
+                print(f"[{ua_name}] {r.status_code} {url}  server={r.headers.get('server', '?')} "
+                      f"cf-ray={r.headers.get('cf-ray', '-')}  {head}")
+            except requests.RequestException as e:
+                print(f"[{ua_name}] EXC {url}  {e}")
+
+
+def _raise_for_status(resp, url):
+    if resp.status_code >= 400:
+        raise requests.HTTPError(
+            f"{resp.status_code} for {url}: server={resp.headers.get('server', '?')} "
+            f"cf-ray={resp.headers.get('cf-ray', '-')} body={_clean(resp.text[:200])!r}",
+            response=resp)
 
 
 def fetch_gazette(session, cutoff, max_pages):
@@ -420,7 +461,7 @@ def fetch_gazette(session, cutoff, max_pages):
         if resp.status_code == 404:      # past the last page
             reached = True
             break
-        resp.raise_for_status()
+        _raise_for_status(resp, url)
         page_items, raw_pubs = parse_feed_page(resp.text)
         pages += 1
         if not raw_pubs:                 # true end of the feed
@@ -526,7 +567,12 @@ def main():
                         help="walk back this many days instead of the recorded coverage")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
                         help=f"feed pages to walk at most (default {DEFAULT_MAX_PAGES})")
+    parser.add_argument("--probe", action="store_true",
+                        help="print HTTP status of every candidate source; no DB, no email")
     args = parser.parse_args()
+    if args.probe:
+        probe_sources()
+        return 0
 
     now = datetime.now(timezone.utc)
     today = now.astimezone(ZoneInfo("Asia/Manila")).date()
