@@ -135,6 +135,55 @@ function setupTimerTrigger() {
 }
 
 /**
+ * Target time (project timezone, ET) for the daily Timer EMAILS run:
+ * ~6:00 AM ET = 18:00 PHT (19:00 PHT while ET is on standard time), the
+ * members' shift start. This is run 2 of 2 for timer data: it re-extracts so
+ * stops that reached Swift late (hours after the shift; 3 cases in Aug 2026)
+ * are settled, then sends the member-facing emails (--remind / --send /
+ * --resend). Run 1 (triggerLightPipelines, ~1:15 AM ET) is data + Excel
+ * exports only since 2026-08-28.
+ *
+ * DIFFERENT dispatch type from 'pipeline-timer' on purpose: the two runs must
+ * never be fired by the same trigger.
+ */
+var TIMER_EMAILS_HOUR = 6;
+var TIMER_EMAILS_MINUTE = 0;
+
+function triggerTimerEmails() {
+  fireDispatch_('pipeline-timer-emails');
+}
+
+/**
+ * Idempotently (re)create the daily time-driven trigger for
+ * triggerTimerEmails() at ~6:00 AM ET. RUN THIS ONCE from the Apps Script
+ * editor after deploying this file (and again after editing
+ * TIMER_EMAILS_HOUR/MINUTE); it deletes any existing trigger on the same
+ * handler first, so re-running is safe.
+ *
+ * NOTE: atHour() fires in the project's time zone (America/New_York), so the
+ * PHT arrival time shifts by an hour with US DST. Accepted 2026-08-28.
+ */
+function setupTimerEmailsTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerTimerEmails') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerTimerEmails')
+    .timeBased()
+    .everyDays(1)
+    .atHour(TIMER_EMAILS_HOUR)
+    .nearMinute(TIMER_EMAILS_MINUTE)
+    .create();
+
+  Logger.log('Created triggerTimerEmails trigger at ~' +
+             TIMER_EMAILS_HOUR + ':' + (TIMER_EMAILS_MINUTE < 10 ? '0' : '') + TIMER_EMAILS_MINUTE +
+             ' ET daily (18:00 PHT in summer).');
+}
+
+/**
  * Trigger the daily QA Forms pipeline.
  * Schedule this at 12:17 AM EST daily (its own time-driven trigger).
  *
@@ -644,6 +693,8 @@ function scheduleTokenRotationReminder() {
  * Run this once after setup to confirm everything works.
  * Deliberately EXCLUDES triggerAssetTasksIncFullWalk: that dispatch starts a
  * ~2-3h full walk + a ~6-9 GB audit — fire it manually only when you mean it.
+ * Also EXCLUDES triggerTimerEmails: that dispatch emails every member their
+ * daily timer entries (and re-sends the day if it already went out).
  */
 function testAllDispatches() {
   fireDispatch_('pipeline-orgs');

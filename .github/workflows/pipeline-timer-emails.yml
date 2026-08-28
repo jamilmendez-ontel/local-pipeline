@@ -1,0 +1,150 @@
+name: "Pipeline: Timer Emails"
+
+# Run 2 of 2 for timer data (~6:00 AM ET / 18:00 PHT, members' shift start).
+# Re-extracts the month-to-date so stops that reached Swift late (hours after
+# the shift ended; 3 cases in Aug 2026, e.g. a 18:13 ET stop that only showed
+# up after 01:27 ET) are settled BEFORE the member emails go out, then sends
+# the member-facing emails: duplicate reminders, the daily Timer Entries email
+# and the threaded re-sends. No Excel exports here: those stay on
+# pipeline-timer.yml (~1:15 AM ET) because Sheena's report is built from the
+# 13:15 PHT clean export.
+#
+# Dispatched by scripts/pipeline_trigger.gs -> triggerTimerEmails() via the
+# `pipeline-timer-emails` repository_dispatch type. Deliberately a DIFFERENT
+# event type from `pipeline-timer` so the two runs can never be fired by the
+# same trigger.
+#
+# NOTE: `--send` upserts app_timer.daily_notifications ON CONFLICT DO UPDATE
+# and will re-send the day if run twice. Do not add a retry loop around the
+# email steps, and do not workflow_dispatch this after a successful run on
+# the same day unless a second send is intended.
+
+on:
+  repository_dispatch:
+    types: [pipeline-timer-emails]
+  workflow_dispatch:
+
+concurrency:
+  # Same group as pipeline-timer.yml and timer-correction-apply.yml: this run
+  # reloads stg_timer_activities and rebuilds the clean table, so it must
+  # never overlap either of them. Queue, don't cancel.
+  group: pipeline-timer
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  timer-emails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode notifier credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+          echo "${{ secrets.SHEETS_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_token.pickle
+
+      # Second extract of the day. --email-on-failure-only: the 1:15 AM run
+      # already sends the routine success email; a second green email per day
+      # is noise, a red one still matters.
+      - name: Run timer pipeline (with retry)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline timer --email-on-failure-only || {
+            echo "Timer failed, retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline timer --email-on-failure-only
+          }
+
+      # Same reason as in pipeline-timer.yml: the transform re-inserts the
+      # month bucket without asset_did, so re-fill it before the clean rebuild.
+      - name: Run backfill (asset_did) after the timer reload
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u main.py --pipeline backfill --no-email || {
+            echo "Backfill failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline backfill --no-email
+          }
+
+      # Applies any form responses that arrived since 1:15 AM and rebuilds
+      # stg_timer_activities_clean from the fresh extract. The email steps
+      # below read staging/clean, so this must succeed first: if it fails, the
+      # job stops here and no member email goes out on stale data.
+      - name: Timer corrections - apply pending + rebuild clean
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u timer_correction_review.py --apply || {
+            echo "Apply failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u timer_correction_review.py --apply
+          }
+
+      - name: Refresh analytics MVs (after the timer reload)
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        run: |
+          python -u main.py --pipeline analytics --no-email || {
+            echo "Analytics refresh failed (often a transient pooler cap), retrying after 2 minutes..."
+            sleep 120
+            python -u main.py --pipeline analytics --no-email
+          }
+
+      - name: Timer corrections - remind duplicates
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        # Remind runs BEFORE send so it only covers previous days' duplicates.
+        # Gated in code to once per 20 hours per group.
+        run: python -u timer_correction_review.py --remind
+
+      - name: Timer corrections - send daily entries
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        # Target date = yesterday (ET) = the shift that ended ~12h ago.
+        run: python -u timer_correction_review.py --send
+
+      - name: Timer corrections - resend changed days
+        working-directory: ${{ env.PIPELINE_DIR }}
+        continue-on-error: true
+        # Runs after --send so today's snapshot is fresh. Threaded re-sends
+        # fire for prior days in the lookback window whose entry set has
+        # new IDs (NULL-end timers that materialized, manual additions).
+        run: python -u timer_correction_review.py --resend
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timer-emails-logs
+          path: '${{ env.PIPELINE_DIR }}/pipeline_logs/*.log'
+          retention-days: 7

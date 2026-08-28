@@ -977,10 +977,12 @@ def _build_running_notice_html(running: list[dict], now=None,
         f'<p style="margin:0 0 6px;font-weight:bold;color:#e65100;">{title}</p>'
         f'<ul style="margin:0 0 8px;padding-left:20px;line-height:1.5;">{"".join(items)}</ul>'
         '<p style="margin:0;line-height:1.5;">'
-        'If you are not actually working on it, please open the task in Swift and stop '
-        'the timer now. Running timers are not listed in the table below. Once the timer '
-        'has an end time, the completed entry will arrive as a follow-up on this same '
-        'email thread and you can fix or delete it from there.</p>'
+        'If you already stopped this timer, no action is needed: Swift sometimes records '
+        'the stop late and the completed entry will arrive on this thread automatically. '
+        'If it is really still running and you are not working on it, please open the '
+        'task in Swift and stop it now. Running timers are not listed in the table below. '
+        'Once the timer has an end time, the completed entry will arrive as a follow-up '
+        'on this same email thread and you can fix or delete it from there.</p>'
         '</div>'
     )
 

@@ -31,7 +31,8 @@ Script time-driven triggers under the notifier account. See
 | Workflow | Trigger | What it refreshes |
 |---|---|---|
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
-| `pipeline-timer.yml` | Nightly Apps Script | `stg_timer_activities` + `stg_timer_corrections` apply + clean rebuild |
+| `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | Run 1 of 2: `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + corrections apply + clean rebuild + MV refresh. **No member emails** since 2026-08-28 |
+| `pipeline-timer-emails.yml` | Apps Script ~6:00 AM ET (18:00 PHT, `triggerTimerEmails`) | Run 2 of 2: re-extract + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`). Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
@@ -98,6 +99,25 @@ timer data that lands at 04:21). Do not remove either step, and do not rely on
 asset-tasks' backfill for timer rows. The durable fix is to populate `asset_did`
 during the transform's INSERT so no ordering dependency exists at all; until then
 these two steps are what keep the current month priced.
+
+**Timer data runs twice a day; member emails only on the second run (since 2026-08-28).**
+A stop pressed in the Swift app can reach Swift's report data hours later (three
+cases in Aug 2026, e.g. an 18:13 ET stop that was still NULL at the 01:19 ET
+extract and only appeared after 01:27 ET). With extract and send 9 minutes apart,
+the daily email flagged such timers as "still running" and the hours were short
+until the next night. The fix is scheduling, not code: `pipeline-timer.yml`
+(~1:15 AM ET / 13:15 PHT) is now data + exports only, and the new
+`pipeline-timer-emails.yml` (~6:00 AM ET / 18:00 PHT, members' shift start)
+re-extracts first and then runs `--remind` / `--send` / `--resend`, giving late
+stops ~12 hours to land. The two workflows use different `repository_dispatch`
+types (`pipeline-timer` vs `pipeline-timer-emails`, both from
+`scripts/pipeline_trigger.gs`) and share the `pipeline-timer` concurrency group
+with `timer-correction-apply.yml` so no two of them ever overlap. Cost: one more
+raw snapshot per day (~7 MB); staging/clean are replaced in place. Nothing in the
+timer pipeline compares one run to the previous one (the `>10%` drop baseline is
+asset-tasks only), so the second run is safe. Known property: `--send` upserts
+`daily_notifications` and re-sends if run twice on the same day, so the emails
+run has no retry loop around the send steps.
 
 ### Incremental asset-tasks shadow (pilot, 2026-07)
 
