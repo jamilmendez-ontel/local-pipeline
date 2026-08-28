@@ -367,6 +367,12 @@ class DailyReportsPipeline:
                     f" req_count, milestone, submitted_by, submitted_on, approved_by, approved_on, assigned_approver, run_id) "
                     f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid) "
                     f"ON CONFLICT (task_did) DO UPDATE SET "
+                    # asset_name/emp_id come from the asset's live Swift shortName
+                    # ("FullName_<emp_id>"); refreshing them on conflict is what
+                    # carries a Swift rename (e.g. a married surname) into rows
+                    # that already exist. Before 2026-08-28 only status fields
+                    # were updated, so pre-created tasks kept the old name forever.
+                    f"asset_name=EXCLUDED.asset_name, emp_id=EXCLUDED.emp_id, "
                     f"task_status=EXCLUDED.task_status, req_count=EXCLUDED.req_count, "
                     f"submitted_by=EXCLUDED.submitted_by, submitted_on=EXCLUDED.submitted_on, "
                     f"approved_by=EXCLUDED.approved_by, approved_on=EXCLUDED.approved_on, "
@@ -375,11 +381,13 @@ class DailyReportsPipeline:
                     # Skip no-op rewrites: unconditionally bumping run_id/loaded_at
                     # rewrote all ~46k window rows every 5-min run (WAL + autovacuum
                     # churn that depleted the Supabase Disk IO budget, 2026-07-09).
-                    f"WHERE (stg_daily_reports.task_status, stg_daily_reports.req_count, "
+                    f"WHERE (stg_daily_reports.asset_name, stg_daily_reports.emp_id, "
+                    f" stg_daily_reports.task_status, stg_daily_reports.req_count, "
                     f" stg_daily_reports.submitted_by, stg_daily_reports.submitted_on, "
                     f" stg_daily_reports.approved_by, stg_daily_reports.approved_on, "
                     f" stg_daily_reports.assigned_approver) IS DISTINCT FROM "
-                    f"(EXCLUDED.task_status, EXCLUDED.req_count, EXCLUDED.submitted_by, "
+                    f"(EXCLUDED.asset_name, EXCLUDED.emp_id, "
+                    f" EXCLUDED.task_status, EXCLUDED.req_count, EXCLUDED.submitted_by, "
                     f" EXCLUDED.submitted_on, EXCLUDED.approved_by, EXCLUDED.approved_on, "
                     f" EXCLUDED.assigned_approver)",
                     c,
