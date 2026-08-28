@@ -1,5 +1,9 @@
 name: "Pipeline: Timer"
 
+# Run 1 of 2 for timer data (~1:15 AM ET / 13:15 PHT): extract, backfill,
+# Excel exports (raw + clean, Drive + email), corrections apply + clean
+# rebuild, MV refresh. Member emails live in pipeline-timer-emails.yml.
+
 on:
   repository_dispatch:
     types: [pipeline-timer]
@@ -154,27 +158,11 @@ jobs:
         continue-on-error: true
         run: python -u upload_to_shared_drive.py --export timer-clean
 
-      - name: Timer corrections - remind duplicates
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        # Remind runs BEFORE send so it only covers previous days' duplicates
-        run: python -u timer_correction_review.py --remind
-
-      - name: Timer corrections - send daily entries
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        run: python -u timer_correction_review.py --send
-
-      - name: Timer corrections - resend changed days
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        # Runs after --send so today's snapshot is fresh. Threaded re-sends
-        # fire for prior days in the lookback window whose entry set has
-        # new IDs (NULL-end timers that materialized, manual additions).
-        # Re-enabled 2026-05-22 after the stable-resend-key fix + snapshot
-        # rebase. Compare-against-pre-stored-snapshot now uses a hash that
-        # ignores NUMERIC duration_min precision tails.
-        run: python -u timer_correction_review.py --resend
+      # Member-facing emails (--remind / --send / --resend) moved to
+      # pipeline-timer-emails.yml (~6:00 AM ET / 18:00 PHT, 2026-08-28). That
+      # run re-extracts first so stops that reach Swift late (hours after the
+      # shift, seen 3x in Aug 2026) are settled before anyone is emailed. This
+      # run is data + exports only. Do NOT add the send steps back here.
 
       # Turn a silently-skipped clean export into a red run + email alert.
       # The export step is continue-on-error, so without this a transient
