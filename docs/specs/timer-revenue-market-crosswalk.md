@@ -116,3 +116,15 @@ yet identified. Open item before phase 2.
   RLS deny-all per DATABASE_ARCHITECTURE.md.
 - Rate sheet churn: `ref_task_revenue_rates` refreshes must not orphan bucket names
   (crosswalk buckets FK-able to a distinct list if desired).
+
+## 2026-08-27 — Viaero market added (migrations 247 + 248)
+
+Viaero (paths `<GC>/TSC/Viaero/<market>/<tech>/...`, 309 assets, active again Aug 2026) was
+in the EXCLUDED/legacy residue because `market_signature()` had no `Viaero` anchor (NULL
+signature, never even seeded). 247 cloned the VZW Small Cell rate card under
+`market_bucket='Viaero'` (Jamil: same rate card); 248 added `Viaero` to the anchor regex and a
+`'Viaero'` rule to `seed_new_market_signatures()`, then seeded 5 signatures. 15 buckets now.
+`gap_report.*` keeps its own classifier and rate card and is NOT ours to change.
+HR grouping: migration 249 adds `Viaero -> Verizon` to `reference.ref_carrier_groups`
+(match_order 11) and backfills `stg_assets.carrier_group` (309 assets), since Jamil treats Viaero
+as VZW Small Cell.

@@ -367,9 +367,12 @@ Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 244-246 `reference.ref_holidays` (+ history
-trigger, `pipeline.holiday_watch_runs` with publish-time coverage), see the holiday
-calendar section above; 243 Weekly PMI tracker; 242 `analytics.member_weekly_task_mix(p_from
+migrations/` for recent changes. Latest: 247-249 Viaero market (rate rows cloned from
+VZW Small Cell in `reference.ref_task_revenue_rates`; `Viaero` anchor + rule in
+`reference.market_signature()` / `seed_new_market_signatures()`, 15 buckets; `Viaero` ->
+`Verizon` row in `reference.ref_carrier_groups` + stg_assets backfill); 244-246
+`reference.ref_holidays` (+ history trigger, `pipeline.holiday_watch_runs` with publish-time
+coverage), see the holiday calendar section above; 243 Weekly PMI tracker; 242 `analytics.member_weekly_task_mix(p_from
 date, p_to date)`, a set-returning function: completed-timer minutes per (member
 email, ET ISO week start, task-type bucket) with single timers over 12h excluded
 (runaway rule), one aggregate call for the ontel-people per-member weekly Timer &
