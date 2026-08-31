@@ -367,7 +367,9 @@ Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 247-249 Viaero market (rate rows cloned from
+migrations/` for recent changes. Latest: 250 `reference.ref_pmi_clusters.source_sheet_id`
+(lets a PMI market be sourced from a Google Sheet instead of the pending + failing
+xlsx pair; NULL keeps the xlsx path, WBV is seeded); 247-249 Viaero market (rate rows cloned from
 VZW Small Cell in `reference.ref_task_revenue_rates`; `Viaero` anchor + rule in
 `reference.market_signature()` / `seed_new_market_signatures()`, 15 buckets; `Viaero` ->
 `Verizon` row in `reference.ref_carrier_groups` + stg_assets backfill); 244-246
