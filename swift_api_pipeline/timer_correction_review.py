@@ -1592,6 +1592,132 @@ def _end_dur_match(end_a, dur_a, end_b, dur_b):
     return True
 
 
+def _pick_shortest(pool):
+    """Shortest non-zero-duration snapshot; zero/None durations only as a last resort."""
+    nonzero = [e for e in pool if float(e.get("duration_min") or 0) > 0]
+    candidates = nonzero or pool
+    return min(candidates, key=lambda e: float(e.get("duration_min") or 0))
+
+
+def _fallback_after_survivor_removal(db, entry: dict, now: datetime):
+    """Member removed the SURVIVING entry of an already-resolved duplicate group.
+
+    Rule (Jamil 2026-08-31): only member removals are final; a system pick is
+    always provisional. Fall back to the shortest sibling the member never
+    removed personally, reviving its system-made 'auto_resolved_sibling'
+    removal when one exists. The group reaches zero only when the member has
+    removed every copy with their own clicks.
+    """
+    review = retry_db(
+        lambda: db.fetchrow(
+            f"""SELECT * FROM {SCHEMA_TIMER}.duplicate_reviews
+                WHERE status IN ('resolved', 'auto_resolved')
+                  AND project_did = $1
+                  AND user_email = $2
+                  AND start_time = $3
+                  AND site_name IS NOT DISTINCT FROM $4
+                  AND site_id IS NOT DISTINCT FROM $5
+                  AND task IS NOT DISTINCT FROM $6
+                ORDER BY resolved_at DESC NULLS LAST
+                LIMIT 1
+            """,
+            entry["project_did"], entry["user_email"], entry["start_time"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+        ),
+        description="check resolved duplicate group for survivor fallback",
+    )
+    if not review or not review["selected_entry"]:
+        return
+
+    entries = review["entries"] if isinstance(review["entries"], list) else json.loads(review["entries"])
+    matched = next((e for e in entries
+                    if _end_dur_match(e.get("end_time"), e.get("duration_min"),
+                                      entry.get("end_time"), entry.get("duration_min"))), None)
+    if not matched or matched["label"] != review["selected_entry"]:
+        return  # an already-excluded copy, nothing to re-arbitrate
+
+    removal_rows = retry_db(
+        lambda: db.fetch(
+            f"""SELECT end_time, duration_min, reason
+                FROM {SCHEMA_TIMER}.entry_removals
+                WHERE project_did = $1
+                  AND user_email = $2
+                  AND site_name IS NOT DISTINCT FROM $3
+                  AND site_id IS NOT DISTINCT FROM $4
+                  AND task IS NOT DISTINCT FROM $5
+                  AND reason IS DISTINCT FROM 'REVERTED'
+            """,
+            entry["project_did"], entry["user_email"],
+            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+        ),
+        description="fetch removals for survivor fallback",
+    )
+
+    def _removals_for(e):
+        return [rm for rm in removal_rows
+                if _end_dur_match(e.get("end_time"), e.get("duration_min"),
+                                  rm["end_time"], rm["duration_min"])]
+
+    def _member_removed(e):
+        return any(rm["reason"] != "auto_resolved_sibling" for rm in _removals_for(e))
+
+    eligible = [e for e in entries
+                if e["label"] != matched["label"] and not _member_removed(e)]
+    if not eligible:
+        return  # the member removed every copy personally; zero stands
+
+    new = _pick_shortest(eligible)
+    rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
+                for e in entries if e["label"] != new["label"]]
+
+    if _removals_for(new):
+        # ONE statement: reviving the sibling's auto removal and re-pointing the
+        # review must be atomic. A crash between two separate writes leaves the
+        # group permanently zeroed with nothing to replay the fallback (the
+        # member's response is an exact GSheet duplicate on the next --apply).
+        new_end = _norm_end_dt(new.get("end_time"))
+        retry_db(
+            lambda sel=new["label"], rej=rejected, et=new_end, dur=new.get("duration_min"): db.execute(
+                f"""WITH revive AS (
+                        UPDATE {SCHEMA_TIMER}.entry_removals
+                        SET reason = 'REVERTED', updated_at = $3
+                        WHERE project_did = $5 AND user_email = $6
+                          AND site_name IS NOT DISTINCT FROM $7
+                          AND site_id IS NOT DISTINCT FROM $8
+                          AND task IS NOT DISTINCT FROM $9
+                          AND end_time IS NOT DISTINCT FROM $10
+                          AND duration_min IS NOT DISTINCT FROM $11
+                          AND reason = 'auto_resolved_sibling'
+                    )
+                    UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET selected_entry = $1, rejected_entries = $2,
+                        resolved_by = 'survivor_fallback', updated_at = $3
+                    WHERE group_id = $4
+                """,
+                sel, rej, now, review["group_id"],
+                entry["project_did"], entry["user_email"],
+                entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+                et, dur,
+            ),
+            description=f"atomically revive {new['label']} + re-select for group {review['group_id']}",
+        )
+    else:
+        retry_db(
+            lambda sel=new["label"], rej=rejected: db.execute(
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET selected_entry = $1, rejected_entries = $2,
+                        resolved_by = 'survivor_fallback', updated_at = $3
+                    WHERE group_id = $4
+                """,
+                sel, rej, now, review["group_id"],
+            ),
+            description=f"fallback re-select {new['label']} for group {review['group_id']}",
+        )
+    logger.info(f"Survivor removed in resolved duplicate group {review['group_id']}: "
+                f"fell back to {new['label']} ({new.get('duration_min')} min); "
+                f"zero only when every copy is member-removed")
+
+
 def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     """If the entry belongs to an unresolved duplicate group, auto-resolve it.
 
@@ -1603,6 +1729,9 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     (czarina 2026-08-17: picking by latest end_time auto-removed the 2.07h
     real session and kept an 11.07h runaway; 8 groups went to zero that way).
     A group whose entries are all removed resolves with no survivor.
+    Removing the survivor of an ALREADY-RESOLVED group falls back to the
+    shortest sibling the member never removed (see
+    _fallback_after_survivor_removal); zero requires member clicks on every copy.
     """
     review = retry_db(
         lambda: db.fetchrow(
@@ -1622,6 +1751,8 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     )
 
     if not review:
+        if action == "remove":
+            _fallback_after_survivor_removal(db, entry, now)
         return
 
     group_id = review["group_id"]
@@ -1671,15 +1802,8 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         alive = [e for e in remaining if not _already_removed(e)]
         if not alive:
             selected_label = None
-        elif len(alive) == 1:
-            selected_label = alive[0]["label"]
         else:
-            # Shortest non-zero duration wins; zero/None-duration snapshots
-            # only as a last resort.
-            nonzero = [e for e in alive if float(e.get("duration_min") or 0) > 0]
-            pool = nonzero or alive
-            best = min(pool, key=lambda e: float(e.get("duration_min") or 0))
-            selected_label = best["label"]
+            selected_label = _pick_shortest(alive)["label"]
         rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
                      for e in entries if e["label"] != selected_label]
     else:
