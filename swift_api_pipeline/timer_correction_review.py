@@ -1667,41 +1667,52 @@ def _fallback_after_survivor_removal(db, entry: dict, now: datetime):
         return  # the member removed every copy personally; zero stands
 
     new = _pick_shortest(eligible)
+    rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
+                for e in entries if e["label"] != new["label"]]
 
     if _removals_for(new):
+        # ONE statement: reviving the sibling's auto removal and re-pointing the
+        # review must be atomic. A crash between two separate writes leaves the
+        # group permanently zeroed with nothing to replay the fallback (the
+        # member's response is an exact GSheet duplicate on the next --apply).
         new_end = _norm_end_dt(new.get("end_time"))
         retry_db(
-            lambda et=new_end, dur=new.get("duration_min"): db.execute(
-                f"""UPDATE {SCHEMA_TIMER}.entry_removals
-                    SET reason = 'REVERTED', updated_at = $1
-                    WHERE project_did = $2 AND user_email = $3
-                      AND site_name IS NOT DISTINCT FROM $4
-                      AND site_id IS NOT DISTINCT FROM $5
-                      AND task IS NOT DISTINCT FROM $6
-                      AND end_time IS NOT DISTINCT FROM $7
-                      AND duration_min IS NOT DISTINCT FROM $8
-                      AND reason = 'auto_resolved_sibling'
+            lambda sel=new["label"], rej=rejected, et=new_end, dur=new.get("duration_min"): db.execute(
+                f"""WITH revive AS (
+                        UPDATE {SCHEMA_TIMER}.entry_removals
+                        SET reason = 'REVERTED', updated_at = $3
+                        WHERE project_did = $5 AND user_email = $6
+                          AND site_name IS NOT DISTINCT FROM $7
+                          AND site_id IS NOT DISTINCT FROM $8
+                          AND task IS NOT DISTINCT FROM $9
+                          AND end_time IS NOT DISTINCT FROM $10
+                          AND duration_min IS NOT DISTINCT FROM $11
+                          AND reason = 'auto_resolved_sibling'
+                    )
+                    UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET selected_entry = $1, rejected_entries = $2,
+                        resolved_by = 'survivor_fallback', updated_at = $3
+                    WHERE group_id = $4
                 """,
-                now, entry["project_did"], entry["user_email"],
+                sel, rej, now, review["group_id"],
+                entry["project_did"], entry["user_email"],
                 entry.get("site_name"), entry.get("site_id"), entry.get("task"),
                 et, dur,
             ),
-            description=f"revert auto removal for fallback survivor {new['label']}",
+            description=f"atomically revive {new['label']} + re-select for group {review['group_id']}",
         )
-
-    rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
-                for e in entries if e["label"] != new["label"]]
-    retry_db(
-        lambda sel=new["label"], rej=rejected: db.execute(
-            f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
-                SET selected_entry = $1, rejected_entries = $2,
-                    resolved_by = 'survivor_fallback', updated_at = $3
-                WHERE group_id = $4
-            """,
-            sel, rej, now, review["group_id"],
-        ),
-        description=f"fallback re-select {new['label']} for group {review['group_id']}",
-    )
+    else:
+        retry_db(
+            lambda sel=new["label"], rej=rejected: db.execute(
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET selected_entry = $1, rejected_entries = $2,
+                        resolved_by = 'survivor_fallback', updated_at = $3
+                    WHERE group_id = $4
+                """,
+                sel, rej, now, review["group_id"],
+            ),
+            description=f"fallback re-select {new['label']} for group {review['group_id']}",
+        )
     logger.info(f"Survivor removed in resolved duplicate group {review['group_id']}: "
                 f"fell back to {new['label']} ({new.get('duration_min')} min); "
                 f"zero only when every copy is member-removed")

@@ -183,6 +183,10 @@ def test_removing_the_survivor_falls_back_to_the_system_removed_sibling():
     assert selected == "C", f"fallback must revive the untouched sibling, got {selected!r}"
     assert {r["duration_min"] for r in rejected} == {DUR_A, DUR_B}
     assert len(_reverted_removal_calls(db)) == 1, "C's auto removal must be reverted"
+    # Atomicity: the revive and the review re-point must travel in ONE statement,
+    # or a crash between them leaves a permanently zeroed group (nothing replays
+    # the fallback: the member's response is then an exact GSheet duplicate).
+    assert len(db.executed) == 1, "revive + review re-point must be a single atomic statement"
 
 
 def test_no_fallback_when_every_sibling_was_member_removed():
