@@ -1566,12 +1566,43 @@ def lookup_entry_by_id(db, entry_id: str, hash_map: dict[str, dict] | None = Non
     return dict(row) if row else None
 
 
+def _norm_end_dt(value):
+    """Normalize an end_time (ISO string or datetime, possibly naive) to aware UTC."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return None
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _end_dur_match(end_a, dur_a, end_b, dur_b):
+    """True when two (end_time, duration_min) pairs identify the same snapshot."""
+    ea, eb = _norm_end_dt(end_a), _norm_end_dt(end_b)
+    if (ea is None) != (eb is None):
+        return False
+    if ea is not None and ea != eb:
+        return False
+    if (dur_a is None) != (dur_b is None):
+        return False
+    if dur_a is not None and float(dur_a) != float(dur_b):
+        return False
+    return True
+
+
 def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     """If the entry belongs to an unresolved duplicate group, auto-resolve it.
 
     For corrections: corrected entry is kept, others rejected.
-    For removals: removed entry is rejected, others kept (if only 2 in group,
-    the remaining one is the selected entry).
+    For removals: removed entry is rejected; the survivor is the SHORTEST
+    remaining non-zero snapshot that is not already covered by an active
+    removal. Same-start duplicate snapshots are drifted copies of one timer,
+    so the latest/longest copy is the runaway one, never the real session
+    (czarina 2026-08-17: picking by latest end_time auto-removed the 2.07h
+    real session and kept an 11.07h runaway; 8 groups went to zero that way).
+    A group whose entries are all removed resolves with no survivor.
     """
     review = retry_db(
         lambda: db.fetchrow(
@@ -1602,39 +1633,7 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     matched_label = None
 
     for e in entries:
-        e_end = e.get("end_time")
-        e_dur = e.get("duration_min")
-
-        # Compare end_time
-        if e_end is not None and entry_end is not None:
-            if isinstance(e_end, str):
-                try:
-                    e_end_dt = datetime.fromisoformat(e_end)
-                except (ValueError, TypeError):
-                    e_end_dt = None
-            else:
-                e_end_dt = e_end
-            if entry_end.tzinfo is None:
-                entry_end_cmp = entry_end.replace(tzinfo=timezone.utc)
-            else:
-                entry_end_cmp = entry_end
-            if e_end_dt and e_end_dt.tzinfo is None:
-                e_end_dt = e_end_dt.replace(tzinfo=timezone.utc)
-            end_match = e_end_dt == entry_end_cmp if e_end_dt else False
-        elif e_end is None and entry_end is None:
-            end_match = True
-        else:
-            end_match = False
-
-        # Compare duration_min
-        if e_dur is not None and entry_dur is not None:
-            dur_match = float(e_dur) == float(entry_dur)
-        elif e_dur is None and entry_dur is None:
-            dur_match = True
-        else:
-            dur_match = False
-
-        if end_match and dur_match:
+        if _end_dur_match(e.get("end_time"), e.get("duration_min"), entry_end, entry_dur):
             matched_label = e["label"]
             break
 
@@ -1643,14 +1642,43 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         return
 
     if action == "remove":
-        # Remove = reject this entry, keep the others
-        # If only 2 entries, the other one becomes selected
+        # Remove = reject this entry; survive the shortest snapshot still alive.
+        # An entry already covered by an active (non-REVERTED) removal must
+        # never be picked as survivor: selecting it silently zeroes the group.
+        removal_rows = retry_db(
+            lambda: db.fetch(
+                f"""SELECT end_time, duration_min
+                    FROM {SCHEMA_TIMER}.entry_removals
+                    WHERE project_did = $1
+                      AND user_email = $2
+                      AND site_name IS NOT DISTINCT FROM $3
+                      AND site_id IS NOT DISTINCT FROM $4
+                      AND task IS NOT DISTINCT FROM $5
+                      AND reason IS DISTINCT FROM 'REVERTED'
+                """,
+                entry["project_did"], entry["user_email"],
+                entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+            ),
+            description=f"fetch active removals for duplicate group {group_id}",
+        )
+
+        def _already_removed(e):
+            return any(_end_dur_match(e.get("end_time"), e.get("duration_min"),
+                                      rm["end_time"], rm["duration_min"])
+                       for rm in removal_rows)
+
         remaining = [e for e in entries if e["label"] != matched_label]
-        if len(remaining) == 1:
-            selected_label = remaining[0]["label"]
+        alive = [e for e in remaining if not _already_removed(e)]
+        if not alive:
+            selected_label = None
+        elif len(alive) == 1:
+            selected_label = alive[0]["label"]
         else:
-            # Multiple remaining — keep latest end_time
-            best = max(remaining, key=lambda e: e.get("end_time") or "")
+            # Shortest non-zero duration wins; zero/None-duration snapshots
+            # only as a last resort.
+            nonzero = [e for e in alive if float(e.get("duration_min") or 0) > 0]
+            pool = nonzero or alive
+            best = min(pool, key=lambda e: float(e.get("duration_min") or 0))
             selected_label = best["label"]
         rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
                      for e in entries if e["label"] != selected_label]
@@ -1709,7 +1737,8 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         ),
         description=f"auto-resolve duplicate {group_id} via {action}",
     )
-    logger.info(f"Auto-resolved duplicate group {group_id} via {action}: kept {selected_label}, "
+    logger.info(f"Auto-resolved duplicate group {group_id} via {action}: "
+                f"kept {selected_label or 'no survivor (all entries removed)'}, "
                 f"rejected {len(rejected)} others")
 
 

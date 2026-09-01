@@ -367,7 +367,10 @@ Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 250 `reference.ref_pmi_clusters.source_sheet_id`
+migrations/` for recent changes. Latest: 251 duplicate-survivor-bug restore (reverts the
+14 `auto_resolved_sibling` removals the latest-end survivor pick wrote in zeroed
+duplicate groups and re-points each review at the restored snapshot; applied live
+2026-08-31, ~40.9h returned to `stg_timer_activities_clean`); 250 `reference.ref_pmi_clusters.source_sheet_id`
 (lets a PMI market be sourced from a Google Sheet instead of the pending + failing
 xlsx pair; NULL keeps the xlsx path, WBV is seeded); 247-249 Viaero market (rate rows cloned from
 VZW Small Cell in `reference.ref_task_revenue_rates`; `Viaero` anchor + rule in
