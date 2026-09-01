@@ -2391,6 +2391,14 @@ _STATUS_BADGE_HTML = {
                   'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">REMOVED</span>'),
     "added":     ('<span style="display:inline-block;background:#2e7d32;color:white;'
                   'font-size:10px;padding:2px 7px;border-radius:3px;font-weight:bold;">ADDED</span>'),
+    # System set-aside of a duplicate copy — a status, never a member action.
+    "duplicate": ('<span style="display:inline-block;background:#eceff1;color:#546e7a;'
+                  'border:1px solid #cfd8dc;font-size:10px;padding:2px 7px;'
+                  'border-radius:3px;font-weight:bold;">DUPLICATE &middot; NOT COUNTED</span>'),
+    # The copy the system currently counts for an unfinished duplicate group.
+    "counted":   ('<span style="display:inline-block;background:#e8f5e9;color:#2e7d32;'
+                  'border:1px solid #a5d6a7;font-size:10px;padding:2px 7px;'
+                  'border-radius:3px;font-weight:bold;">COUNTED</span>'),
 }
 
 
@@ -2455,7 +2463,8 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                        AND a.site_id   IS NOT DISTINCT FROM s.site_id
                        AND a.task      IS NOT DISTINCT FROM s.task
                        AND a.duration_min IS NOT DISTINCT FROM s.duration_min) AS is_added,
-                   FALSE AS is_removed
+                   FALSE AS is_removed,
+                   NULL::text AS removal_reason
             FROM surviving s
 
             UNION ALL
@@ -2467,7 +2476,8 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                    NULL::numeric AS corr_orig,
                    FALSE AS is_edited,
                    FALSE AS is_added,
-                   TRUE  AS is_removed
+                   TRUE  AS is_removed,
+                   rm.reason AS removal_reason
             FROM {SCHEMA_TIMER}.entry_removals rm
             WHERE rm.user_email = $1
               AND DATE(rm.start_time AT TIME ZONE 'America/New_York') = $2
@@ -2483,7 +2493,11 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
         d = dict(r)
         surviving_dur = d.get("duration_min")
         if d.get("is_removed"):
-            status = "removed"
+            # A set-aside written by the duplicate resolver keeps the clean
+            # table unique; it is system support, not a member action, so it
+            # gets its own status and never wears the member's REMOVED badge.
+            status = ("duplicate" if d.get("removal_reason") == "auto_resolved_sibling"
+                      else "removed")
             effective_duration = 0.0
             effective_end = d.get("end_time")
             corrected_dur = None
@@ -2512,6 +2526,25 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
         d["effective_duration_min"] = effective_duration
         d["effective_end_time"] = effective_end
         classified.append(d)
+
+    # Mark the copy the system is counting for each unfinished duplicate
+    # group: a surviving row that overlaps a set-aside copy in the same
+    # site/task bucket.
+    set_asides = [e for e in classified if e["status"] == "duplicate"]
+    if set_asides:
+        for e in classified:
+            if e["status"] in ("removed", "duplicate") or e.get("end_time") is None:
+                continue
+            for dup in set_asides:
+                same_bucket = (
+                    (e.get("site_name"), e.get("site_id"), e.get("task"))
+                    == (dup.get("site_name"), dup.get("site_id"), dup.get("task"))
+                )
+                if same_bucket and _intervals_overlap(
+                        e["start_time"], e.get("end_time"),
+                        dup["start_time"], dup.get("end_time")):
+                    e["counted_in_group"] = True
+                    break
     return classified
 
 
@@ -2536,7 +2569,7 @@ def _build_confirmation_summary_html(classified_entries: list[dict]) -> str:
     """
     from collections import defaultdict
 
-    effective = [e for e in classified_entries if e["status"] != "removed"]
+    effective = [e for e in classified_entries if e["status"] not in ("removed", "duplicate")]
     if not effective:
         return ""
 
@@ -2612,8 +2645,25 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
         task = e.get("task") or "(no task)"
         start = _fmt_time_short(e["start_time"])
         end = _fmt_time_short(e.get("effective_end_time"))
+        counted_badge = (" " + _STATUS_BADGE_HTML["counted"]
+                         if e.get("counted_in_group") else "")
 
-        if status == "removed":
+        if status == "duplicate":
+            # Set aside by the system to keep the day unique — shown in full
+            # (no strikethrough: the member did not remove it), not counted.
+            row_style = "background:#f5f6f8;color:#78838f;"
+            rows_html.append(
+                f'<tr style="{row_style}">'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["duplicate"]}</td>'
+                f'<td style="{cell}">{_escape_html(project)}</td>'
+                f'<td style="{cell}">{_escape_html(site)}</td>'
+                f'<td style="{cell}">{_escape_html(task)}</td>'
+                f'<td style="{cell}">{start}</td>'
+                f'<td style="{cell}">{end}</td>'
+                f'<td style="{cell}">{_fmt_duration(e.get("original_duration_min"))}</td>'
+                f'</tr>'
+            )
+        elif status == "removed":
             row_style = "background:#fdecea;color:#999;"
             strike_cell = f"{cell}text-decoration:line-through;"
             rows_html.append(
@@ -2631,7 +2681,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
             row_style = "background:#e8f5e9;"
             rows_html.append(
                 f'<tr style="{row_style}">'
-                f'<td style="{cell}">{_STATUS_BADGE_HTML["added"]}</td>'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["added"]}{counted_badge}</td>'
                 f'<td style="{cell}">{_escape_html(project)}</td>'
                 f'<td style="{cell}">{_escape_html(site)}</td>'
                 f'<td style="{cell}">{_escape_html(task)}</td>'
@@ -2653,7 +2703,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
             )
             rows_html.append(
                 f'<tr style="{row_style}">'
-                f'<td style="{cell}">{_STATUS_BADGE_HTML["edited"]}</td>'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["edited"]}{counted_badge}</td>'
                 f'<td style="{cell}">{_escape_html(project)}</td>'
                 f'<td style="{cell}">{_escape_html(site)}</td>'
                 f'<td style="{cell}">{_escape_html(task)}</td>'
@@ -2665,7 +2715,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
         else:  # unchanged
             rows_html.append(
                 '<tr>'
-                f'<td style="{cell}">{_STATUS_BADGE_HTML["unchanged"]}</td>'
+                f'<td style="{cell}">{_STATUS_BADGE_HTML["unchanged"]}{counted_badge}</td>'
                 f'<td style="{cell}">{_escape_html(project)}</td>'
                 f'<td style="{cell}">{_escape_html(site)}</td>'
                 f'<td style="{cell}">{_escape_html(task)}</td>'
@@ -2675,6 +2725,40 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 '</tr>'
             )
     return "\n".join(rows_html)
+
+
+def _build_duplicate_group_note_html(set_aside_count: int, counted_count: int) -> str:
+    """Amber note shown when the member's day still holds an unfinished
+    duplicate group (system set-asides present). Explains what counts, what
+    the system did, and how the member finishes the cleanup themselves."""
+    if not set_aside_count:
+        return ""
+    if not counted_count:
+        # No surviving COUNTED copy in this email — the member's own removals
+        # (or a still-running survivor) cleared the group. Never reference a
+        # badge that is not on the page.
+        return (
+            '<div style="background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;'
+            'padding:12px 16px;margin:0 0 16px;font-size:13px;color:#7a5900;">'
+            '<strong>This duplicate group has been fully cleared.</strong> '
+            'Copies marked DUPLICATE were set aside by the system and no copy of '
+            'that timer counts toward your day; the removals shown above were yours.'
+            '</div>'
+        )
+    remaining = set_aside_count + counted_count
+    copies = f"{remaining} copies" if remaining != 1 else "1 copy"
+    return (
+        '<div style="background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;'
+        'padding:12px 16px;margin:0 0 16px;font-size:13px;color:#7a5900;">'
+        f'<strong>{copies} of a timer remain in a duplicate group.</strong> '
+        'Only the copy marked COUNTED adds to your hours; copies marked DUPLICATE '
+        'were set aside by the system to keep your day counted once, they were NOT '
+        'removed by you. To finish cleaning, use the Edit/Remove buttons in your '
+        'original daily entries email: removing the COUNTED copy moves counting to '
+        'the next remaining copy, and your day reaches zero only if you remove '
+        'every copy yourself.'
+        '</div>'
+    )
 
 
 def _build_correction_confirmation_html(user_email: str, entry_date,
@@ -2691,6 +2775,9 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
     has_removals = _has_removals(classified_entries)
     has_additions = _has_additions(classified_entries)
     has_unchanged = any(e["status"] == "unchanged" for e in classified_entries)
+    set_aside_count = sum(1 for e in classified_entries if e["status"] == "duplicate")
+    counted_count = sum(1 for e in classified_entries if e.get("counted_in_group"))
+    has_duplicates = set_aside_count > 0
 
     # Subheader: "N changes applied — X edited, Y removed, Z added"
     sub_parts = []
@@ -2713,6 +2800,10 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["removed"]} &mdash; entry deleted from your records</li>')
     if has_additions:
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["added"]} &mdash; entry added manually (e.g., forgot to start the timer)</li>')
+    if counted_count:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["counted"]} &mdash; the copy of a duplicated timer that currently adds to your hours</li>')
+    if has_duplicates:
+        legend_items.append(f'<li>{_STATUS_BADGE_HTML["duplicate"]} &mdash; a copy of the same timer, set aside by the system; you did not remove it and it does not count</li>')
     legend_html = "\n".join(legend_items)
 
     # Conditional footer notes (same pattern as the daily email fix)
@@ -2762,7 +2853,7 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
                     {entries_html}
                 </tbody>
             </table>
-
+            {_build_duplicate_group_note_html(set_aside_count, counted_count)}
             <div style="background:#f5f5f5;border-radius:6px;padding:14px 18px;margin-top:24px;font-size:13px;color:#555;">
                 <p style="margin:0 0 8px;font-weight:bold;color:#333;">A few things to note:</p>
                 <ul style="margin:0;padding-left:20px;line-height:1.8;">
