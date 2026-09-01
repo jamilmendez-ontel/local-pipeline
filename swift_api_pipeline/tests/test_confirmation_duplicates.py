@@ -142,3 +142,18 @@ def test_group_note_appears_only_when_set_asides_exist():
         "member@x.co", START.date(), without, 1, 0, 1)
     assert "duplicate group" in body_with
     assert "duplicate group" not in body_without
+
+
+def test_note_for_a_fully_cleared_group_never_mentions_a_counted_copy():
+    # Member removed the last live copy themselves: the set-aside still shows
+    # as a row, but no COUNTED badge exists anywhere, so the note must explain
+    # the group is cleared instead of pointing at a badge that is not there.
+    classified = _classify([
+        _row(is_removed=True, removal_reason=None),  # member removed the survivor
+        _row(is_removed=True, removal_reason="auto_resolved_sibling",
+             end_time=END_C, duration_min=664.20),
+    ])
+    body = _build_correction_confirmation_html(
+        "member@x.co", START.date(), classified, 1, 0, 1)
+    assert "cleared" in body
+    assert "adds to your hours" not in body

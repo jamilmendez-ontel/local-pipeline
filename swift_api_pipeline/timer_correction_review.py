@@ -2733,6 +2733,18 @@ def _build_duplicate_group_note_html(set_aside_count: int, counted_count: int) -
     the system did, and how the member finishes the cleanup themselves."""
     if not set_aside_count:
         return ""
+    if not counted_count:
+        # No surviving COUNTED copy in this email — the member's own removals
+        # (or a still-running survivor) cleared the group. Never reference a
+        # badge that is not on the page.
+        return (
+            '<div style="background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;'
+            'padding:12px 16px;margin:0 0 16px;font-size:13px;color:#7a5900;">'
+            '<strong>This duplicate group has been fully cleared.</strong> '
+            'Copies marked DUPLICATE were set aside by the system and no copy of '
+            'that timer counts toward your day; the removals shown above were yours.'
+            '</div>'
+        )
     remaining = set_aside_count + counted_count
     copies = f"{remaining} copies" if remaining != 1 else "1 copy"
     return (
@@ -2788,8 +2800,9 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["removed"]} &mdash; entry deleted from your records</li>')
     if has_additions:
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["added"]} &mdash; entry added manually (e.g., forgot to start the timer)</li>')
-    if has_duplicates:
+    if counted_count:
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["counted"]} &mdash; the copy of a duplicated timer that currently adds to your hours</li>')
+    if has_duplicates:
         legend_items.append(f'<li>{_STATUS_BADGE_HTML["duplicate"]} &mdash; a copy of the same timer, set aside by the system; you did not remove it and it does not count</li>')
     legend_html = "\n".join(legend_items)
 
