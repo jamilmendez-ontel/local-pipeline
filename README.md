@@ -370,7 +370,11 @@ Duplicate-group rule since 2026-08-31: only MEMBER removals are final. A removal
 auto-collapses the group to the shortest alive snapshot; removing the survivor of a
 resolved group falls back to the shortest sibling the member never removed
 (`survivor_fallback`, reviving its `auto_resolved_sibling` removal); a group reaches
-zero only when the member has removed every copy personally.
+zero only when the member has removed every copy personally. Since 2026-09-01 the
+confirmation email reflects this honestly: the REMOVED badge only ever marks removals
+the member made; system set-asides show as `DUPLICATE - NOT COUNTED`, the group's
+surviving copy is marked `COUNTED`, totals ignore set-asides, and an amber note
+explains how to finish cleaning via the daily email's still-valid buttons.
 
 See `migrations/` for the full history. Run `git log --oneline
 migrations/` for recent changes. Latest: 251 duplicate-survivor-bug restore (reverts the
