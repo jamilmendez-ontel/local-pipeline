@@ -366,6 +366,12 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
+Duplicate-group rule since 2026-08-31: only MEMBER removals are final. A removal
+auto-collapses the group to the shortest alive snapshot; removing the survivor of a
+resolved group falls back to the shortest sibling the member never removed
+(`survivor_fallback`, reviving its `auto_resolved_sibling` removal); a group reaches
+zero only when the member has removed every copy personally.
+
 See `migrations/` for the full history. Run `git log --oneline
 migrations/` for recent changes. Latest: 251 duplicate-survivor-bug restore (reverts the
 14 `auto_resolved_sibling` removals the latest-end survivor pick wrote in zeroed

@@ -21,15 +21,22 @@ from timer_correction_review import _resolve_duplicate_for_action
 
 
 class FakeDB:
-    """Sync stand-in for PipelineDB: canned review + removal rows, records writes."""
+    """Sync stand-in for PipelineDB: canned review + removal rows, records writes.
 
-    def __init__(self, review, removals=()):
+    fetchrow routes by the status filter in the SQL: the pending-group lookup
+    gets `review`, the resolved-group (fallback) lookup gets `resolved_review`.
+    """
+
+    def __init__(self, review, removals=(), resolved_review=None):
         self.review = review
+        self.resolved_review = resolved_review
         self.removals = list(removals)
         self.executed = []      # (sql, args) from execute()
         self.fetched_sql = []   # sql seen by fetch()
 
     def fetchrow(self, sql, *args):
+        if "'resolved'" in sql:
+            return self.resolved_review
         return self.review
 
     def fetch(self, sql, *args):
@@ -138,6 +145,106 @@ def test_two_way_remove_keeps_the_other_entry():
 
     assert _update_args(db)[0] == "B"
     assert _sibling_removal_durs(db) == []
+
+
+def _resolved_review(entries, selected):
+    r = _review(entries)
+    r["status"] = "resolved"
+    r["selected_entry"] = selected
+    return r
+
+
+def _review_update_args(db):
+    calls = [(s, a) for s, a in db.executed if "duplicate_reviews" in s and "UPDATE" in s]
+    assert len(calls) == 1, f"expected exactly one duplicate_reviews UPDATE, got {len(calls)}"
+    return calls[0][1]
+
+
+def _reverted_removal_calls(db):
+    return [(s, a) for s, a in db.executed
+            if "entry_removals" in s and "UPDATE" in s and "REVERTED" in s]
+
+
+def test_removing_the_survivor_falls_back_to_the_system_removed_sibling():
+    # Shipped state after the member removed B: A selected, C auto-removed,
+    # B member-removed. Member now removes A -> C (never member-removed) must
+    # come back as the survivor instead of the group zeroing out.
+    db = FakeDB(
+        review=None,
+        resolved_review=_resolved_review(_entries_abc(), "A"),
+        removals=[
+            {"end_time": END_B, "duration_min": DUR_B, "reason": "member said so"},
+            {"end_time": END_C, "duration_min": DUR_C, "reason": "auto_resolved_sibling"},
+        ],
+    )
+    _resolve_duplicate_for_action(db, _acted(END_A, DUR_A), "remove", NOW)
+
+    selected, rejected = _review_update_args(db)[0], _review_update_args(db)[1]
+    assert selected == "C", f"fallback must revive the untouched sibling, got {selected!r}"
+    assert {r["duration_min"] for r in rejected} == {DUR_A, DUR_B}
+    assert len(_reverted_removal_calls(db)) == 1, "C's auto removal must be reverted"
+
+
+def test_no_fallback_when_every_sibling_was_member_removed():
+    # Member removed B and C personally; removing the survivor A means zero,
+    # and the review is left untouched.
+    db = FakeDB(
+        review=None,
+        resolved_review=_resolved_review(_entries_abc(), "A"),
+        removals=[
+            {"end_time": END_B, "duration_min": DUR_B, "reason": None},
+            {"end_time": END_C, "duration_min": DUR_C, "reason": "wrong entry"},
+        ],
+    )
+    _resolve_duplicate_for_action(db, _acted(END_A, DUR_A), "remove", NOW)
+
+    assert not [c for c in db.executed if "duplicate_reviews" in c[0]]
+    assert not _reverted_removal_calls(db)
+
+
+def test_fallback_picks_shortest_among_eligible_siblings():
+    entries = _entries_abc() + [
+        {"label": "D", "start_time": START.isoformat(),
+         "end_time": datetime(2026, 8, 18, 10, 0, tzinfo=timezone.utc).isoformat(),
+         "duration_min": 780.0},
+    ]
+    db = FakeDB(
+        review=None,
+        resolved_review=_resolved_review(entries, "A"),
+        removals=[
+            {"end_time": END_B, "duration_min": DUR_B, "reason": None},  # member
+            {"end_time": END_C, "duration_min": DUR_C, "reason": "auto_resolved_sibling"},
+            {"end_time": datetime(2026, 8, 18, 10, 0, tzinfo=timezone.utc),
+             "duration_min": 780.0, "reason": "auto_resolved_sibling"},
+        ],
+    )
+    _resolve_duplicate_for_action(db, _acted(END_A, DUR_A), "remove", NOW)
+
+    assert _review_update_args(db)[0] == "C"  # shortest eligible, not D
+
+
+def test_fallback_on_auto_resolved_group_needs_no_removal_revert():
+    # Stale auto-resolve wrote no removal rows: rejected siblings are excluded
+    # via rejected_entries only. Removing the survivor re-selects the shortest
+    # untouched sibling with a review update alone.
+    r = _resolved_review(_entries_abc(), "B")
+    r["status"] = "auto_resolved"
+    db = FakeDB(review=None, resolved_review=r, removals=[])
+    _resolve_duplicate_for_action(db, _acted(END_B, DUR_B), "remove", NOW)
+
+    assert _review_update_args(db)[0] == "A"
+    assert not _reverted_removal_calls(db)
+
+
+def test_removing_a_non_selected_entry_of_a_resolved_group_changes_nothing():
+    db = FakeDB(
+        review=None,
+        resolved_review=_resolved_review(_entries_abc(), "A"),
+        removals=[{"end_time": END_C, "duration_min": DUR_C, "reason": "auto_resolved_sibling"}],
+    )
+    _resolve_duplicate_for_action(db, _acted(END_B, DUR_B), "remove", NOW)
+
+    assert not [c for c in db.executed if "duplicate_reviews" in c[0]]
 
 
 def test_correct_action_still_keeps_the_corrected_entry():
