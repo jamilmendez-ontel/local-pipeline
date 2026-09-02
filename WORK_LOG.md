@@ -3596,3 +3596,19 @@ Open: (1) Jamil pastes whole `scripts/pipeline_trigger.gs` into the nanoninth Ap
 - Running-timer notice wording: leads with "if you already stopped this timer, no action is needed" (late-sync case), then the stop-it-now ask.
 - Verified no one-run-per-day assumptions: >10% drop baseline is asset-tasks only; --send by ET date; --resend snapshot-diff; --remind 20h gate; analytics views/MVs don't use run_id/run_date; DRMC freshness reads daily_reports_rolling; exports overwrite the same-day Drive file. Raw grows one extra ~7 MB snapshot/day.
 - Tests: 53 passed (test_running_entries, test_stale_fallback, test_timer_overlap, test_dr_timer_fetch_policy).
+
+### 2026-09-01 23:35-00:05 ET — Assisting Ms. Jehanne with a data request: raw Swift API samples (org/project/asset/task/requirement)
+- Ms. Jehanne asked for raw sample data from each Swift API the pipeline uses for the org -> project -> asset -> task -> requirement chain (assets first). Jamil relayed the request.
+- Wrote read-only `out/api-samples/probe_api_samples.py` (Swift only, no DB); captured one live response per endpoint into `out/api-samples/0N_*.json`, bundled as `out/api-samples/swift_api_samples.json` (list capped to 3 records each), documented in `out/api-samples/README.md`. Chain sampled: org Ontel -> TECH-OPS: TS20 -> asset 1BU8155B -> task "1. Ontel Miss Observed". Also captured `_export`, timer-activities, user-priorities.
+- Cross-checked against the original `scripts-reference/get_items - asset task requirements.py`: `/asset-projects/{id}/asset-tasks` returns MIXED collections (`asset-tasks` instances + `milestones`) and takes `timezone`/`dateFormat` params; recaptured 04 with those and filtered on `collection == "asset-tasks"`.
+- Found: root `.env` Swift password is stale (403 invalid_grant); `swift_api_pipeline/.env` is the working one. `_export` 503s with tiny pageSize, fine at 1000.
+- Delivered the bundled JSON to Jamil for forwarding to Ms. Jehanne.
+
+### 2026-09-02 07:45-08:35 ET — Schedule Change History: sheet ingest + directory serving view (feature/schedule-change-history)
+- New feature: ingest the HR schedule-changes Google Sheet (`1yX3D3...U4Q`, 19 tabs) so DRMC's directory member page can show a per-member "Schedule history" timeline. Spec + plan in `ai-projects/docs/superpowers/`.
+- Migration 253 (applied live + verified): `data_raw.raw_schedule_changes`, `data_staging.stg_schedule_change_history` (PK emp_id/sheet_tab/start_date/shift_start_pht), `analytics.v_employee_schedule_history` (email join + is_current), RLS/grants baseline, schema_metadata rows.
+- `schedule_changes_source.py`: Sheets v4 reader (pattern from report-automation's PMI intake; local `sheets_client.py` is Drive-CSV first-tab-only and unusable) + template-tab parser (header-match discovery, Summary tab skipped as a formula mirror, start-year date inference, one_day/temporary/ongoing classification, verbatim notes). 15 unit tests.
+- `sync_schedule_changes.py`: roster identity resolution (id passthrough + unique first/last-token name match), <50% wipe guard, upsert-then-prune refresh, pipeline_runs bookkeeping, --dry-run. 8 unit tests.
+- Live-run findings fixed: asyncpg encodes a str param as a jsonb string scalar under a bare `::jsonb` cast (needs `($1::text)::jsonb`); DELETE+INSERT in one data-modifying CTE shares a snapshot and re-runs hit duplicate keys (hence upsert+prune); 3 sheet rows have a blank PHT-start cell (PK column coalesced to '').
+- First load verified: 1,335 raw / 1,310 staged rows, 125 members, 75 current rows; emp 250901 acceptance rows exact; is_current unique per member. Token: `sheets_rw_token.pickle` (Sheets scope); DB via session pooler (WARP-free).
+- Deferred (named): no workflow/trigger (run-on-demand v1); reconciliation vs `v_user_priorities_effective.scheduled_effective` is v2; weekday-exception notes stay unparsed. Pre-existing: 6 asset-tasks resilience test failures on main, untouched.
