@@ -208,6 +208,28 @@ def _row_hash(cells: list[str]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def _non_data_reason(cells: list[str]) -> str | None:
+    """Why a non-data row is worth a logged skip, or None for expected noise.
+
+    Expected noise (no log): blank rows, the PHT/EST subheader, repeated
+    template header rows mid-tab, and merged PLEASE-READ banner rows. Anything
+    row-like that fails _is_data_row (a mangled id cell like '1234.0' or
+    '1234 (resigned)', or a shift code that is not DS/NS) is logged so a
+    hand-edit never silently drops history."""
+    id_cell = str(cells[COL_ID] if len(cells) > COL_ID else "").strip()
+    name = str(cells[COL_NAME] if len(cells) > COL_NAME else "").strip()
+    shift = str(cells[COL_SHIFT] if len(cells) > COL_SHIFT else "").strip()
+    if id_cell in {"", "ID Number"} and not name:
+        return None
+    if id_cell.upper().startswith("PLEASE READ"):
+        return None
+    if id_cell == "ID Number":  # repeated header row with a Names cell too
+        return None
+    if id_cell and not id_cell.isdigit():
+        return f"unrecognized id cell {id_cell!r} ({name!r})"
+    return f"unrecognized shift code {shift!r} for {name!r}"
+
+
 def _is_data_row(cells: list[str]) -> bool:
     id_cell = str(cells[COL_ID] if len(cells) > COL_ID else "").strip()
     name = str(cells[COL_NAME] if len(cells) > COL_NAME else "").strip()
@@ -229,6 +251,9 @@ def parse_tab(tab_title: str, grid: list[list[str]]) -> tuple[list[ParsedRow], l
     for idx in range(hdr + 1, len(grid)):
         cells = [str(c) for c in grid[idx]]
         if not _is_data_row(cells):
+            reason = _non_data_reason(cells)
+            if reason:
+                skips.append(f"{tab_title}!r{idx}: {reason}")
             continue
         # Pad so the fixed column positions are always addressable.
         cells = cells + [""] * (COL_NOTES + 1 - len(cells))
@@ -254,6 +279,11 @@ def parse_tab(tab_title: str, grid: list[list[str]]) -> tuple[list[ParsedRow], l
         else:
             kind = "temporary"
         hours_txt = str(cells[COL_HOURS]).strip()
+        rdo_to = parse_sheet_date(cells[COL_RDO_TO], year)
+        if rdo_to is not None and rdo_to < start:
+            # Same cross-year rule as end_date: the Year column belongs to the
+            # start, so an "earlier" RDO date crossed Dec 31.
+            rdo_to = date(start.year + 1, rdo_to.month, rdo_to.day)
         rows.append(ParsedRow(
             sheet_tab=tab_title,
             row_index=idx,
@@ -268,7 +298,7 @@ def parse_tab(tab_title: str, grid: list[list[str]]) -> tuple[list[ParsedRow], l
             work_arrangement=_clean(cells[COL_WA]),
             reg_hours=int(hours_txt) if hours_txt.isdigit() else None,
             rest_day=_clean(cells[COL_REST]),
-            rdo_to=parse_sheet_date(cells[COL_RDO_TO], year),
+            rdo_to=rdo_to,
             rdo_day=_clean(cells[COL_RDO_DAY]),
             start_date=start,
             end_date=end,

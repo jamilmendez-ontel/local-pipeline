@@ -126,6 +126,33 @@ def test_row_hash_stable_and_distinct():
     assert a[0].row_hash != c[0].row_hash
 
 
+def test_rdo_to_crossing_year_end_rolls_forward():
+    # Period starts Dec-28/2025; rest day moved to "Jan-3" = 2026, not 2025.
+    r = list(JAMIL_ONGOING)
+    r[11], r[12], r[14], r[15] = "Dec-28", "Jan-10", "2025", "Jan-3"
+    rows, _ = parse_tab("DA", _grid([r]))
+    assert rows[0].rdo_to == date(2026, 1, 3)
+
+
+def test_row_like_non_data_rows_are_logged_not_silent():
+    mangled_id = list(JAMIL_ONGOING)
+    mangled_id[0] = "250901 (resigned)"
+    odd_shift = list(JAMIL_ONGOING)
+    odd_shift[0], odd_shift[10] = "", "ds"  # lowercase shift code typo
+    rows, skips = parse_tab("DA", _grid([mangled_id, odd_shift]))
+    assert rows == []
+    assert len(skips) == 2
+    assert "unrecognized id cell" in skips[0]
+    assert "unrecognized shift code" in skips[1]
+
+
+def test_expected_noise_rows_are_not_logged():
+    grid = _grid([]) + [[""] * 18, HEADER, SUBHEADER,
+                        ["PLEASE READ  Please don't change the template."]]
+    rows, skips = parse_tab("DA", grid)
+    assert rows == [] and skips == []
+
+
 def test_row_index_points_at_grid_row():
     rows, _ = parse_tab("DA", _grid([JAMIL_ONGOING, JAMIL_ONE_DAY]))
     assert [r.row_index for r in rows] == [3, 4]

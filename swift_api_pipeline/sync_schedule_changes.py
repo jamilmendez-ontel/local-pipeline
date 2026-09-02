@@ -72,8 +72,17 @@ ON CONFLICT (sheet_tab, row_index) DO UPDATE SET
     extracted_at = now()
 """
 
+# Prune spares rows tagged by another sync that is still running (started in
+# the last hour): two overlapping runs would otherwise cross-prune each other's
+# rows down to nothing. An advisory lock is not an option here because
+# PipelineDB returns its connection to the pool after every call.
 _RAW_PRUNE_SQL = """
-DELETE FROM data_raw.raw_schedule_changes WHERE load_run_id <> $1::uuid
+DELETE FROM data_raw.raw_schedule_changes
+WHERE load_run_id <> $1::uuid
+  AND load_run_id NOT IN (
+      SELECT run_id::uuid FROM pipeline.pipeline_runs
+      WHERE pipeline_name = 'schedule_changes_sync' AND status = 'running'
+        AND started_at > now() - interval '1 hour')
 """
 
 _STAGING_UPSERT_SQL = """
@@ -118,7 +127,12 @@ ON CONFLICT (emp_id, sheet_tab, start_date, shift_start_pht) DO UPDATE SET
 """
 
 _STAGING_PRUNE_SQL = """
-DELETE FROM data_staging.stg_schedule_change_history WHERE load_run_id <> $1::uuid
+DELETE FROM data_staging.stg_schedule_change_history
+WHERE load_run_id <> $1::uuid
+  AND load_run_id NOT IN (
+      SELECT run_id::uuid FROM pipeline.pipeline_runs
+      WHERE pipeline_name = 'schedule_changes_sync' AND status = 'running'
+        AND started_at > now() - interval '1 hour')
 """
 
 
@@ -259,7 +273,8 @@ def run(dry_run: bool) -> int:
     retry_db(
         lambda: db.execute(
             "INSERT INTO pipeline.pipeline_runs "
-            "(run_id, pipeline_name, status, started_at) VALUES ($1, $2, $3, $4)",
+            "(run_id, pipeline_name, status, started_at) VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (run_id) DO NOTHING",
             run_id, PIPELINE_NAME, "running", started),
         description="insert pipeline_runs")
 
