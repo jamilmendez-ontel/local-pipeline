@@ -6,10 +6,10 @@ Flow (spec: ai-projects/docs/superpowers/specs/2026-09-02-schedule-change-histor
   -> full-replace data_raw.raw_schedule_changes and rebuild
   data_staging.stg_schedule_change_history -> pipeline.pipeline_runs bookkeeping.
 
-Each table swap is ONE SQL statement (WITH del AS (DELETE ...) INSERT ... FROM
-jsonb_to_recordset(...)): PipelineDB acquires a fresh pooled connection per
-call, so a cross-call BEGIN/COMMIT would not actually span the delete and the
-insert. A single data-modifying CTE statement is atomic on its own.
+Each table is refreshed by upsert-on-PK then prune-by-run-id (two statements).
+PipelineDB acquires a fresh pooled connection per call, so a cross-call
+BEGIN/COMMIT cannot span them; upsert+prune never leaves the table empty and a
+run that dies between the two only leaves stale extras that the next run prunes.
 
 Usage:
   SCHEDULE_SHEETS_TOKEN=<sheets-scoped token pickle> python sync_schedule_changes.py [--dry-run]
@@ -50,18 +50,34 @@ PAYLOAD_KEYS = [
     "rdo_to", "day", "notes",
 ]
 
-_RAW_SWAP_SQL = """
-WITH del AS (DELETE FROM data_raw.raw_schedule_changes),
-     src AS (SELECT * FROM jsonb_to_recordset($1::jsonb)
+# Full-replace is upsert-then-prune, NOT a single DELETE+INSERT CTE statement:
+# data-modifying CTEs share one snapshot, so the INSERT's unique check cannot
+# see the DELETE's work and re-runs hit duplicate-key errors. Upsert + prune
+# never leaves the table empty and self-heals if a run dies between the two.
+#
+# ($1::text)::jsonb, not $1::jsonb: with a bare jsonb cast asyncpg infers the
+# parameter type as jsonb and encodes the Python str as a JSON string SCALAR
+# (jsonb_typeof = 'string'), so jsonb_to_recordset sees a non-array. Forcing
+# text first makes Postgres parse the JSON itself.
+_RAW_UPSERT_SQL = """
+WITH src AS (SELECT * FROM jsonb_to_recordset(($1::text)::jsonb)
              AS x(sheet_tab text, row_index int, payload jsonb, row_hash text))
 INSERT INTO data_raw.raw_schedule_changes
     (sheet_tab, row_index, payload, row_hash, load_run_id)
 SELECT sheet_tab, row_index, payload, row_hash, $2::uuid FROM src
+ON CONFLICT (sheet_tab, row_index) DO UPDATE SET
+    payload = EXCLUDED.payload,
+    row_hash = EXCLUDED.row_hash,
+    load_run_id = EXCLUDED.load_run_id,
+    extracted_at = now()
 """
 
-_STAGING_SWAP_SQL = """
-WITH del AS (DELETE FROM data_staging.stg_schedule_change_history),
-     src AS (SELECT * FROM jsonb_to_recordset($1::jsonb)
+_RAW_PRUNE_SQL = """
+DELETE FROM data_raw.raw_schedule_changes WHERE load_run_id <> $1::uuid
+"""
+
+_STAGING_UPSERT_SQL = """
+WITH src AS (SELECT * FROM jsonb_to_recordset(($1::text)::jsonb)
              AS x(emp_id text, member_name text, role text, sheet_tab text,
                   shift_start_pht text, shift_end_pht text,
                   shift_start_et text, shift_end_et text,
@@ -74,11 +90,35 @@ INSERT INTO data_staging.stg_schedule_change_history
      shift_start_et, shift_end_et, shift_code, work_arrangement, reg_hours,
      rest_day, rdo_to, rdo_day, start_date, end_date, change_kind, notes,
      row_hash, load_run_id)
-SELECT emp_id, member_name, role, sheet_tab, shift_start_pht, shift_end_pht,
+-- COALESCE: shift_start_pht is part of the PK; a handful of sheet rows have a
+-- blank PHT start cell ('' sorts first and displays as "not recorded").
+SELECT emp_id, member_name, role, sheet_tab, COALESCE(shift_start_pht, ''), shift_end_pht,
        shift_start_et, shift_end_et, shift_code, work_arrangement, reg_hours,
        rest_day, rdo_to, rdo_day, start_date, end_date, change_kind, notes,
        row_hash, $2::uuid
 FROM src
+ON CONFLICT (emp_id, sheet_tab, start_date, shift_start_pht) DO UPDATE SET
+    member_name = EXCLUDED.member_name,
+    role = EXCLUDED.role,
+    shift_end_pht = EXCLUDED.shift_end_pht,
+    shift_start_et = EXCLUDED.shift_start_et,
+    shift_end_et = EXCLUDED.shift_end_et,
+    shift_code = EXCLUDED.shift_code,
+    work_arrangement = EXCLUDED.work_arrangement,
+    reg_hours = EXCLUDED.reg_hours,
+    rest_day = EXCLUDED.rest_day,
+    rdo_to = EXCLUDED.rdo_to,
+    rdo_day = EXCLUDED.rdo_day,
+    end_date = EXCLUDED.end_date,
+    change_kind = EXCLUDED.change_kind,
+    notes = EXCLUDED.notes,
+    row_hash = EXCLUDED.row_hash,
+    load_run_id = EXCLUDED.load_run_id,
+    extracted_at = now()
+"""
+
+_STAGING_PRUNE_SQL = """
+DELETE FROM data_staging.stg_schedule_change_history WHERE load_run_id <> $1::uuid
 """
 
 
@@ -181,7 +221,8 @@ def run(dry_run: bool) -> int:
     staged: list[tuple[str, ParsedRow]] = []
     dupe_skips: list[str] = []
     for emp_id, row in resolved:
-        key = (emp_id, row.sheet_tab, row.start_date, row.shift_start_pht)
+        # "or ''" matches the COALESCE in _STAGING_SWAP_SQL (PK-safe null).
+        key = (emp_id, row.sheet_tab, row.start_date, row.shift_start_pht or "")
         if key in seen:
             dupe_skips.append(f"{row.sheet_tab}!r{row.row_index}: duplicate_in_sheet "
                               f"{emp_id} {row.start_date} {row.shift_start_pht}")
@@ -231,8 +272,11 @@ def run(dry_run: bool) -> int:
             for r in parsed
         ])
         retry_db(
-            lambda: db.execute(_RAW_SWAP_SQL, raw_json, run_id),
-            description="raw full-replace")
+            lambda: db.execute(_RAW_UPSERT_SQL, raw_json, run_id),
+            description="raw upsert")
+        retry_db(
+            lambda: db.execute(_RAW_PRUNE_SQL, run_id),
+            description="raw prune")
 
         staging_json = json.dumps([
             {"emp_id": emp_id, "member_name": r.member_name, "role": r.role,
@@ -247,8 +291,11 @@ def run(dry_run: bool) -> int:
             for emp_id, r in staged
         ])
         retry_db(
-            lambda: db.execute(_STAGING_SWAP_SQL, staging_json, run_id),
-            description="staging rebuild")
+            lambda: db.execute(_STAGING_UPSERT_SQL, staging_json, run_id),
+            description="staging upsert")
+        retry_db(
+            lambda: db.execute(_STAGING_PRUNE_SQL, run_id),
+            description="staging prune")
     except Exception as err:
         _record_run(db, retry_db, status="failed", records=0, error=str(err),
                     run_id=run_id)
