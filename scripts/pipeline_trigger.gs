@@ -498,6 +498,49 @@ function setupHolidayFeedWatchTrigger() {
 }
 
 /**
+ * Daily HR schedule-changes sheet sync (sync-schedule-changes.yml) at 8 PM PHT.
+ * atHour() fires in the project's time zone (America/New_York), which moves
+ * against PHT twice a year, so setupScheduleChangesSyncTrigger() installs
+ * BOTH a 7 AM and an 8 AM ET trigger and this handler only dispatches when
+ * the Manila clock reads 20:xx (8 AM ET during EDT, 7 AM ET during EST). The
+ * other firing is a logged no-op.
+ */
+function triggerScheduleChangesSync() {
+  var manilaHour = parseInt(Utilities.formatDate(new Date(), 'Asia/Manila', 'H'), 10);
+  if (manilaHour !== 20) {
+    Logger.log('triggerScheduleChangesSync: Manila hour is ' + manilaHour + ', not 20; skipping (DST twin).');
+    return;
+  }
+  fireDispatch_('sync-schedule-changes');
+}
+
+/**
+ * Idempotently (re)create the two daily triggers for triggerScheduleChangesSync()
+ * (7 AM and 8 AM script time = ET; whichever is 8 PM Manila fires the dispatch).
+ * RUN THIS ONCE from the Apps Script editor after deploying this file. Deletes
+ * existing triggers bound to the handler first (orphaned-trigger gotcha).
+ */
+function setupScheduleChangesSyncTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerScheduleChangesSync') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  var hours = [7, 8];
+  for (var h = 0; h < hours.length; h++) {
+    ScriptApp.newTrigger('triggerScheduleChangesSync')
+      .timeBased()
+      .everyDays(1)
+      .atHour(hours[h])
+      .create();
+  }
+
+  Logger.log('Created triggerScheduleChangesSync triggers: daily 7 AM and 8 AM ET (fires only at 8 PM PHT).');
+}
+
+/**
  * Like fireDispatch_ but allows passing a client_payload — required when the
  * receiving workflow's `on: repository_dispatch` reads inputs via
  * github.event.client_payload.* (which is how we gate dispatch_downstream).
