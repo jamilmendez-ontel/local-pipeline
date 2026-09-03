@@ -1,0 +1,79 @@
+name: "Sync: Schedule Changes"
+
+# Daily sync of the HR schedule-changes Google Sheet (all template tabs) into
+# data_raw.raw_schedule_changes -> data_staging.stg_schedule_change_history ->
+# analytics.v_employee_schedule_history (DRMC directory "Schedule history").
+# Apps Script triggerScheduleChangesSync() fires the repository_dispatch at
+# 8 PM PHT every day (DST-locked: the handler checks the Manila hour). The cron
+# below is the backstop 12 h later (8 AM PHT) so a missed dispatch is at most a
+# half day stale; the sync is idempotent (upsert-on-PK then prune), so a second
+# daily run is harmless.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 00:00 UTC = 8:00 AM PHT / 8 PM ET (backstop)
+  repository_dispatch:
+    types: [sync-schedule-changes]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (fetch + parse + resolve, print counts, no DB writes)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: sync-schedule-changes
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.SHEETS_RW_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_rw_token.pickle
+
+      - name: Sync schedule changes
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          SCHEDULE_SHEETS_TOKEN: gmail_credentials/sheets_rw_token.pickle
+        run: |
+          DRY_ARG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_ARG="--dry-run"
+          fi
+          python -u sync_schedule_changes.py $DRY_ARG

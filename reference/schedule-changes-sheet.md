@@ -67,4 +67,4 @@ The token must be Sheets-scoped: `sheets_rw_token.pickle` (the roster-gap
 watcher's RW token) works; `sheets_token.pickle` does NOT (drive.readonly
 only, and the sync needs the Sheets v4 API for multi-tab reads). Direct DB
 host needs Cloudflare WARP; the pooler override above works without it.
-v1 is run-on-demand: no workflow/trigger wired yet (deliberate deferral).
+Scheduled since 2026-09-02: `.github/workflows/sync-schedule-changes.yml` runs daily at 8 PM PHT (Apps Script `triggerScheduleChangesSync()` in `scripts/pipeline_trigger.gs`, DST-locked via a 7 AM + 8 AM ET trigger pair gated on the Manila hour) with a 00:00 UTC (8 AM PHT) cron backstop. GHA uses the `SHEETS_RW_TOKEN_PICKLE` secret. Manual run: Actions → "Sync: Schedule Changes" → Run workflow (optional `dry_run`).
