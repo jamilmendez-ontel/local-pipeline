@@ -50,21 +50,18 @@ jobs:
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
           cat > .env <<'DOTENV'
-          SWIFT_EMAIL=mgmt@ontel.co
           SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
           SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
           SUPABASE_PORT=5432
           SUPABASE_DB=postgres
           SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
-          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
           SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
           DOTENV
 
-      - name: Decode credentials
+      - name: Decode Sheets token
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
           mkdir -p gmail_credentials
-          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
           echo "${{ secrets.SHEETS_RW_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_rw_token.pickle
 
       - name: Sync schedule changes
