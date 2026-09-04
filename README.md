@@ -43,7 +43,7 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-asset-tasks-gc.yml` | Nightly Apps Script | Parallel GC pipeline (non-Ontel orgs) |
 | `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
-| `timer-correction-apply.yml` | Apps Script onFormSubmit | Apply timer-duration corrections in real time. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
+| `timer-correction-apply.yml` | Apps Script batched window (2026-09-04): form submits on EITHER form open/extend a shared window in the "Timer Dispatch Coordination" sheet (closes 10 min after the last submit, capped 45 min after the first); a 5-min poller in the correction project fires ONE dispatch per window. Each run rebuilds the clean table exactly once. Replaces the per-click dispatch + double rebuild that drained the DB's disk IO budget | Apply timer-duration corrections and removals in batches. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
 | `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 | `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
 | `holiday-feed-watch.yml` | Apps Script Mon 6 PM ET + cron Thu 22:00 UTC backstop | PH holiday proclamation watch: lawphil proclamation index (+ Official Gazette RSS when not 403-blocked) + Nager.Date vs `reference.ref_holidays`; emails Jamil proposed INSERT/UPDATE SQL (never writes the table), silent when nothing new (see below) |
@@ -113,7 +113,11 @@ re-extracts first and then runs `--remind` / `--send` / `--resend`, giving late
 stops ~12 hours to land. The two workflows use different `repository_dispatch`
 types (`pipeline-timer` vs `pipeline-timer-emails`, both from
 `scripts/pipeline_trigger.gs`) and share the `pipeline-timer` concurrency group
-with `timer-correction-apply.yml` so no two of them ever overlap. Cost: one more
+with `timer-correction-apply.yml` so no two of them ever overlap. Every
+`--apply` run (nightly, emails, and the batched on-submit dispatch) rebuilds
+`stg_timer_activities_clean` exactly once (TRUNCATE + full reload, ~60 s, ~1 GB
+WAL); the 2026-09-04 OntelDB crash loop was 20-43 such rebuilds a day from
+per-click dispatches that rebuilt twice each. Cost: one more
 raw snapshot per day (~7 MB); staging/clean are replaced in place. Nothing in the
 timer pipeline compares one run to the previous one (the `>10%` drop baseline is
 asset-tasks only), so the second run is safe. Known property: `--send` upserts

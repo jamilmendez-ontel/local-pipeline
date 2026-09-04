@@ -1866,8 +1866,13 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
                 f"rejected {len(rejected)} others")
 
 
-def apply_responses(db, responses: list[dict]) -> list[dict]:
+def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dict]:
     """Store corrections in app_timer.corrections, removals in app_timer.entry_removals.
+
+    rebuild=False defers the clean-table rebuild to the caller. run_apply()
+    passes False so each --apply run rebuilds exactly ONCE (2026-09-04: the
+    double rebuild per dispatch, at ~60 s and ~1 GB WAL each, was the top
+    write load behind the OntelDB crash loop).
 
     Correction overrides removal — if the same entry is later corrected, the
     removal row stays but rebuild_timer_clean() keeps the entry (correction wins).
@@ -2136,9 +2141,11 @@ def apply_responses(db, responses: list[dict]) -> list[dict]:
         # Auto-resolve any related duplicate group
         _resolve_duplicate_for_action(db, entry, action, now)
 
-    if applied:
+    if applied and rebuild:
         logger.info(f"Applied {applied} responses, rebuilding clean table...")
         rebuild_clean_table(db)
+    elif applied:
+        logger.info(f"Applied {applied} responses; clean-table rebuild deferred to caller")
     else:
         logger.info("No new responses to apply")
 
@@ -2953,19 +2960,22 @@ def run_apply(test_mode: bool = False):
     """
     db = get_db()
 
-    # 1. Process form responses (returns list of changes actually applied)
+    # 1. Process form responses (returns list of changes actually applied).
+    # rebuild=False: the single rebuild in step 3 covers these changes too.
     applied_changes: list[dict] = []
     responses = read_form_responses()
     if responses:
-        applied_changes = apply_responses(db, responses)
+        applied_changes = apply_responses(db, responses, rebuild=False)
 
     # 2. Auto-resolve stale duplicate groups
     auto_resolved = auto_resolve_stale(db)
 
-    # 3. Always rebuild — picks up new staging data from tonight's timer extract.
-    # apply_responses() already rebuilds when it applies new corrections (applied > 0),
-    # but we rebuild unconditionally here to ensure the clean table always reflects
-    # tonight's fresh extraction data, even when no new corrections were applied.
+    # 3. Rebuild exactly ONCE per run. Unconditional so the clean table always
+    # reflects the latest staging data (nightly extract), and it covers both
+    # the responses applied in step 1 and any auto-resolves in step 2.
+    # Never rebuild twice in one run: each rebuild is a TRUNCATE + full reload
+    # (~60 s, ~1 GB WAL) and the per-dispatch double rebuild was the top write
+    # load behind the 2026-09-04 OntelDB crash loop.
     rebuild_clean_table(db)
 
     # 4. Send reply-in-thread confirmation emails for this run's applied changes
