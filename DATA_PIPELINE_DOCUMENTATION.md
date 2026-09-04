@@ -524,7 +524,7 @@ soft-delete via `is_deleted` + tombstone-on-cancel; reconcile sweeps drift)
 | `pipeline.yml` Cron 2 | 12:01 AM EST | timer, user_priorities, forms |
 | `gmail-pipeline.yml` | On email (Apps Script) | aging + sales |
 | `timer-duplicate-resolve.yml` | On form submit | duplicate resolution |
-| `timer-correction-apply.yml` | On form submit | correction application |
+| `timer-correction-apply.yml` | Batched: 10 min after last form submit, 45 min cap, 5-min poller | correction + removal application (one rebuild per run) |
 | `scrape.yml` (gmail-scraper) | 4:00 AM UTC | package email scraper |
 
 ### Windows Task Scheduler
