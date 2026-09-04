@@ -59,6 +59,11 @@ var MAX_RETRY_ATTEMPTS = 6;
 // A poller that set D1 more than this many minutes ago is assumed dead.
 var FIRING_LOCK_MINUTES = 4;
 
+// Only the project with POLLER_HOST = true actually fires dispatches. That is
+// the CORRECTION project. Here it is false, so an accidental poller install in
+// this project is a no-op. Flip it only if the poller is deliberately moved.
+var POLLER_HOST = false;
+
 var LOG_LABEL = 'Removal';
 
 
@@ -129,8 +134,32 @@ function onFormSubmit(e) {
 /**
  * Time-driven poller (every 5 minutes, ONE project only). Fires the dispatch
  * once the shared window is due; retries bounded on failure.
+ *
+ * Two guards against a double dispatch:
+ *   - LockService script lock: two overlapping runs of THIS project (e.g. a
+ *     duplicated time trigger after a redeploy) serialize; the second sees
+ *     A1 already cleared and does nothing.
+ *   - D1 sheet lock: covers a poller in the OTHER project (cross-project
+ *     locks do not exist), see below.
  */
 function pollPendingDispatch() {
+  if (!POLLER_HOST) {
+    Logger.log('POLLER_HOST is false in this project — poller is a no-op here');
+    return;
+  }
+  var scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(10000)) {
+    Logger.log('Another poller run holds the script lock — skipping');
+    return;
+  }
+  try {
+    _pollPendingDispatchLocked();
+  } finally {
+    scriptLock.releaseLock();
+  }
+}
+
+function _pollPendingDispatchLocked() {
   var sheet;
   try {
     sheet = _coordSheet();
