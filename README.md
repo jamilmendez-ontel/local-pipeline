@@ -383,7 +383,11 @@ surviving copy is marked `COUNTED`, totals ignore set-asides, and an amber note
 explains how to finish cleaning via the daily email's still-valid buttons.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 251 duplicate-survivor-bug restore (reverts the
+migrations/` for recent changes. Latest: 254 HR rollup refresh IO (work_mem 64MB on
+`refresh_dr_task_rollup_safe` / `refresh_hr_report_review_safe`, 233 had only covered the
+timer function; covering index `(user_email, start_time, end_time)` on
+`stg_timer_activities_clean` so the timer rollup refresh is an index-only scan instead of a
+125 MB heap read 144x/day; applied live 2026-09-04); 251 duplicate-survivor-bug restore (reverts the
 14 `auto_resolved_sibling` removals the latest-end survivor pick wrote in zeroed
 duplicate groups and re-points each review at the restored snapshot; applied live
 2026-08-31, ~40.9h returned to `stg_timer_activities_clean`); 250 `reference.ref_pmi_clusters.source_sheet_id`
