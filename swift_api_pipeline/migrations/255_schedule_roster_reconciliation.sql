@@ -31,20 +31,34 @@
 -- SELECT reproduced on live data first. Post-apply: 92 rows, 13 needs_review
 -- (11 has_mismatch on active members + 2 not_in_roster), 1 schema_metadata row,
 -- EXPLAIN ANALYZE 24 ms / 114 shared buffers for the needs_review filter.
+-- Pre-merge review fixes RE-APPLIED live ~03:30 ET (CREATE OR REPLACE + grants only):
+-- (1) REVOKE was FROM anon, authenticated, which leaves the default PUBLIC EXECUTE in
+--     place; now FROM PUBLIC + GRANT service_role (proacl = postgres, service_role).
+-- (2) hour bounded to 1-12 and minutes to :00-:59 so '13 PM' / '9:60 PM' -> NULL
+--     instead of an out-of-range cast error; no-space '9PM' / '9:30PM' now parse.
+--     Verified: 13 PM -> NULL, 0 AM -> NULL, 9 PM -> 21:00, 9PM -> 21:00, 9:30PM ->
+--     21:30, 12:30 am -> 00:30, '' -> NULL; view still 13 needs_review.
 -- =============================================================================
 
 BEGIN;
 
--- "9 PM" / "9:00 PM" / " 10:30 am " -> time; anything else -> NULL (never flags).
+-- "9 PM" / "9:00 PM" / "9PM" / " 10:30 am " -> time; anything else -> NULL (never flags).
 CREATE OR REPLACE FUNCTION analytics.shift_clock_pht(raw text)
 RETURNS time
 LANGUAGE sql
 IMMUTABLE
 PARALLEL SAFE
 AS $$
+    -- Guard: 12-hour clock only (1-12, optional :MM), so an out-of-range typo like
+    -- "13 PM" in the hand-typed sheet falls through to NULL instead of failing the
+    -- cast (which would take down the whole view, not one row).
+    -- Normalize: "9 PM" / "9PM" -> "9:00 PM"; "9:30PM" -> "9:30 PM"; then cast
+    -- ('9 PM'::time and '9PM'::time both fail without the :00).
     SELECT CASE
-        WHEN raw ~* '^\s*\d{1,2}(:\d{2})?\s*(AM|PM)\s*$'
-        THEN regexp_replace(trim(raw), '^(\d{1,2})\s+(AM|PM)$', '\1:00 \2', 'i')::time
+        WHEN raw ~* '^\s*(0?[1-9]|1[0-2])(:[0-5]\d)?\s*(AM|PM)\s*$'
+        THEN regexp_replace(
+                 regexp_replace(trim(raw), '^(\d{1,2})\s*(AM|PM)$', '\1:00 \2', 'i'),
+                 '^(\d{1,2}:\d{2})\s*(AM|PM)$', '\1 \2', 'i')::time
         ELSE NULL
     END;
 $$;
@@ -105,7 +119,8 @@ COMMENT ON VIEW analytics.v_schedule_roster_reconciliation IS
 
 REVOKE ALL ON analytics.v_schedule_roster_reconciliation FROM anon, authenticated;
 GRANT SELECT ON analytics.v_schedule_roster_reconciliation TO service_role;
-REVOKE ALL ON FUNCTION analytics.shift_clock_pht(text) FROM anon, authenticated;
+REVOKE ALL ON FUNCTION analytics.shift_clock_pht(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION analytics.shift_clock_pht(text) TO service_role;
 
 INSERT INTO agent.schema_metadata (schema_name, table_name, column_name, description, business_context, data_notes, related_tables)
 SELECT 'analytics', 'v_schedule_roster_reconciliation', NULL,
