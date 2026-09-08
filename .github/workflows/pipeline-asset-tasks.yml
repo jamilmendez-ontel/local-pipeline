@@ -140,6 +140,7 @@ jobs:
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
 
       - name: Run asset tasks pipeline (stage-aware)
+        id: asset_tasks
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
           PROJECT: ${{ steps.resolve.outputs.project }}
@@ -271,6 +272,20 @@ jobs:
           if [ "$code" != "204" ]; then
             echo "WARN: weekly-invoicing-po-tasks dispatch failed; check PAT has report-automation scope"
           fi
+
+      # The asset_tasks step emails its own FAILED notice. Backfill, the MV
+      # refresh and the dispatch steps run --no-email / plain curl, so a
+      # failure there used to be silent. In the 6 PM PHT chain that silence
+      # means no validator email today, so page the pipeline list.
+      - name: Notify on post-extract failure
+        if: ${{ failure() && steps.asset_tasks.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u notify_workflow_failure.py \
+            --workflow "Pipeline: Asset Tasks" \
+            --downstream "${{ steps.resolve.outputs.downstream }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload logs on failure
         if: failure()
