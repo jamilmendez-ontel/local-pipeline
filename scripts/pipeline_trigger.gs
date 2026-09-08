@@ -41,8 +41,13 @@
  *   every 5m  — Gmail watch for unread "Daily Revenue Report" emails →
  *               gmail-revenue-report (AR aging + sales; downstream: the
  *               Daily Finance report + COP invoice forecast chains)
- *   12:01 AM  — Asset Tasks (post-local-batch-retirement; fires dispatch_downstream=true
- *               so downstream workflows run at end-of-pipeline)
+ *   12:01 AM  — Asset Tasks (post-local-batch-retirement; downstream=all
+ *               so export + date-validator + Fri/Mon weeklies run at end-of-pipeline)
+ *   ~6:00 PM PHT (6 AM EDT / 5 AM EST) — Asset Tasks SECOND run, NOT an Apps
+ *               Script trigger here: gmail-scraper's scheduled run fires
+ *               pipeline-asset-tasks with downstream=validator on success
+ *               (chain: scraper -> asset tasks -> date-validator, since
+ *               2026-09-08). Only date-validator-daily fires at its end.
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;

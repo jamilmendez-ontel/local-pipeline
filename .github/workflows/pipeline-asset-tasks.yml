@@ -17,6 +17,10 @@ name: "Pipeline: Asset Tasks"
 #   - Added `--pipeline assets` step (asset_status enrichment; missed by plan)
 #   - Added date-validator-daily dispatch (validator's reliable trigger path)
 #   - Added dispatch_downstream input to gate the dispatch step during shakedown
+#   - 2026-09-08: dispatch_downstream (bool) replaced by downstream=all|validator|none.
+#     'validator' is the 6 PM PHT chain: gmail-scraper -> this workflow -> date-validator
+#     (date-validator ONLY; the export email and Fri/Mon weekly reports stay once a day).
+#     Legacy client_payload.dispatch_downstream=false is still honoured as 'none'.
 
 on:
   repository_dispatch:
@@ -36,11 +40,15 @@ on:
         description: 'Single project recovery (e.g. TS16). Leave empty for full run. (full stage only)'
         required: false
         type: string
-      dispatch_downstream:
-        description: 'Fire export + timer-discrepancies + date-validator dispatches at end. Set false during shakedown overlap with local batch.'
+      downstream:
+        description: 'End-of-run dispatches: all (export + date-validator + Fri compliance + Mon invoicing/PO), validator (date-validator only; the 6 PM PHT chain fired by gmail-scraper), none.'
         required: false
-        type: boolean
-        default: true
+        type: choice
+        options:
+          - all
+          - validator
+          - none
+        default: all
 
 permissions:
   contents: write
@@ -68,25 +76,35 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PROJECT="${{ inputs.project }}"
-            DD_RAW="${{ inputs.dispatch_downstream }}"
+            DS_RAW="${{ inputs.downstream }}"
+            DD_LEGACY=""
             STAGE="${{ inputs.stage }}"
           else
             PROJECT="${{ github.event.client_payload.project }}"
-            DD_RAW="${{ github.event.client_payload.dispatch_downstream }}"
+            DS_RAW="${{ github.event.client_payload.downstream }}"
+            DD_LEGACY="${{ github.event.client_payload.dispatch_downstream }}"
             STAGE="${{ github.event.client_payload.stage }}"
           fi
           # stage defaults to 'full' (nightly repository_dispatch path stays extract+transform)
           if [ -z "$STAGE" ]; then STAGE="full"; fi
-          # dispatch_downstream defaults to true; only an explicit 'false' suppresses
-          if [ "$DD_RAW" = "false" ]; then
-            DD="false"
-          else
-            DD="true"
-          fi
+          # downstream mode: all (default) | validator | none.
+          #   all       - nightly 12:01 AM ET Apps Script run: export + date-validator
+          #               + Fri weekly-compliance + Mon weekly-invoicing-po-tasks
+          #   validator - the 6 PM PHT chain fired by gmail-scraper on success:
+          #               date-validator ONLY (the export email and the weekly
+          #               reports must not go out twice a day)
+          #   none      - no end-of-run dispatches (shakedown / recovery)
+          # Legacy payload key dispatch_downstream=false still means 'none'.
+          case "$DS_RAW" in
+            validator|none) DS="$DS_RAW" ;;
+            all|"")          DS="all" ;;
+            *) echo "ERROR: unknown downstream mode '$DS_RAW' (expected all|validator|none)"; exit 1 ;;
+          esac
+          if [ "$DD_LEGACY" = "false" ]; then DS="none"; fi
           echo "stage=$STAGE" >> $GITHUB_OUTPUT
           echo "project=$PROJECT" >> $GITHUB_OUTPUT
-          echo "dispatch_downstream=$DD" >> $GITHUB_OUTPUT
-          echo "Resolved: stage='$STAGE', project='$PROJECT', dispatch_downstream='$DD'"
+          echo "downstream=$DS" >> $GITHUB_OUTPUT
+          echo "Resolved: stage='$STAGE', project='$PROJECT', downstream='$DS'"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -168,7 +186,7 @@ jobs:
         run: python -u main.py --pipeline analytics --no-email
 
       - name: Dispatch downstream workflows (asset-tasks-export, invoicing)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.downstream == 'all' && steps.resolve.outputs.stage != 'extract' }}
         run: |
           # pipeline-invoicing runs here (after the worklist refresh) so the quote
           # MVs its tail rebuilds use fresh worklist + freshly-loaded invoice data.
@@ -187,7 +205,7 @@ jobs:
           done
 
       - name: Dispatch date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
+        if: ${{ steps.resolve.outputs.project == '' && (steps.resolve.outputs.downstream == 'all' || steps.resolve.outputs.downstream == 'validator') && steps.resolve.outputs.stage != 'extract' }}
         # Non-fatal: validator triggering issues should be logged but not crash the run.
         continue-on-error: true
         run: |
@@ -207,7 +225,7 @@ jobs:
           fi
 
       - name: Dispatch weekly-compliance-audit (Fridays only, cross-repo)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.downstream == 'all' && steps.resolve.outputs.stage != 'extract' }}
         continue-on-error: true
         run: |
           DOW=$(date -u +%u)
@@ -231,7 +249,7 @@ jobs:
           fi
 
       - name: Dispatch weekly-invoicing-po-tasks (Mondays only, cross-repo)
-        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.dispatch_downstream == 'true' && steps.resolve.outputs.stage != 'extract' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.downstream == 'all' && steps.resolve.outputs.stage != 'extract' }}
         continue-on-error: true
         run: |
           DOW=$(date -u +%u)
