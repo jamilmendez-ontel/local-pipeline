@@ -112,9 +112,13 @@ LIMIT 10;
   asset_name → FA regex) that links timer + QA-form rows to the
   canonical asset DID. Pass-0 restores from `qa_form_asset_did_lookup`
   for QA forms (cumulative map; never loses mappings).
-- `data_staging.rebuild_timer_clean()` — TRUNCATE + INSERT excluding
-  rejected entries (from duplicate review) and applying corrections
-  (from `stg_timer_corrections`). Idempotent.
+- `data_staging.rebuild_timer_clean()` — builds the clean set (rejected
+  duplicate-review entries excluded, removals applied, corrections applied,
+  runaway duplicates dropped) in a session TEMP table and syncs only the
+  difference into `stg_timer_activities_clean` (migration 257, 2026-09-09;
+  was DELETE + INSERT of all ~400k rows per call, ~0.66 GB WAL x ~10/day;
+  now ~0 MB, ~11 s). Idempotent; identity is the row id, content compare is
+  every column except id/loaded_at.
 - `analytics.refresh_one_mv(p_view_name)` — refreshes one MV at a time
   (~12–34 s each).
 - `analytics.refresh_invoice_audit()` — used by the weekly compliance
@@ -132,6 +136,12 @@ LIMIT 10;
   priorities merge conflicts on; `load._clear_raw_table` is TRUNCATE now.
   Guard tests: `tests/test_wal_diet_guards.py` (every written column must be
   compared; temp columns must match the COPY list).
+- `transform.transform_asset_tasks()` — same change-only pattern for the
+  2.79M-row `stg_asset_tasks` (2026-09-09): ONE statement merges this run's
+  `raw_asset_tasks` in place (delete gone, write new/changed) from
+  `ASSET_TASK_COLUMNS`; migration 258 adds the unique `task_did` index it
+  conflicts on. Was `WITH cleared AS (DELETE ..) INSERT ..` of every row,
+  ~4.3 GB WAL per run, twice a day.
 
 ## Migrations
 

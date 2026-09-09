@@ -132,7 +132,11 @@ Both now merge change-only through a session temp table
 (`swift_api_pipeline/daily_reports_merge.py`, `transform.transform_user_priorities`,
 `PipelineDB.copy_merge`); raw tables are TRUNCATEd, not DELETEd, before a reload.
 Cadences are unchanged. `loaded_at` on those staging tables now means "this row
-last changed", which is what the freshness probes already assumed.
+last changed", which is what the freshness probes already assumed. Items 3 and 4
+followed on 2026-09-09: `rebuild_timer_clean()` (migration 257) and the
+asset-tasks transform (migration 258) write only the difference too, so the
+two nightly asset reloads and the ~10 daily timer rebuilds no longer rewrite
+their tables.
 
 ### Incremental asset-tasks shadow (pilot, 2026-07)
 
