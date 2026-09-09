@@ -24,6 +24,11 @@
  *      - triggerHolidayFeedWatch() → Mondays 6 PM EST (PH holiday proclamation
  *                                    watch vs reference.ref_holidays; create via
  *                                    setupHolidayFeedWatchTrigger())
+ *      - triggerPackageScrape()    → Daily 6:00 PM Asia/Manila (Gmail Package
+ *                                    Scraper, gmail-scraper repo; create via
+ *                                    setupPackageScrapeTrigger(). Moved here
+ *                                    2026-09-08 from the retired
+ *                                    gmail-scraper/scripts/package_scraper_trigger.gs)
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
  * Schedules (EST):
@@ -43,11 +48,13 @@
  *               Daily Finance report + COP invoice forecast chains)
  *   12:01 AM  — Asset Tasks (post-local-batch-retirement; downstream=all
  *               so export + date-validator + Fri/Mon weeklies run at end-of-pipeline)
- *   ~6:00 PM PHT (6 AM EDT / 5 AM EST) — Asset Tasks SECOND run, NOT an Apps
- *               Script trigger here: gmail-scraper's scheduled run fires
- *               pipeline-asset-tasks with downstream=validator on success
- *               (chain: scraper -> asset tasks -> date-validator, since
- *               2026-09-08). Only date-validator-daily fires at its end.
+ *   6:00 PM PHT (6 AM EDT / 5 AM EST) — Gmail Package Scraper
+ *               (triggerPackageScrape → gmail-scraper package-scrape-daily).
+ *               On success the scrape workflow fires pipeline-asset-tasks with
+ *               downstream=validator (Asset Tasks SECOND run), which fires only
+ *               date-validator-daily at its end. Chain: scraper -> asset tasks
+ *               -> date-validator, since 2026-09-08. Skipped Sat/Sun ET by the
+ *               scrape workflow, not by this trigger.
  *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
  *               fires after the Ontel pipeline completes)
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
@@ -753,4 +760,179 @@ function testAllDispatches() {
   fireDispatch_('pipeline-calendar-events');
   fireDispatch_('schedule-feed-audit');
   Logger.log('All 7 dispatches fired — check GitHub Actions.');
+}
+
+// ============================================================================
+// GMAIL PACKAGE SCRAPER (gmail-scraper repo) — moved here 2026-09-08
+// ============================================================================
+/**
+ * Fires repository_dispatch "package-scrape-daily" on the gmail-scraper repo
+ * once a day at 6 PM Asia/Manila (= 6 AM EDT / 5 AM EST, same ET day).
+ * On success, gmail-scraper's scrape.yml fires local-pipeline's
+ * pipeline-asset-tasks with downstream=validator, whose end-of-run dispatch
+ * fires date-validator-daily. This is the scraper -> asset tasks ->
+ * date-validator chain that lands before the 9 PM PHT shift.
+ *
+ * Why it lives here: this project deploys as ONE file (whole-file paste).
+ * The scraper trigger used to be a separate package_scraper_trigger.gs file
+ * (now a retirement stub in gmail-scraper/scripts); a redeploy that pasted
+ * only pipeline_trigger.gs would have lost it, exactly as gmail_trigger.gs
+ * was lost on 2026-08-07. Until 2026-09-08 the trigger was a manual
+ * "Midnight to 1am" ET day timer (~12:41 AM ET).
+ *
+ * Contract:
+ *   - Daily-once guard via Script Property LAST_DISPATCH_DATE (ET date).
+ *   - 3 in-process attempts, then an alert email to PACKAGE_SCRAPE_ALERT_EMAIL.
+ *   - Uses the same GITHUB_TOKEN script property as every other trigger here;
+ *     that PAT must have contents:read+write on BOTH gmail-scraper and
+ *     local-pipeline (the scrape workflow's own COP_DISPATCH_PAT secret needs
+ *     local-pipeline too, for the chain dispatch).
+ *   - Create/reset the trigger with setupPackageScrapeTrigger() (idempotent).
+ */
+
+var PACKAGE_SCRAPE_ALERT_EMAIL = 'jamil.mendez@ontel.co';
+
+function triggerPackageScrape() {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('GITHUB_TOKEN');
+  if (!token) {
+    Logger.log('ERROR: GITHUB_TOKEN not set in Script Properties');
+    return;
+  }
+
+  // Daily-once guard: skip if we already dispatched today (ET).
+  var todayEt = Utilities.formatDate(new Date(), 'America/New_York', 'yyyy-MM-dd');
+  var lastDispatched = props.getProperty('LAST_DISPATCH_DATE');
+  if (lastDispatched === todayEt) {
+    Logger.log('Already dispatched today (' + todayEt + ') — skipping');
+    return;
+  }
+
+  // One firing per day now (6 PM PHT), so "retry tomorrow" is not a retry.
+  // Retry in-process, then page the operator on final failure (the realistic
+  // cause is the 90-day PAT expiring).
+  var MAX_ATTEMPTS = 3;
+  var RETRY_SLEEP_MS = 30000;
+  var success = false;
+  for (var attempt = 1; attempt <= MAX_ATTEMPTS && !success; attempt++) {
+    success = firePackageScrapeDispatch_(token);
+    if (!success && attempt < MAX_ATTEMPTS) {
+      Logger.log('Dispatch attempt ' + attempt + ' failed; retrying in ' + (RETRY_SLEEP_MS / 1000) + 's');
+      Utilities.sleep(RETRY_SLEEP_MS);
+    }
+  }
+  if (success) {
+    props.setProperty('LAST_DISPATCH_DATE', todayEt);
+    Logger.log('Dispatched package-scrape-daily for ' + todayEt);
+  } else {
+    Logger.log('Dispatch failed after ' + MAX_ATTEMPTS + ' attempts; alerting operator');
+    try {
+      MailApp.sendEmail(
+        PACKAGE_SCRAPE_ALERT_EMAIL,
+        '[gmail-scraper] daily dispatch FAILED ' + todayEt,
+        'triggerPackageScrape (pipeline_trigger.gs) could not fire package-scrape-daily after ' +
+        MAX_ATTEMPTS + ' attempts.\n\n' +
+        'Consequence: no scrape today, so the asset-tasks -> date-validator chain ' +
+        'will not run and no validator email goes out.\n\n' +
+        'Likely cause: GITHUB_TOKEN (fine-grained PAT, 90-day expiry) expired or lost ' +
+        'contents:write on jamilmendez-ontel/gmail-scraper.\n\n' +
+        'Recovery: fix the Script Property, then run scrape.yml manually with ' +
+        'fire_chain=true (Actions > Gmail Package Scraper > Run workflow).'
+      );
+    } catch (e) {
+      Logger.log('Alert email failed: ' + e);
+    }
+  }
+}
+
+function firePackageScrapeDispatch_(token) {
+  var url = 'https://api.github.com/repos/jamilmendez-ontel/gmail-scraper/dispatches';
+
+  var options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
+    },
+    payload: JSON.stringify({
+      event_type: 'package-scrape-daily'
+    }),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+
+  if (code === 204) {
+    Logger.log('repository_dispatch fired successfully');
+    return true;
+  } else {
+    Logger.log('repository_dispatch failed: HTTP ' + code + ' — ' + response.getContentText());
+    return false;
+  }
+}
+
+/**
+ * Run this ONCE after creating the PAT to schedule a calendar reminder
+ * 5 days before the 90-day expiry.
+ */
+function schedulePackageScraperTokenReminder() {
+  var EXPIRY_DAYS = 90;
+  var REMINDER_DAYS_BEFORE = 5;
+
+  var reminderDate = new Date();
+  reminderDate.setDate(reminderDate.getDate() + EXPIRY_DAYS - REMINDER_DAYS_BEFORE);
+
+  var event = CalendarApp.getDefaultCalendar().createAllDayEvent(
+    'Rotate GitHub PAT — gmail-scraper trigger',
+    reminderDate,
+    {
+      description:
+        'The fine-grained GitHub PAT for the gmail-scraper repo expires in 5 days.\n\n' +
+        'This PAT is used by package_scraper_trigger.gs (Apps Script).\n\n' +
+        'Steps:\n' +
+        '1. Go to https://github.com/settings/tokens and generate a new 90-day PAT\n' +
+        '   - Repository access: gmail-scraper AND local-pipeline\n' +
+        '   - Permissions: Contents → Read and Write\n' +
+        '   - Expiration: 90 days\n' +
+        '2. Update GITHUB_TOKEN in this Apps Script project (Project Settings > Script Properties)\n' +
+        '3. Run schedulePackageScraperTokenReminder() again to set the next reminder'
+    }
+  );
+
+  event.addEmailReminder(0);
+  event.addEmailReminder(24 * 60);
+
+  Logger.log('Rotation reminder created for ' + reminderDate.toDateString());
+}
+
+/**
+ * Create (or re-create) the daily 6 PM Asia/Manila trigger for
+ * triggerPackageScrape. RUN THIS ONCE from the Apps Script editor after
+ * pasting this file; it is idempotent (existing triggers for the function
+ * are deleted first, so re-running never stacks duplicates).
+ *
+ * Why an explicit time zone: Apps Script's atHour() otherwise fires in the
+ * project's time zone (America/New_York), which would move the scrape by
+ * an hour in PHT every DST change. The contract is 6 PM PHT.
+ */
+function setupPackageScrapeTrigger() {
+  var FN = 'triggerPackageScrape';
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === FN) {
+      ScriptApp.deleteTrigger(triggers[i]);
+      Logger.log('Deleted existing ' + FN + ' trigger');
+    }
+  }
+  ScriptApp.newTrigger(FN)
+    .timeBased()
+    .everyDays(1)
+    .atHour(18)
+    .nearMinute(0)
+    .inTimezone('Asia/Manila')
+    .create();
+  Logger.log('Created daily ' + FN + ' trigger at 18:00 Asia/Manila (+/-15 min)');
 }
