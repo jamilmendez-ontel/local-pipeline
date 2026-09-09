@@ -124,6 +124,16 @@ asset-tasks only), so the second run is safe. Known property: `--send` upserts
 `daily_notifications` and re-sends if run twice on the same day, so the emails
 run has no retry loop around the send steps.
 
+**Write amplification (WAL diet, 2026-09-08).** Per-statement WAL accounting
+showed the two 5-minute pipelines, not the nightly reloads, were the largest
+writers: the Daily Reports rolling scrape (~10 GB/day) and the User Priorities
+refresh (~4.4 GB/day) rewrote or row-locked every row in their window each run.
+Both now merge change-only through a session temp table
+(`swift_api_pipeline/daily_reports_merge.py`, `transform.transform_user_priorities`,
+`PipelineDB.copy_merge`); raw tables are TRUNCATEd, not DELETEd, before a reload.
+Cadences are unchanged. `loaded_at` on those staging tables now means "this row
+last changed", which is what the freshness probes already assumed.
+
 ### Incremental asset-tasks shadow (pilot, 2026-07)
 
 `extract_asset_tasks_inc.py` is a SHADOW duplicate of the asset-tasks

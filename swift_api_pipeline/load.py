@@ -32,10 +32,19 @@ class SupabaseLoader:
         logger.info(f" Pipeline run completed: {status}")
 
     def _clear_raw_table(self, table_name: str) -> None:
-        """Delete all rows from a raw table before fresh load."""
+        """Empty a raw table before a fresh load.
+
+        TRUNCATE, not DELETE (2026-09-08 WAL diet): DELETE wrote a WAL record
+        per tuple plus index entries and left every row dead for autovacuum
+        (raw_user_priorities: ~11.9k rows x 255 reloads/day = ~1 GB WAL/day
+        for a table that is fully replaced seconds later). TRUNCATE is
+        transactional, near-zero WAL, and reclaims the space immediately.
+        These raw tables have no readers other than the transform that
+        follows in the same pipeline run.
+        """
         logger.info(f" Clearing {table_name}...")
         retry_db(
-            lambda: self.db.execute(f'DELETE FROM {SCHEMA_RAW}.{table_name}'),
+            lambda: self.db.execute(f'TRUNCATE {SCHEMA_RAW}.{table_name}'),
             description=f"clear {table_name}"
         )
         logger.info(f" Cleared {table_name}")

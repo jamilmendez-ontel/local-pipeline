@@ -119,6 +119,19 @@ LIMIT 10;
   (~12–34 s each).
 - `analytics.refresh_invoice_audit()` — used by the weekly compliance
   audit report; auto-syncs new TS<n> projects.
+- `daily_reports_merge.py` + `transform.transform_user_priorities()` —
+  change-only merges (2026-09-08 WAL diet). A batch is COPYed into a session
+  temp table (`PipelineDB.copy_merge`, unlogged, no WAL) and ONE statement
+  LEFT JOINs it to the target so only new / changed / gone rows are written.
+  Why: a per-row `INSERT ... ON CONFLICT DO UPDATE ... WHERE (cols) IS
+  DISTINCT FROM (EXCLUDED.cols)` still row-locks every conflicting row before
+  the guard runs (WAL lock record + full-page write per touched page every
+  5-min checkpoint): measured ~10 GB WAL/day from the 288x/day Daily Reports
+  scrape and ~4.4 GB/day from the priorities DELETE+INSERT, for a few hundred
+  real row changes. Migration 256 adds the unique `task_did` index the
+  priorities merge conflicts on; `load._clear_raw_table` is TRUNCATE now.
+  Guard tests: `tests/test_wal_diet_guards.py` (every written column must be
+  compared; temp columns must match the COPY list).
 
 ## Migrations
 

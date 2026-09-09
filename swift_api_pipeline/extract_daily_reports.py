@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from base_extractor import BaseExtractor
+from daily_reports_merge import merge_hours, merge_raw, merge_tasks, merge_timers
 from config import (
     SCHEMA_RAW, SCHEMA_STAGING,
     get_logger, get_db, close_db, retry_db, setup_logging,
@@ -337,67 +338,12 @@ class DailyReportsPipeline:
                 submitted_by, submitted_on, approved_by, approved_on, assigned_approver, RUN_ID,
             ))
 
-        # Batch insert raw
-        BATCH_SIZE = 2000
-        for i in range(0, len(raw_batch), BATCH_SIZE):
-            chunk = raw_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
-                    f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
-                    f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
-                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
-                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
-                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
-                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
-                    c,
-                ),
-                description=f"raw tasks batch {i // BATCH_SIZE + 1}",
-            )
-            logger.info(f"  Raw: {min(i + BATCH_SIZE, len(raw_batch))}/{len(raw_batch)}")
-
-        # Batch insert staging
-        for i in range(0, len(stg_batch), BATCH_SIZE):
-            chunk = stg_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_reports "
-                    f"(emp_id, asset_name, asset_did, project_did, work_date, task_did, task_status, "
-                    f" req_count, milestone, submitted_by, submitted_on, approved_by, approved_on, assigned_approver, run_id) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid) "
-                    f"ON CONFLICT (task_did) DO UPDATE SET "
-                    # asset_name is the asset's live Swift shortName
-                    # ("FullName_<emp_id>"); refreshing it on conflict is what
-                    # carries a Swift rename (e.g. a married surname) into rows
-                    # that already exist. Before 2026-08-28 only status fields
-                    # were updated, so pre-created tasks kept the old name forever.
-                    # emp_id is deliberately NOT refreshed: it is derived from the
-                    # shortName suffix, and a malformed rename would otherwise
-                    # overwrite a correct id on every windowed row (roster join).
-                    f"asset_name=EXCLUDED.asset_name, "
-                    f"task_status=EXCLUDED.task_status, req_count=EXCLUDED.req_count, "
-                    f"submitted_by=EXCLUDED.submitted_by, submitted_on=EXCLUDED.submitted_on, "
-                    f"approved_by=EXCLUDED.approved_by, approved_on=EXCLUDED.approved_on, "
-                    f"assigned_approver=EXCLUDED.assigned_approver, "
-                    f"run_id=EXCLUDED.run_id, loaded_at=NOW() "
-                    # Skip no-op rewrites: unconditionally bumping run_id/loaded_at
-                    # rewrote all ~46k window rows every 5-min run (WAL + autovacuum
-                    # churn that depleted the Supabase Disk IO budget, 2026-07-09).
-                    f"WHERE (stg_daily_reports.asset_name, "
-                    f" stg_daily_reports.task_status, stg_daily_reports.req_count, "
-                    f" stg_daily_reports.submitted_by, stg_daily_reports.submitted_on, "
-                    f" stg_daily_reports.approved_by, stg_daily_reports.approved_on, "
-                    f" stg_daily_reports.assigned_approver) IS DISTINCT FROM "
-                    f"(EXCLUDED.asset_name, "
-                    f" EXCLUDED.task_status, EXCLUDED.req_count, EXCLUDED.submitted_by, "
-                    f" EXCLUDED.submitted_on, EXCLUDED.approved_by, EXCLUDED.approved_on, "
-                    f" EXCLUDED.assigned_approver)",
-                    c,
-                ),
-                description=f"stg tasks batch {i // BATCH_SIZE + 1}",
-            )
-            logger.info(f"  Staging: {min(i + BATCH_SIZE, len(stg_batch))}/{len(stg_batch)}")
+        # Change-only merges (daily_reports_merge.py): the whole batch goes
+        # into a temp table and only new/changed rows touch the target, so
+        # unchanged rows are never locked or rewritten.
+        BATCH_SIZE = 2000  # still used by the Step 5 reconcile deletes
+        merge_raw(db, raw_batch, label="raw tasks")
+        merge_tasks(db, stg_batch)
 
         logger.info(f"  Loaded {len(stg_batch)} tasks")
 
@@ -476,45 +422,8 @@ class DailyReportsPipeline:
                 task_did, json.dumps(r, default=str), RUN_ID, date.today(),
             ))
 
-        for i in range(0, len(req_stg_batch), BATCH_SIZE):
-            chunk = req_stg_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_hours "
-                    f"(emp_id, work_date, task_did, hours_worked, work_description, "
-                    f" req_status, req_id, created_at_api, updated_at_api, file_uploaded_count, run_id) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid) "
-                    f"ON CONFLICT (task_did, req_id) DO UPDATE SET "
-                    f"hours_worked=EXCLUDED.hours_worked, work_description=EXCLUDED.work_description, "
-                    f"req_status=EXCLUDED.req_status, updated_at_api=EXCLUDED.updated_at_api, "
-                    f"file_uploaded_count=EXCLUDED.file_uploaded_count, "
-                    f"run_id=EXCLUDED.run_id, loaded_at=NOW() "
-                    # Skip no-op rewrites (Disk IO churn; see stg_daily_reports upsert)
-                    f"WHERE (stg_daily_report_hours.hours_worked, stg_daily_report_hours.work_description, "
-                    f" stg_daily_report_hours.req_status, stg_daily_report_hours.updated_at_api, "
-                    f" stg_daily_report_hours.file_uploaded_count) IS DISTINCT FROM "
-                    f"(EXCLUDED.hours_worked, EXCLUDED.work_description, EXCLUDED.req_status, "
-                    f" EXCLUDED.updated_at_api, EXCLUDED.file_uploaded_count)",
-                    c,
-                ),
-                description=f"stg reqs batch {i // BATCH_SIZE + 1}",
-            )
-        for i in range(0, len(req_raw_batch), BATCH_SIZE):
-            chunk = req_raw_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
-                    f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
-                    f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
-                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
-                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
-                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
-                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
-                    c,
-                ),
-                description=f"raw reqs batch {i // BATCH_SIZE + 1}",
-            )
+        merge_hours(db, req_stg_batch)
+        merge_raw(db, req_raw_batch, label="raw requirements")
         logger.info(f"  Loaded {len(req_stg_batch)} requirements")
 
         # Batch load timers
@@ -535,41 +444,8 @@ class DailyReportsPipeline:
                 task_did, json.dumps(t, default=str), RUN_ID, date.today(),
             ))
 
-        for i in range(0, len(tmr_stg_batch), BATCH_SIZE):
-            chunk = tmr_stg_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_STAGING}.stg_daily_report_attendance "
-                    f"(emp_id, work_date, task_did, timer_id, timer_start, timer_end, "
-                    f" duration_min, user_name, user_auth_id, run_id) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) "
-                    f"ON CONFLICT (task_did, timer_id) DO UPDATE SET "
-                    f"timer_start=EXCLUDED.timer_start, timer_end=EXCLUDED.timer_end, "
-                    f"duration_min=EXCLUDED.duration_min, run_id=EXCLUDED.run_id, loaded_at=NOW() "
-                    # Skip no-op rewrites (Disk IO churn; see stg_daily_reports upsert)
-                    f"WHERE (stg_daily_report_attendance.timer_start, stg_daily_report_attendance.timer_end, "
-                    f" stg_daily_report_attendance.duration_min) IS DISTINCT FROM "
-                    f"(EXCLUDED.timer_start, EXCLUDED.timer_end, EXCLUDED.duration_min)",
-                    c,
-                ),
-                description=f"stg timers batch {i // BATCH_SIZE + 1}",
-            )
-        for i in range(0, len(tmr_raw_batch), BATCH_SIZE):
-            chunk = tmr_raw_batch[i:i + BATCH_SIZE]
-            retry_db(
-                lambda c=chunk: db.executemany(
-                    f"INSERT INTO {SCHEMA_RAW}.raw_daily_reports "
-                    f"(source_type, source_id, project_did, asset_did, task_did, data, run_id, run_date) "
-                    f"VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid, $8) "
-                    f"ON CONFLICT (source_type, source_id) DO UPDATE SET "
-                    f"data = EXCLUDED.data, project_did = EXCLUDED.project_did, "
-                    f"asset_did = EXCLUDED.asset_did, task_did = EXCLUDED.task_did, "
-                    f"run_id = EXCLUDED.run_id, run_date = EXCLUDED.run_date, loaded_at = NOW() "
-                    f"WHERE raw_daily_reports.data IS DISTINCT FROM EXCLUDED.data",
-                    c,
-                ),
-                description=f"raw timers batch {i // BATCH_SIZE + 1}",
-            )
+        merge_timers(db, tmr_stg_batch)
+        merge_raw(db, tmr_raw_batch, label="raw timers")
         logger.info(f"  Loaded {len(tmr_stg_batch)} timers")
 
         # Step 5: reconcile deletions. The staging loads above are upsert-only,
