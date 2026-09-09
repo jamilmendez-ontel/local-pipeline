@@ -397,9 +397,10 @@ surviving copy is marked `COUNTED`, totals ignore set-asides, and an amber note
 explains how to finish cleaning via the daily email's still-valid buttons.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 260 stated hours exclude cancelled requirements
+migrations/` for recent changes. Latest: 260 + 261 stated hours and cancelled reports
 (`analytics.v_daily_report_approvals.total_hours` is now the sum of a report's requirement
-hours with `req_status = 'cancelled'` left out, NULL when nothing live remains; the task
+hours with `req_status = 'cancelled'` left out; 0 for a cancelled task or when every
+requirement is cancelled, NULL only when the report has no requirement rows yet; the task
 rollup MV still sums everything because it cannot be redefined without dropping the
 never-drop `mv_hr_report_review` chain, so the view computes the filtered sum itself via the
 `(task_did, req_id)` index. Fixes the DRMC day panel / HR review showing 18 h for a 9 h
