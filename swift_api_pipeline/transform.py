@@ -228,85 +228,128 @@ def transform_projects(db, run_id: str):
     return len(rows)
 
 
-def transform_user_priorities(db, run_id: str):
-    """Transform raw_user_priorities to stg_user_priorities using server-side SQL.
+# stg_user_priorities columns in INSERT order, paired with the expression that
+# derives each one from a raw_user_priorities row `r`. Kept as data so the
+# merge's compare tuple and SET clause are generated from ONE list (a column
+# written but not compared would silently never update; see
+# tests/test_wal_diet_guards.py).
+def _prio_ts(field):
+    """Parse the report's ISO-8601 string (empty string -> NULL)."""
+    return f"NULLIF(r.data->>'{field}', '')::timestamptz"
 
-    The full-refresh clear is folded into the INSERT as a data-modifying CTE so
-    the clear and the reload run as ONE atomic statement (same pattern as
-    stg_asset_tasks / stg_invoicing_form). The previous Python version ran the
-    DELETE as its own auto-committed call followed by batched INSERTs, leaving
-    the table empty or partial for several seconds on every 5-minute reload;
-    readers hitting that window saw "missing" data (observed 2026-07-14).
 
-    DISTINCT ON de-duplicates report rows: a status the extract filter does not
-    know about passes through more than one per-status pull (has_rejection rows
-    were double-inserted until 2026-07-14), and page drift can repeat a row
-    within one pull.
+# SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
+# Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
+_PRIO_CLEAN_EXPR = (
+    "TRIM(REGEXP_REPLACE("
+    "  REGEXP_REPLACE(r.data->>'Task Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
+    "  '\\s+[0-9]+$', ''))"
+)
+USER_PRIORITY_COLUMNS = [
+    ("task_did", "r.data->>'Task DID'"),
+    ("asset_did", "r.data->>'Asset DID'"),
+    ("org_did", "r.data->>'Organization DID'"),
+    ("project_did", "r.data->>'Project DID'"),
+    ("task_name", "r.data->>'Task Name'"),
+    ("task_name_clean", _PRIO_CLEAN_EXPR),
+    ("milestone", "r.data->>'Milestone'"),
+    ("status", "r.data->>'Status'"),
+    ("calendar_status", "r.data->>'Calendar Status'"),
+    ("assigned_to", "r.data->>'Assigned To'"),
+    ("scheduled", _prio_ts("Scheduled")),
+    ("scheduled_by", "r.data->>'Scheduled By'"),
+    ("display_date", _prio_ts("Display Date")),
+    ("duration", "r.data->>'Duration'"),
+    ("pin_type", "r.data->>'Pin Type'"),
+    ("submitted_by", "NULLIF(r.data->>'Submitted By', '')"),
+    ("submitted_on", _prio_ts("Submitted On")),
+    ("approved_by", "NULLIF(r.data->>'Approved By', '')"),
+    ("approved_on", _prio_ts("Approved On")),
+    ("rejected_by", "NULLIF(r.data->>'Rejected By', '')"),
+    ("rejected_on", _prio_ts("Rejected On")),
+    ("cancelled_by", "NULLIF(r.data->>'Cancelled By', '')"),
+    ("cancelled_on", _prio_ts("Cancelled On")),
+    ("organization", "r.data->>'Organization'"),
+    ("project", "r.data->>'Project'"),
+    ("asset_id", "r.data->>'Asset Id'"),
+    ("asset_name", "r.data->>'Asset Name'"),
+]
+_PRIO_DEDUPE_KEY = "COALESCE(r.data->>'Task DID', r.id::text)"
+
+
+def build_user_priorities_merge_sql():
+    """Merge-in-place of raw_user_priorities (run $1) into stg_user_priorities.
+
+    One statement, three data-modifying CTEs, so readers never see an empty
+    or partial table (the reason the previous clear+reload was a single CTE):
+      gone     rows no longer in the feed are deleted (plus any NULL task_did
+               rows, which cannot be matched and are simply re-inserted)
+      changed  feed rows that are new, or whose data columns differ
+      ups      only THOSE rows are inserted / updated (ON CONFLICT on the
+               unique task_did index, migration 256)
+    Returns total feed rows, deleted, written (new + changed), inserted.
     """
-    print(f"[{datetime.now():%H:%M:%S}] Transforming user priorities...")
-
-    def _ts(field):
-        """Parse the report's ISO-8601 string (empty string -> NULL)."""
-        return f"NULLIF(r.data->>'{field}', '')::timestamptz"
-
-    # SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
-    # Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
-    clean_expr = (
-        "TRIM(REGEXP_REPLACE("
-        "  REGEXP_REPLACE(r.data->>'Task Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-        "  '\\s+[0-9]+$', ''))"
-    )
-    dedupe_key = "COALESCE(r.data->>'Task DID', r.id::text)"
-
-    sql = (
-        # Data-modifying CTE: clear the table, then reload -- atomically.
-        f"WITH cleared AS (DELETE FROM {SCHEMA_STAGING}.stg_user_priorities RETURNING 1), "
-        f"ins AS ("
-        f"INSERT INTO {SCHEMA_STAGING}.stg_user_priorities "
-        f"(task_did, asset_did, org_did, project_did, task_name, task_name_clean, "
-        f"milestone, status, calendar_status, assigned_to, scheduled, scheduled_by, "
-        f"display_date, duration, pin_type, submitted_by, submitted_on, approved_by, "
-        f"approved_on, rejected_by, rejected_on, cancelled_by, cancelled_on, "
-        f"organization, project, asset_id, asset_name, run_id) "
-        f"SELECT DISTINCT ON ({dedupe_key}) "
-        f"  r.data->>'Task DID', "
-        f"  r.data->>'Asset DID', "
-        f"  r.data->>'Organization DID', "
-        f"  r.data->>'Project DID', "
-        f"  r.data->>'Task Name', "
-        f"  {clean_expr}, "
-        f"  r.data->>'Milestone', "
-        f"  r.data->>'Status', "
-        f"  r.data->>'Calendar Status', "
-        f"  r.data->>'Assigned To', "
-        f"  {_ts('Scheduled')}, "
-        f"  r.data->>'Scheduled By', "
-        f"  {_ts('Display Date')}, "
-        f"  r.data->>'Duration', "
-        f"  r.data->>'Pin Type', "
-        f"  NULLIF(r.data->>'Submitted By', ''), "
-        f"  {_ts('Submitted On')}, "
-        f"  NULLIF(r.data->>'Approved By', ''), "
-        f"  {_ts('Approved On')}, "
-        f"  NULLIF(r.data->>'Rejected By', ''), "
-        f"  {_ts('Rejected On')}, "
-        f"  NULLIF(r.data->>'Cancelled By', ''), "
-        f"  {_ts('Cancelled On')}, "
-        f"  r.data->>'Organization', "
-        f"  r.data->>'Project', "
-        f"  r.data->>'Asset Id', "
-        f"  r.data->>'Asset Name', "
-        f"  $1 "
-        f"FROM {SCHEMA_RAW}.raw_user_priorities r "
-        f"WHERE r.run_id = $1 "
-        f"ORDER BY {dedupe_key} "
-        f"RETURNING 1) "
-        f"SELECT COUNT(*) FROM ins"
+    cols = [c for c, _ in USER_PRIORITY_COLUMNS]
+    src_select = ", ".join(f"{expr} AS {c}" for c, expr in USER_PRIORITY_COLUMNS)
+    compare_t = ", ".join(f"t.{c}" for c in cols if c != "task_did")
+    compare_s = ", ".join(f"s.{c}" for c in cols if c != "task_did")
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "task_did")
+    return (
+        f"WITH src AS ("
+        f"  SELECT DISTINCT ON ({_PRIO_DEDUPE_KEY}) {src_select}, $1::uuid AS run_id"
+        f"  FROM {SCHEMA_RAW}.raw_user_priorities r"
+        f"  WHERE r.run_id = $1"
+        f"  ORDER BY {_PRIO_DEDUPE_KEY}"
+        f"), gone AS ("
+        f"  DELETE FROM {SCHEMA_STAGING}.stg_user_priorities g"
+        f"  WHERE g.task_did IS NULL"
+        f"     OR NOT EXISTS (SELECT 1 FROM src WHERE src.task_did = g.task_did)"
+        f"  RETURNING 1"
+        f"), changed AS ("
+        f"  SELECT s.* FROM src s"
+        f"  LEFT JOIN {SCHEMA_STAGING}.stg_user_priorities t ON t.task_did = s.task_did"
+        f"  WHERE t.task_did IS NULL OR ({compare_t}) IS DISTINCT FROM ({compare_s})"
+        f"), ups AS ("
+        f"  INSERT INTO {SCHEMA_STAGING}.stg_user_priorities ({', '.join(cols)}, run_id)"
+        f"  SELECT {', '.join(cols)}, run_id FROM changed"
+        f"  ON CONFLICT (task_did) DO UPDATE SET {set_clause}, "
+        f"    run_id = EXCLUDED.run_id, loaded_at = now()"
+        f"  RETURNING (xmax = 0) AS inserted"
+        f") SELECT (SELECT count(*) FROM src) AS total,"
+        f"         (SELECT count(*) FROM gone) AS deleted,"
+        f"         (SELECT count(*) FROM ups) AS written,"
+        f"         (SELECT count(*) FROM ups WHERE inserted) AS inserted"
     )
 
-    total = db.fetchval(sql, run_id)
-    print(f"[{datetime.now():%H:%M:%S}] Total user priorities transformed: {total:,} "
-          f"(atomic clear+reload, duplicates dropped)")
+
+USER_PRIORITIES_MERGE_SQL = build_user_priorities_merge_sql()
+
+
+def transform_user_priorities(db, run_id: str):
+    """Merge raw_user_priorities (this run) into stg_user_priorities in place.
+
+    Until 2026-09-08 this was an atomic clear+reload CTE: every 5-minute run
+    deleted and re-inserted all ~11.9k rows (8 indexes each) even when one
+    task had changed. Measured 2026-09-04..08: 20.8 GB of WAL over 1,220
+    reloads, ~17 MB per run, ~4.4 GB/day, the third-largest writer in the
+    warehouse. The merge writes only rows that are new, changed or gone, so a
+    quiet feed costs a few KB. Still ONE statement (see
+    build_user_priorities_merge_sql), so readers never see a partial table;
+    ids and loaded_at of untouched rows are preserved (loaded_at now means
+    "this row last changed", which is what the freshness probes want).
+
+    DISTINCT ON de-duplicates report rows: a status the extract filter does
+    not know about passes through more than one per-status pull (has_rejection
+    rows were double-inserted until 2026-07-14), and page drift can repeat a
+    row within one pull.
+    """
+    print(f"[{datetime.now():%H:%M:%S}] Transforming user priorities (merge in place)...")
+
+    row = db.fetchrow(USER_PRIORITIES_MERGE_SQL, run_id)
+    total, deleted, written, inserted = row["total"], row["deleted"], row["written"], row["inserted"]
+    print(f"[{datetime.now():%H:%M:%S}] User priorities merged: {total:,} in feed | "
+          f"{inserted:,} new, {written - inserted:,} changed, {deleted:,} removed "
+          f"(duplicates dropped)")
     return total
 
 

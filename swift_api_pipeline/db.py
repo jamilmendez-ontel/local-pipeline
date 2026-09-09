@@ -337,6 +337,36 @@ class PipelineDB:
         return self._run(_do())
 
 
+    def copy_merge(
+        self,
+        temp_ddl: str,
+        temp_table: str,
+        columns: List[str],
+        records: List[Tuple],
+        merge_sql: str,
+        *args,
+        timeout: float = 600,
+    ) -> Any:
+        """COPY a batch into a session TEMP table, then run one merge statement.
+
+        All on ONE connection inside ONE transaction, which is what makes the
+        temp table visible to the merge and drops it at commit (declare it
+        `ON COMMIT DROP`). The temp table is unlogged, so the COPY writes no
+        WAL; only the rows the merge statement actually touches do. Returns
+        the merge statement's single result value (e.g. rows written).
+        """
+        async def _do():
+            async with self._pool.acquire() as conn:
+                await conn.execute(f"SET statement_timeout = '{int(timeout)}s'")
+                async with conn.transaction():
+                    await conn.execute(temp_ddl)
+                    await conn.copy_records_to_table(
+                        temp_table, records=records, columns=columns, timeout=timeout,
+                    )
+                    return await conn.fetchval(merge_sql, *args, timeout=timeout)
+        return self._run(_do())
+
+
 # ------------------------------------------------------------------
 # Singleton + retry helper
 # ------------------------------------------------------------------
