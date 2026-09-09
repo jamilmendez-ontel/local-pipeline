@@ -22,7 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import daily_reports_merge as drm
-from transform import USER_PRIORITIES_MERGE_SQL, USER_PRIORITY_COLUMNS
+from transform import (USER_PRIORITIES_MERGE_SQL, USER_PRIORITY_COLUMNS,
+                       ASSET_TASKS_MERGE_SQL, ASSET_TASK_COLUMNS)
 
 
 def _set_columns(sql):
@@ -135,3 +136,94 @@ def test_pipeline_db_has_copy_merge():
     from db import PipelineDB
     sig = inspect.signature(PipelineDB.copy_merge)
     assert list(sig.parameters)[:6] == ["self", "temp_ddl", "temp_table", "columns", "records", "merge_sql"]
+
+
+def test_asset_tasks_merge_compares_every_written_column():
+    sql = ASSET_TASKS_MERGE_SQL
+    written = _set_columns(sql) - {"loaded_at", "run_id"}
+    compared = _compared_columns(sql, ["task_did"])
+    assert written == compared, (
+        f"asset tasks: written but never compared {sorted(written - compared)}; "
+        f"compared but never written {sorted(compared - written)}"
+    )
+    data_cols = {c for c, _ in ASSET_TASK_COLUMNS} - {"task_did"}
+    assert written == data_cols, "asset tasks: SET clause drifted from ASSET_TASK_COLUMNS"
+
+
+def test_asset_tasks_merge_is_one_statement_with_delete_and_dedupe():
+    sql = ASSET_TASKS_MERGE_SQL
+    assert sql.startswith("WITH src AS (")
+    assert "DISTINCT ON (r.data->>'Task_DID')" in sql and "ORDER BY r.data->>'Task_DID', r.id DESC" in sql
+    assert "DELETE FROM data_staging.stg_asset_tasks" in sql
+    assert "NOT EXISTS (SELECT 1 FROM src WHERE src.task_did = g.task_did)" in sql
+    assert "g.task_did IS NULL" in sql
+    assert "ON CONFLICT (task_did) DO UPDATE" in sql
+    assert sql.count(";") == 0, "must stay a single statement (table can never be left empty)"
+    assert _insert_columns(sql) == [c for c, _ in ASSET_TASK_COLUMNS] + ["run_id"]
+
+
+def test_asset_tasks_transform_keeps_the_date_and_clean_name_parsing():
+    exprs = dict(ASSET_TASK_COLUMNS)
+    assert r"'^([0-9]+[a-zA-Z]?\. *)+'" in exprs["task_name_clean"]
+    assert r"'\s+[0-9]+$'" in exprs["task_name_clean"]
+    for col in ("task_scheduled", "task_submitted_on", "task_approved_on", "task_cancelled_on"):
+        e = exprs[col]
+        assert "> 9999999999" in e and "/ 1000.0" in e and "LEFT(" in e and "America/New_York" in e, col
+
+
+# --- migrations 257/259: change-only rebuild_timer_clean() -----------------
+MIG_DIR = os.path.join(os.path.dirname(HERE), "migrations")
+CLEAN_COLUMNS = ["id", "project", "project_number", "project_did", "site_name", "site_id", "task",
+                 "site_lat", "site_long", "user_lat", "user_long", "user_accuracy_m",
+                 "site_vs_user_km", "start_time", "end_time", "duration_min", "user_name",
+                 "user_email", "user_role", "run_id", "run_date", "loaded_at", "start_date",
+                 "end_date", "task_clean", "asset_did"]
+CLEAN_NATURAL_KEY = ["project_did", "user_email", "start_time", "site_name", "site_id", "task",
+                     "end_time", "duration_min"]
+
+
+def _timer_fn_body(name):
+    sql = open(os.path.join(MIG_DIR, name), encoding="utf-8").read()
+    fs = sql.index("CREATE OR REPLACE FUNCTION data_staging.rebuild_timer_clean()")
+    fe = sql.index("$function$;", fs)
+    return sql[fs:fe]
+
+
+def test_timer_rebuild_migrations_compare_every_column_but_id_and_loaded_at():
+    for name in ("257_rebuild_timer_clean_change_only.sql", "259_rebuild_timer_clean_advisory_lock.sql"):
+        body = _timer_fn_body(name)
+        m = re.search(r"WHERE t\.id = c\.id\s+AND \((.*?)\) IS NOT DISTINCT FROM \((.*?)\)", body, re.S)
+        assert m, f"{name}: sync compare tuple not found"
+        t_cols = [x.strip()[2:] for x in m.group(1).split(",")]
+        c_cols = [x.strip()[2:] for x in m.group(2).split(",")]
+        assert t_cols == c_cols, f"{name}: compare tuple sides differ"
+        assert set(t_cols) == set(CLEAN_COLUMNS) - {"id", "loaded_at"}, (
+            f"{name}: compare tuple != clean columns minus id/loaded_at: "
+            f"missing {sorted(set(CLEAN_COLUMNS) - {'id', 'loaded_at'} - set(t_cols))}, "
+            f"extra {sorted(set(t_cols) - set(CLEAN_COLUMNS))}"
+        )
+
+
+def test_timer_rebuild_migrations_build_in_temp_and_sync_into_clean():
+    for name in ("257_rebuild_timer_clean_change_only.sql", "259_rebuild_timer_clean_advisory_lock.sql"):
+        body = _timer_fn_body(name)
+        assert "DELETE FROM data_staging.stg_timer_activities_clean;" not in body, f"{name}: full DELETE must be gone"
+        assert "TRUNCATE data_staging.stg_timer_activities_clean" not in body, f"{name}: readers rely on no TRUNCATE"
+        # every build/self-reference site targets the temp table ...
+        assert body.count("INSERT INTO tmp_timer_clean") == 3, name
+        assert "UPDATE tmp_timer_clean t\n    SET duration_min" in body, name
+        assert "DELETE FROM tmp_timer_clean cln" in body, name
+        # ... and the real table is touched only by the sync (reuse-UPDATE, DELETE, INSERT, its NOT EXISTS)
+        real = re.findall(r"data_staging\.stg_timer_activities_clean", body)
+        assert len(real) == 5, f"{name}: expected 5 real-table references (LIKE + 4 sync sites), got {len(real)}"
+        nat = re.search(r"AND c\.run_id = '00000000-0000-0000-0000-000000000002'::uuid\s+AND (.*?);", body, re.S).group(1)
+        assert [re.sub(r"c\.(\w+) IS NOT DISTINCT FROM t\.\1", r"\1", x.strip()) for x in nat.split(" AND ")] == CLEAN_NATURAL_KEY, name
+        assert "GET DIAGNOSTICS v_deleted = ROW_COUNT" in body and "GET DIAGNOSTICS v_inserted = ROW_COUNT" in body, name
+
+
+def test_timer_rebuild_259_serializes_callers():
+    body = _timer_fn_body("259_rebuild_timer_clean_advisory_lock.sql")
+    code = chr(10).join(l for l in body.splitlines() if not l.strip().startswith("--"))
+    first_stmt = code[code.index("BEGIN" + chr(10)):].split(";")[0]
+    assert "pg_advisory_xact_lock(hashtext('data_staging.rebuild_timer_clean'))" in first_stmt, \
+        "advisory lock must be the first statement so overlapping calls queue before building"
