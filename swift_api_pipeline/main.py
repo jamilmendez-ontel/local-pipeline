@@ -647,18 +647,10 @@ def run_all_pipelines(send_email=True):
 
     overall_success = all(r.status == "SUCCESS" for r in pipeline_results)
 
-    # Downstream: notify date-validator that fresh asset_tasks data is ready.
-    # Never fail the pipeline on a dispatch error.
-    if overall_success:
-        try:
-            from github_trigger import fire_dispatch
-            fire_dispatch(
-                "jamilmendez-ontel/date-validator",
-                "date-validator-daily",
-                client_payload={"source": "asset_tasks"},
-            )
-        except Exception as e:
-            logger.warning(f"downstream dispatch failed: {type(e).__name__}: {e}")
+    # No in-process date-validator dispatch here (removed 2026-09-08). The
+    # validator is fired ONLY by pipeline-asset-tasks.yml when the run was
+    # started by the 6 PM PHT gmail-scraper chain (downstream=validator). A
+    # dispatch from this local/batch path would race that chain.
 
     return overall_success
 
