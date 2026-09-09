@@ -13,7 +13,8 @@
 -- variance_hours / coverage_pct (b.total_hours from the view), the member
 -- weekly report, the Ops report and analytics.dr_attachment_counts (hours
 -- range filters). Measured 2026-09-09: 26 cancelled rows / 126.5 h across
--- 19 task_dids; 11 rows of v_daily_report_approvals change.
+-- 19 task_dids; 11 rows of v_daily_report_approvals change (-81.5 h; the
+-- other 45 h sit on tasks the view excludes: work_date NULL or in the future).
 --
 -- Why not fix the MV: an MV cannot be redefined in place, and
 -- mv_daily_report_task_rollup is a catalog dependency of BOTH
