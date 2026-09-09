@@ -43,7 +43,8 @@ def _insert_columns(sql):
 
 def _temp_columns(ddl):
     body = ddl[ddl.index("(") + 1: ddl.rindex(")")]
-    return [part.strip().split()[0] for part in body.split(",")]
+    cols = [part.strip().split()[0] for part in body.split(",")]
+    return [c for c in cols if not c.startswith("_")]  # _seq is COPY-filled
 
 
 MERGES = [
@@ -75,6 +76,12 @@ def test_daily_reports_temp_tables_match_copy_columns():
     for name, _sql, ddl, cols, _keys in MERGES:
         assert _temp_columns(ddl) == cols, f"{name}: temp table columns != COPY column list"
         assert "ON COMMIT DROP" in ddl, f"{name}: temp table must drop at commit"
+        assert "_seq bigserial" in ddl, f"{name}: needs the _seq tiebreak column"
+
+
+def test_daily_reports_merges_last_duplicate_wins():
+    for name, sql, _ddl, _cols, _keys in MERGES:
+        assert ", _seq DESC" in sql, f"{name}: in-batch duplicate must resolve to the LAST row sent"
 
 
 def test_daily_reports_raw_compare_normalises_legacy_json_strings():

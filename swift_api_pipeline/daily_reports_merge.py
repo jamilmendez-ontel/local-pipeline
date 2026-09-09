@@ -59,6 +59,10 @@ def build_merge_sql(*, target, temp_table, key_cols, insert_cols, update_cols,
     compare_exprs {col: (target_expr, src_expr)} overrides for the change
                  test of one column (e.g. normalising legacy jsonb strings)
 
+    Duplicate keys inside one batch: the LAST row sent wins (ORDER BY _seq
+    DESC under DISTINCT ON), matching the old per-row executemany order.
+    Every temp table therefore carries a `_seq bigserial` that COPY fills.
+
     Returns SQL whose single result value is the number of rows written.
     """
     select_exprs = select_exprs or {}
@@ -78,7 +82,7 @@ def build_merge_sql(*, target, temp_table, key_cols, insert_cols, update_cols,
     return (
         f"WITH src AS ("
         f"  SELECT DISTINCT ON ({', '.join(key_cols)}) {src_select}"
-        f"  FROM {temp_table} ORDER BY {', '.join(key_cols)}"
+        f"  FROM {temp_table} ORDER BY {', '.join(key_cols)}, _seq DESC"
         f"), changed AS ("
         f"  SELECT s.* FROM src s"
         f"  LEFT JOIN {target} t ON {key_join}"
@@ -99,7 +103,7 @@ RAW_TEMP = "tmp_raw_daily_reports"
 RAW_TEMP_DDL = (
     f"CREATE TEMP TABLE {RAW_TEMP} ("
     "source_type text, source_id text, project_did text, asset_did text, "
-    "task_did text, data text, run_id text, run_date date) ON COMMIT DROP"
+    "task_did text, data text, run_id text, run_date date, _seq bigserial) ON COMMIT DROP"
 )
 RAW_COLUMNS = ["source_type", "source_id", "project_did", "asset_did",
                "task_did", "data", "run_id", "run_date"]
@@ -127,7 +131,7 @@ TASKS_TEMP_DDL = (
     "work_date date, task_did text, task_status text, req_count integer, "
     "milestone text, submitted_by text, submitted_on timestamptz, "
     "approved_by text, approved_on timestamptz, assigned_approver text, "
-    "run_id text) ON COMMIT DROP"
+    "run_id text, _seq bigserial) ON COMMIT DROP"
 )
 TASKS_COLUMNS = ["emp_id", "asset_name", "asset_did", "project_did", "work_date",
                  "task_did", "task_status", "req_count", "milestone", "submitted_by",
@@ -163,7 +167,7 @@ HOURS_TEMP_DDL = (
     "emp_id text, work_date date, task_did text, hours_worked numeric, "
     "work_description text, req_status text, req_id text, "
     "created_at_api timestamptz, updated_at_api timestamptz, "
-    "file_uploaded_count integer, run_id text) ON COMMIT DROP"
+    "file_uploaded_count integer, run_id text, _seq bigserial) ON COMMIT DROP"
 )
 HOURS_COLUMNS = ["emp_id", "work_date", "task_did", "hours_worked", "work_description",
                  "req_status", "req_id", "created_at_api", "updated_at_api",
@@ -188,7 +192,7 @@ TIMERS_TEMP_DDL = (
     f"CREATE TEMP TABLE {TIMERS_TEMP} ("
     "emp_id text, work_date date, task_did text, timer_id text, "
     "timer_start timestamptz, timer_end timestamptz, duration_min numeric, "
-    "user_name text, user_auth_id text, run_id text) ON COMMIT DROP"
+    "user_name text, user_auth_id text, run_id text, _seq bigserial) ON COMMIT DROP"
 )
 TIMERS_COLUMNS = ["emp_id", "work_date", "task_did", "timer_id", "timer_start",
                   "timer_end", "duration_min", "user_name", "user_auth_id", "run_id"]
