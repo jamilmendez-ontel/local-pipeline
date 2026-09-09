@@ -56,18 +56,27 @@ def parse_timestamp(val) -> datetime:
     return datetime.fromisoformat(str(val))
 
 
-def validate_transform_counts(db, raw_tables, stg_table, run_id, transformed_count):
-    """Compare raw and staging row counts after a transform to catch silent data loss."""
+def validate_transform_counts(db, raw_tables, stg_table, run_id, transformed_count,
+                              raw_count_sql: str = None):
+    """Compare raw and staging row counts after a transform to catch silent data loss.
+
+    raw_count_sql: optional override ($1 = run_id) for transforms that
+    intentionally collapse raw duplicates (asset tasks since 2026-09-09:
+    DISTINCT ON task_did), so an expected collapse is not reported as loss.
+    """
     if isinstance(raw_tables, str):
         raw_tables = [raw_tables]
 
     raw_count = 0
-    for table in raw_tables:
-        count = db.fetchval(
-            f'SELECT COUNT(*) FROM {SCHEMA_RAW}.{table} WHERE run_id = $1',
-            run_id
-        )
-        raw_count += count
+    if raw_count_sql:
+        raw_count = db.fetchval(raw_count_sql, run_id)
+    else:
+        for table in raw_tables:
+            count = db.fetchval(
+                f'SELECT COUNT(*) FROM {SCHEMA_RAW}.{table} WHERE run_id = $1',
+                run_id
+            )
+            raw_count += count
 
     stg_count = db.fetchval(f'SELECT COUNT(*) FROM {SCHEMA_STAGING}.{stg_table}')
 
@@ -470,7 +479,8 @@ def run_asset_tasks_transform(run_id: str = None):
     asset_count = transform_asset_tasks(db, run_id)
 
     print(f"\nRow Count Validation:")
-    validate_transform_counts(db, "raw_asset_tasks", "stg_asset_tasks", run_id, asset_count)
+    validate_transform_counts(db, "raw_asset_tasks", "stg_asset_tasks", run_id, asset_count,
+                              raw_count_sql=ASSET_TASKS_RAW_DISTINCT_SQL)
 
     print(f"\n{'='*60}")
     print(f"Transformation Summary:")
@@ -742,11 +752,19 @@ def build_asset_tasks_merge_sql():
         f") SELECT (SELECT count(*) FROM src) AS total,"
         f"         (SELECT count(*) FROM gone) AS deleted,"
         f"         (SELECT count(*) FROM ups) AS written,"
-        f"         (SELECT count(*) FROM ups WHERE inserted) AS inserted"
+        f"         (SELECT count(*) FROM ups WHERE inserted) AS inserted,"
+        f"         (SELECT count(*) FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id = $1) AS raw_rows"
     )
 
 
 ASSET_TASKS_MERGE_SQL = build_asset_tasks_merge_sql()
+# Raw rows the merge will produce: one per task_did, NULL task_dids collapse to
+# one row (DISTINCT ON semantics). Used by validate_transform_counts so an
+# intentional duplicate collapse is not reported as data loss.
+ASSET_TASKS_RAW_DISTINCT_SQL = (
+    f"SELECT COUNT(DISTINCT COALESCE(data->>'Task_DID', '__NULL_TASK_DID__')) "
+    f"FROM {SCHEMA_RAW}.raw_asset_tasks WHERE run_id = $1"
+)
 
 
 def transform_asset_tasks(db, run_id: str):
@@ -763,9 +781,10 @@ def transform_asset_tasks(db, run_id: str):
     # and stg (3.8 GB) once each and hash-joins 2.79M rows.
     row = db.fetchrow(ASSET_TASKS_MERGE_SQL, run_id, statement_timeout=900)
     total, deleted, written, inserted = row["total"], row["deleted"], row["written"], row["inserted"]
+    dups = row["raw_rows"] - total
     print(f"[{datetime.now():%H:%M:%S}] Asset tasks merged: {total:,} in feed | "
-          f"{inserted:,} new, {written - inserted:,} changed, {deleted:,} removed "
-          f"(raw duplicates collapsed)")
+          f"{inserted:,} new, {written - inserted:,} changed, {deleted:,} removed | "
+          f"{row['raw_rows']:,} raw rows, {dups:,} duplicate task_did rows collapsed")
     return total
 
 def extract_project_number(project_name: str) -> int:
