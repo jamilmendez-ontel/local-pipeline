@@ -404,7 +404,8 @@ requirement is cancelled, NULL only when the report has no requirement rows yet;
 rollup MV still sums everything because it cannot be redefined without dropping the
 never-drop `mv_hr_report_review` chain, so the view computes the filtered sum itself via the
 `(task_did, req_id)` index. Fixes the DRMC day panel / HR review showing 18 h for a 9 h
-report with a cancelled 9 h twin; 11 reports change; applied live 2026-09-09); 255 schedule roster reconciliation (`analytics.v_schedule_roster_reconciliation` + `analytics.shift_clock_pht()`: each member's current declared schedule from the HR schedule-changes sheet beside the roster shift in `ref_employees`, with mismatch flags and `needs_review`; the roster drives DRMC Late/undertime, so mismatches mean those badges use the wrong window until HR fixes the roster sheet; read by ontel-people's member-page pill and `/hr/schedule-mismatches`; applied live 2026-09-07, 92 rows / 13 needs_review); 254 HR rollup refresh IO (work_mem 64MB on
+report with a cancelled 9 h twin; 11 reports change under 260 and a further 7,573 go to 0
+under 261; both applied live 2026-09-09); 255 schedule roster reconciliation (`analytics.v_schedule_roster_reconciliation` + `analytics.shift_clock_pht()`: each member's current declared schedule from the HR schedule-changes sheet beside the roster shift in `ref_employees`, with mismatch flags and `needs_review`; the roster drives DRMC Late/undertime, so mismatches mean those badges use the wrong window until HR fixes the roster sheet; read by ontel-people's member-page pill and `/hr/schedule-mismatches`; applied live 2026-09-07, 92 rows / 13 needs_review); 254 HR rollup refresh IO (work_mem 64MB on
 `refresh_dr_task_rollup_safe` / `refresh_hr_report_review_safe`, 233 had only covered the
 timer function; covering index `(user_email, start_time, end_time)` on
 `stg_timer_activities_clean` so the timer rollup refresh is an index-only scan instead of a

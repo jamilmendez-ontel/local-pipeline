@@ -30,6 +30,13 @@
 --   * DR Approval "stated hours" range filters with a 0 lower bound now match
 --     cancelled tasks (total_hours is no longer NULL for them) -- the intended
 --     meaning of the rule.
+--   * Known edge (pre-merge review, 0 rows today): the CASE reads the RAW
+--     stg_daily_reports.task_status, while the view's exposed task_status is the
+--     184 overlay, which reports 'approved' whenever app_hr.report_approval_log
+--     has an ok row in the last 30 days. A report approved in the app and then
+--     cancelled in Swift within 30 days would read status 'approved' with 0 h.
+--     Swift's cancellation is the truth, so 0 h is right; the overlay label is
+--     the pre-existing quirk (it does not check la.swift_status). Left as is.
 --
 -- Mechanics: whitespace-tolerant regexp replace of the exact subquery 260
 -- installed (Postgres re-serialises it with an "AS sum" alias and line breaks),
