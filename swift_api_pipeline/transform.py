@@ -638,102 +638,135 @@ def run_assets_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
-def transform_asset_tasks(db, run_id: str):
-    """Transform raw_asset_tasks to stg_asset_tasks using server-side SQL.
+# stg_asset_tasks columns in INSERT order, paired with the expression that
+# derives each from a raw_asset_tasks row `r`. ONE list feeds the merge's
+# select, compare tuple and SET clause (tests/test_wal_diet_guards.py).
+def _at_date_expr(field):
+    """Parse epoch-ms or ISO date string to date (Eastern Time); matches
+    Python's parse_task_date()."""
+    return (
+        f"CASE "
+        f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
+        f"  AND (r.data->>'{field}')::bigint > 9999999999 "
+        f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint / 1000.0) "
+        f"        AT TIME ZONE 'America/New_York')::date "
+        f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
+        f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint) "
+        f"        AT TIME ZONE 'America/New_York')::date "
+        f"WHEN r.data->>'{field}' IS NOT NULL AND r.data->>'{field}' != '' "
+        f"  THEN LEFT(r.data->>'{field}', 10)::date "
+        f"ELSE NULL END"
+    )
 
-    Runs entirely in PostgreSQL — no data transfer to Python.
-    Processes 2.2M rows in ~2-3 minutes vs ~44 minutes with Python round-trips.
+
+# SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
+# Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
+_AT_CLEAN_EXPR = (
+    "TRIM(REGEXP_REPLACE("
+    "  REGEXP_REPLACE(r.data->>'Task_Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
+    "  '\\s+[0-9]+$', ''))"
+)
+ASSET_TASK_COLUMNS = [
+    ("project_did", "r.project_did"),
+    ("project_status", "r.data->>'Project_Status'"),
+    ("asset_did", "r.data->>'Asset_DID'"),
+    ("task_did", "r.data->>'Task_DID'"),
+    ("asset_id", "r.data->>'Asset_ID'"),
+    ("asset_name", "r.data->>'Asset_Name'"),
+    ("asset_requirement_count", "(r.data->>'Asset_Requirement_Count')::int"),
+    ("task_name", "r.data->>'Task_Name'"),
+    ("task_name_clean", _AT_CLEAN_EXPR),
+    ("task_status", "r.data->>'Task_Status'"),
+    ("task_scheduled", _at_date_expr("Task_Scheduled")),
+    ("task_assigned_to_did", "r.data->>'Task_Assigned_To_DID'"),
+    ("task_assigned_to_collection", "r.data->>'Task_Assigned_To_Collection'"),
+    ("task_assigned_to_name", "r.data->>'Task_Assigned_To_Name'"),
+    ("task_assigned_to_email", "r.data->>'Task_Assigned_To_Email'"),
+    ("task_submitted_on", _at_date_expr("Task_Submitted_On")),
+    ("task_submitted_by_did", "r.data->>'Task_Submitted_By_DID'"),
+    ("task_submitted_by_name", "r.data->>'Task_Submitted_By_Name'"),
+    ("task_submitted_by_email", "r.data->>'Task_Submitted_By_Email'"),
+    ("task_approved_on", _at_date_expr("Task_Approved_On")),
+    ("task_approved_by_did", "r.data->>'Task_Approved_By_DID'"),
+    ("task_approved_by_name", "r.data->>'Task_Approved_By_Name'"),
+    ("task_approved_by_email", "r.data->>'Task_Approved_By_Email'"),
+    ("task_cancelled_on", _at_date_expr("Task_Cancelled_On")),
+    ("task_cancelled_by_did", "r.data->>'Task_Cancelled_By_DID'"),
+    ("task_cancelled_by_name", "r.data->>'Task_Cancelled_By_Name'"),
+    ("task_cancelled_by_email", "r.data->>'Task_Cancelled_By_Email'"),
+]
+
+
+def build_asset_tasks_merge_sql():
+    """Merge-in-place of raw_asset_tasks (run $1) into stg_asset_tasks.
+
+    ONE statement (the 2026-06-05 lesson: a separate DELETE that committed
+    before a timed-out INSERT left the table empty), three data-modifying CTEs:
+      gone     stg rows whose task_did is not in this run's raw set (plus
+               NULL task_did rows, which cannot be matched) are deleted
+      changed  raw rows that are new, or whose columns differ from stg
+      ups      only THOSE rows are inserted / updated (ON CONFLICT on the
+               unique task_did index, migration 258)
+    Raw duplicates of a task_did (seen 2026-05-15) collapse to the LAST raw
+    row (highest id). Untouched rows keep id, run_id and loaded_at, so
+    loaded_at now means "row last changed" (no consumer filters by run_id;
+    dedup ORDER BY loaded_at DESC in views is moot with a unique task_did).
+    Returns total feed rows, deleted, written (new + changed), inserted.
     """
-    print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks...")
-
-    # NOTE: the full-refresh clear is NOT a separate DELETE anymore. It is
-    # folded into the INSERT below as a data-modifying CTE so the clear and
-    # the reload run as ONE atomic statement. Previously the DELETE was its
-    # own auto-committed call; when the big INSERT hit statement_timeout and
-    # rolled back, the table was left EMPTY until the next run (2026-06-05
-    # incident). A single statement can never leave stg_asset_tasks empty.
-
-    # SQL helper: parse epoch-ms or ISO date string to date (Eastern Time)
-    # Matches Python's parse_task_date() logic
-    def _date_expr(field):
-        return (
-            f"CASE "
-            f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
-            f"  AND (r.data->>'{field}')::bigint > 9999999999 "
-            f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint / 1000.0) "
-            f"        AT TIME ZONE 'America/New_York')::date "
-            f"WHEN r.data->>'{field}' ~ '^[0-9]+$' "
-            f"  THEN (TO_TIMESTAMP((r.data->>'{field}')::bigint) "
-            f"        AT TIME ZONE 'America/New_York')::date "
-            f"WHEN r.data->>'{field}' IS NOT NULL AND r.data->>'{field}' != '' "
-            f"  THEN LEFT(r.data->>'{field}', 10)::date "
-            f"ELSE NULL END"
-        )
-
-    # SQL: clean_task_name — strip prefix "1. 2a. " and suffix " 123"
-    # Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
-    clean_expr = (
-        "TRIM(REGEXP_REPLACE("
-        "  REGEXP_REPLACE(r.data->>'Task_Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-        "  '\\s+[0-9]+$', ''))"
+    cols = [c for c, _ in ASSET_TASK_COLUMNS]
+    src_select = ", ".join(f"{expr} AS {c}" for c, expr in ASSET_TASK_COLUMNS)
+    compare_t = ", ".join(f"t.{c}" for c in cols if c != "task_did")
+    compare_s = ", ".join(f"s.{c}" for c in cols if c != "task_did")
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "task_did")
+    return (
+        f"WITH src AS ("
+        f"  SELECT DISTINCT ON (r.data->>'Task_DID') {src_select}, $1::uuid AS run_id"
+        f"  FROM {SCHEMA_RAW}.raw_asset_tasks r"
+        f"  WHERE r.run_id = $1"
+        f"  ORDER BY r.data->>'Task_DID', r.id DESC"
+        f"), gone AS ("
+        f"  DELETE FROM {SCHEMA_STAGING}.stg_asset_tasks g"
+        f"  WHERE g.task_did IS NULL"
+        f"     OR NOT EXISTS (SELECT 1 FROM src WHERE src.task_did = g.task_did)"
+        f"  RETURNING 1"
+        f"), changed AS ("
+        f"  SELECT s.* FROM src s"
+        f"  LEFT JOIN {SCHEMA_STAGING}.stg_asset_tasks t ON t.task_did = s.task_did"
+        f"  WHERE t.task_did IS NULL OR ({compare_t}) IS DISTINCT FROM ({compare_s})"
+        f"), ups AS ("
+        f"  INSERT INTO {SCHEMA_STAGING}.stg_asset_tasks ({', '.join(cols)}, run_id)"
+        f"  SELECT {', '.join(cols)}, run_id FROM changed"
+        f"  ON CONFLICT (task_did) DO UPDATE SET {set_clause}, "
+        f"    run_id = EXCLUDED.run_id, loaded_at = now()"
+        f"  RETURNING (xmax = 0) AS inserted"
+        f") SELECT (SELECT count(*) FROM src) AS total,"
+        f"         (SELECT count(*) FROM gone) AS deleted,"
+        f"         (SELECT count(*) FROM ups) AS written,"
+        f"         (SELECT count(*) FROM ups WHERE inserted) AS inserted"
     )
 
-    sql = (
-        # Data-modifying CTE: clear the table, then reload — atomically.
-        f"WITH cleared AS (DELETE FROM {SCHEMA_STAGING}.stg_asset_tasks RETURNING 1) "
-        f"INSERT INTO {SCHEMA_STAGING}.stg_asset_tasks "
-        f"(project_did, project_status, asset_did, task_did, asset_id, asset_name, "
-        f"asset_requirement_count, task_name, task_name_clean, task_status, task_scheduled, "
-        f"task_assigned_to_did, task_assigned_to_collection, task_assigned_to_name, "
-        f"task_assigned_to_email, task_submitted_on, task_submitted_by_did, "
-        f"task_submitted_by_name, task_submitted_by_email, task_approved_on, "
-        f"task_approved_by_did, task_approved_by_name, task_approved_by_email, "
-        f"task_cancelled_on, task_cancelled_by_did, task_cancelled_by_name, "
-        f"task_cancelled_by_email, run_id) "
-        f"SELECT "
-        f"  r.project_did, "
-        f"  r.data->>'Project_Status', "
-        f"  r.data->>'Asset_DID', "
-        f"  r.data->>'Task_DID', "
-        f"  r.data->>'Asset_ID', "
-        f"  r.data->>'Asset_Name', "
-        f"  (r.data->>'Asset_Requirement_Count')::int, "
-        f"  r.data->>'Task_Name', "
-        f"  {clean_expr}, "
-        f"  r.data->>'Task_Status', "
-        f"  {_date_expr('Task_Scheduled')}, "
-        f"  r.data->>'Task_Assigned_To_DID', "
-        f"  r.data->>'Task_Assigned_To_Collection', "
-        f"  r.data->>'Task_Assigned_To_Name', "
-        f"  r.data->>'Task_Assigned_To_Email', "
-        f"  {_date_expr('Task_Submitted_On')}, "
-        f"  r.data->>'Task_Submitted_By_DID', "
-        f"  r.data->>'Task_Submitted_By_Name', "
-        f"  r.data->>'Task_Submitted_By_Email', "
-        f"  {_date_expr('Task_Approved_On')}, "
-        f"  r.data->>'Task_Approved_By_DID', "
-        f"  r.data->>'Task_Approved_By_Name', "
-        f"  r.data->>'Task_Approved_By_Email', "
-        f"  {_date_expr('Task_Cancelled_On')}, "
-        f"  r.data->>'Task_Cancelled_By_DID', "
-        f"  r.data->>'Task_Cancelled_By_Name', "
-        f"  r.data->>'Task_Cancelled_By_Email', "
-        f"  $1::uuid "
-        f"FROM {SCHEMA_RAW}.raw_asset_tasks r "
-        f"WHERE r.run_id = $1"
-    )
 
-    print(f"[{datetime.now():%H:%M:%S}] Running server-side SQL transform...")
-    # 900s timeout: stg_asset_tasks reload is now ~2.6M rows and growing; the
-    # default 300s tripped on 2026-06-05. Sibling transforms use 600s; the
-    # atomic clear+reload here warrants the larger ceiling.
-    result = db.execute(sql, run_id, statement_timeout=900)
-    # result is like "INSERT 0 2233001"
-    total = int(result.split()[-1]) if result else 0
+ASSET_TASKS_MERGE_SQL = build_asset_tasks_merge_sql()
 
-    print(f"[{datetime.now():%H:%M:%S}] Total asset tasks transformed: {total:,}")
+
+def transform_asset_tasks(db, run_id: str):
+    """Merge raw_asset_tasks (this run) into stg_asset_tasks in place.
+
+    Until 2026-09-09 this was an atomic clear+reload CTE of all ~2.79M rows
+    (13 indexes): ~4.3 GB of WAL per run, twice a day since the 6 PM PHT
+    validator chain. The merge writes only rows that are new, changed or
+    gone (a few thousand a day). Still ONE statement, so the table can never
+    be left empty (2026-06-05 incident). See build_asset_tasks_merge_sql.
+    """
+    print(f"[{datetime.now():%H:%M:%S}] Transforming asset tasks (merge in place)...")
+    # 900s timeout kept from the clear+reload era: the merge reads raw (jsonb)
+    # and stg (3.8 GB) once each and hash-joins 2.79M rows.
+    row = db.fetchrow(ASSET_TASKS_MERGE_SQL, run_id, statement_timeout=900)
+    total, deleted, written, inserted = row["total"], row["deleted"], row["written"], row["inserted"]
+    print(f"[{datetime.now():%H:%M:%S}] Asset tasks merged: {total:,} in feed | "
+          f"{inserted:,} new, {written - inserted:,} changed, {deleted:,} removed "
+          f"(raw duplicates collapsed)")
     return total
-
 
 def extract_project_number(project_name: str) -> int:
     """Extract project number from project name like 'TECH-OPS: TS13'"""

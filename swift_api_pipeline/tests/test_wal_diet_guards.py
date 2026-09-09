@@ -22,7 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import daily_reports_merge as drm
-from transform import USER_PRIORITIES_MERGE_SQL, USER_PRIORITY_COLUMNS
+from transform import (USER_PRIORITIES_MERGE_SQL, USER_PRIORITY_COLUMNS,
+                       ASSET_TASKS_MERGE_SQL, ASSET_TASK_COLUMNS)
 
 
 def _set_columns(sql):
@@ -135,3 +136,36 @@ def test_pipeline_db_has_copy_merge():
     from db import PipelineDB
     sig = inspect.signature(PipelineDB.copy_merge)
     assert list(sig.parameters)[:6] == ["self", "temp_ddl", "temp_table", "columns", "records", "merge_sql"]
+
+
+def test_asset_tasks_merge_compares_every_written_column():
+    sql = ASSET_TASKS_MERGE_SQL
+    written = _set_columns(sql) - {"loaded_at", "run_id"}
+    compared = _compared_columns(sql, ["task_did"])
+    assert written == compared, (
+        f"asset tasks: written but never compared {sorted(written - compared)}; "
+        f"compared but never written {sorted(compared - written)}"
+    )
+    data_cols = {c for c, _ in ASSET_TASK_COLUMNS} - {"task_did"}
+    assert written == data_cols, "asset tasks: SET clause drifted from ASSET_TASK_COLUMNS"
+
+
+def test_asset_tasks_merge_is_one_statement_with_delete_and_dedupe():
+    sql = ASSET_TASKS_MERGE_SQL
+    assert sql.startswith("WITH src AS (")
+    assert "DISTINCT ON (r.data->>'Task_DID')" in sql and "ORDER BY r.data->>'Task_DID', r.id DESC" in sql
+    assert "DELETE FROM data_staging.stg_asset_tasks" in sql
+    assert "NOT EXISTS (SELECT 1 FROM src WHERE src.task_did = g.task_did)" in sql
+    assert "g.task_did IS NULL" in sql
+    assert "ON CONFLICT (task_did) DO UPDATE" in sql
+    assert sql.count(";") == 0, "must stay a single statement (table can never be left empty)"
+    assert _insert_columns(sql) == [c for c, _ in ASSET_TASK_COLUMNS] + ["run_id"]
+
+
+def test_asset_tasks_transform_keeps_the_date_and_clean_name_parsing():
+    exprs = dict(ASSET_TASK_COLUMNS)
+    assert r"'^([0-9]+[a-zA-Z]?\. *)+'" in exprs["task_name_clean"]
+    assert r"'\s+[0-9]+$'" in exprs["task_name_clean"]
+    for col in ("task_scheduled", "task_submitted_on", "task_approved_on", "task_cancelled_on"):
+        e = exprs[col]
+        assert "> 9999999999" in e and "/ 1000.0" in e and "LEFT(" in e and "America/New_York" in e, col
