@@ -47,7 +47,8 @@
  *               gmail-revenue-report (AR aging + sales; downstream: the
  *               Daily Finance report + COP invoice forecast chains)
  *   12:01 AM  — Asset Tasks (post-local-batch-retirement; downstream=all
- *               so export + date-validator + Fri/Mon weeklies run at end-of-pipeline)
+ *               so export + Fri/Mon weeklies run at end-of-pipeline. The
+ *               validator is NOT fired by this run since 2026-09-08.)
  *   6:00 PM PHT (6 AM EDT / 5 AM EST) — Gmail Package Scraper
  *               (triggerPackageScrape → gmail-scraper package-scrape-daily).
  *               On success the scrape workflow fires pipeline-asset-tasks with

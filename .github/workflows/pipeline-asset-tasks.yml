@@ -41,7 +41,7 @@ on:
         required: false
         type: string
       downstream:
-        description: 'End-of-run dispatches: all (export + date-validator + Fri compliance + Mon invoicing/PO), validator (date-validator only; the 6 PM PHT chain fired by gmail-scraper), none.'
+        description: 'End-of-run dispatches: all (export + Fri compliance + Mon invoicing/PO; NOT the validator), validator (date-validator only; the 6 PM PHT chain fired by gmail-scraper), none.'
         required: false
         type: choice
         options:
@@ -88,8 +88,13 @@ jobs:
           # stage defaults to 'full' (nightly repository_dispatch path stays extract+transform)
           if [ -z "$STAGE" ]; then STAGE="full"; fi
           # downstream mode: all (default) | validator | none.
-          #   all       - nightly 12:01 AM ET Apps Script run: export + date-validator
-          #               + Fri weekly-compliance + Mon weekly-invoicing-po-tasks
+          #   all       - nightly 12:01 AM ET Apps Script run: export
+          #               + Fri weekly-compliance + Mon weekly-invoicing-po-tasks.
+          #               NOT date-validator (since 2026-09-08 the validator is
+          #               fired only by the 6 PM PHT chain; the nightly dispatch
+          #               was a guaranteed no-op that left an UpstreamStale marker
+          #               row, and after a manual daytime scrape it could have
+          #               sent the day's report on stale asset data)
           #   validator - the 6 PM PHT chain fired by gmail-scraper on success:
           #               date-validator ONLY (the export email and the weekly
           #               reports must not go out twice a day)
@@ -206,7 +211,8 @@ jobs:
           done
 
       - name: Dispatch date-validator-daily (cross-repo, requires DATE_VALIDATOR_DISPATCH_PAT)
-        if: ${{ steps.resolve.outputs.project == '' && (steps.resolve.outputs.downstream == 'all' || steps.resolve.outputs.downstream == 'validator') && steps.resolve.outputs.stage != 'extract' }}
+        if: ${{ steps.resolve.outputs.project == '' && steps.resolve.outputs.downstream == 'validator' && steps.resolve.outputs.stage != 'extract' }}
+        # Only the 6 PM PHT chain (downstream=validator) fires the validator.
         # Non-fatal: validator triggering issues should be logged but not crash the run.
         continue-on-error: true
         run: |
