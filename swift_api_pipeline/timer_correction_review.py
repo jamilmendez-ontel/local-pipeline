@@ -2831,7 +2831,10 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
     <html>
     <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
         <div style="background:#2e7d32;color:white;padding:16px 24px;">
-            <h2 style="margin:0;">Timer Entries Updated - {date_str}</h2>
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
+            <td valign="middle"><h2 style="margin:0;">Timer Entries Updated - {date_str}</h2></td>
+            </tr></table>
             <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{subheader}</p>
         </div>
         <div style="padding:24px;">
@@ -3104,7 +3107,10 @@ def run_remind(test_mode: bool = False):
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#e65100;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Duplicate Reminder - {date_str}</h2>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+                <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
+                <td valign="middle"><h2 style="margin:0;">Duplicate Reminder - {date_str}</h2></td>
+                </tr></table>
                 <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{max_days} day{'s' if max_days != 1 else ''} pending</p>
             </div>
             <div style="padding:24px;">
@@ -3510,7 +3516,10 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         <html>
         <body style="font-family:Arial,sans-serif;margin:0;padding:0;">
             <div style="background:#1565c0;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Timer Activity Entries - {date_str}{_RESEND_UPDATED_BADGE}</h2>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+                <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
+                <td valign="middle"><h2 style="margin:0;">Timer Activity Entries - {date_str}{_RESEND_UPDATED_BADGE}</h2></td>
+                </tr></table>
                 <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">Your day was updated since the original email. Latest view below.</p>
             </div>
             <div style="padding:24px;">
