@@ -97,7 +97,10 @@ def send_period_complete_email(period_start, period_end, total, approved, cancel
         <html>
         <body style="font-family:Arial,sans-serif;">
             <div style="background:#2e7d32;color:white;padding:16px 24px;">
-                <h2 style="margin:0;">Daily Reports — Period Complete</h2>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+                <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
+                <td valign="middle"><h2 style="margin:0;">Daily Reports — Period Complete</h2></td>
+                </tr></table>
             </div>
             <div style="padding:24px;">
                 <p>All daily reports for <strong>{period_str}</strong> have been reviewed.</p>
