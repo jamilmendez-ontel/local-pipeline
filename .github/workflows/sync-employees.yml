@@ -1,6 +1,19 @@
 name: "Sync: Employee Reference"
 
+# Daily sync of HR's "Active Employee Information" Google Sheet into
+# reference.ref_employees (+ ref_employee_approvers). Apps Script
+# triggerEmployeeSync() in pipeline_trigger.gs fires the repository_dispatch at
+# 7 PM PHT every day, one hour before the schedule-changes sync that resolves
+# emp_ids against this table. The cron below is the backstop 12 h later
+# (7 AM PHT). The sync is idempotent (upsert-on-(emp_id, effective_date),
+# in-place updates, resignation-on-absence guarded by a 50% row-count floor),
+# so a second daily run is harmless. Before 2026-09-16 this only ran from the
+# sheet's "Sync to Supabase" menu button (4 runs ever), so resignations reached
+# the DB weeks late.
+
 on:
+  schedule:
+    - cron: '0 23 * * *'   # 23:00 UTC = 7:00 AM PHT / 7 PM ET (backstop)
   repository_dispatch:
     types: [sync-employees]
   workflow_dispatch:

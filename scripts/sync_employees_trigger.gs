@@ -2,6 +2,10 @@
  * Apps Script for Employee Reference Google Sheet
  * Triggers GHA workflow to sync sheet data to Supabase
  *
+ * Manual menu only. The DAILY sync (7 PM PHT) is triggerEmployeeSync() in
+ * pipeline_trigger.gs (nanoninth project) since 2026-09-16; this file stays for
+ * on-demand syncs and syncs with a specific effective date.
+ *
  * Setup:
  * 1. Open the Google Sheet
  * 2. Extensions → Apps Script
