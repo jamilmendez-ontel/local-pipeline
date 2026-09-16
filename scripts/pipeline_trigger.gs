@@ -554,6 +554,49 @@ function setupScheduleChangesSyncTrigger() {
 }
 
 /**
+ * Daily HR employee-roster sheet sync (sync-employees.yml -> reference.ref_employees)
+ * at 7 PM PHT, one hour BEFORE the schedule-changes sync (which resolves emp_ids
+ * against ref_employees). Until 2026-09-16 the roster only synced when someone
+ * pressed "Sync to Supabase" in the HR sheet (4 runs ever), so resignations
+ * reached the DB weeks late. Same DST-twin pattern as triggerScheduleChangesSync:
+ * 6 AM and 7 AM ET triggers, only the one where Manila reads 19:xx dispatches.
+ * The workflow's cron backstop is 23:00 UTC (7 AM PHT), 12 h later.
+ */
+function triggerEmployeeSync() {
+  var manilaHour = parseInt(Utilities.formatDate(new Date(), 'Asia/Manila', 'H'), 10);
+  if (manilaHour !== 19) {
+    Logger.log('triggerEmployeeSync: Manila hour is ' + manilaHour + ', not 19; skipping (DST twin).');
+    return;
+  }
+  fireDispatch_('sync-employees');
+}
+
+/**
+ * Idempotently (re)create the two daily triggers for triggerEmployeeSync()
+ * (6 AM and 7 AM script time = ET; whichever is 7 PM Manila fires the dispatch).
+ * RUN THIS ONCE from the Apps Script editor after deploying this file.
+ */
+function setupEmployeeSyncTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerEmployeeSync') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  var hours = [6, 7];
+  for (var h = 0; h < hours.length; h++) {
+    ScriptApp.newTrigger('triggerEmployeeSync')
+      .timeBased()
+      .everyDays(1)
+      .atHour(hours[h])
+      .create();
+  }
+
+  Logger.log('Created triggerEmployeeSync triggers: daily 6 AM and 7 AM ET (fires only at 7 PM PHT).');
+}
+
+/**
  * Like fireDispatch_ but allows passing a client_payload — required when the
  * receiving workflow's `on: repository_dispatch` reads inputs via
  * github.event.client_payload.* (which is how we gate dispatch_downstream).
