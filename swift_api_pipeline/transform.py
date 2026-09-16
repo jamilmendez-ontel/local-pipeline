@@ -991,6 +991,129 @@ def run_qa_forms_transform(run_id: str = None):
     print(f"{'='*60}\n")
 
 
+TIMER_STAGING_INSERT_SQL = (
+    f'INSERT INTO {SCHEMA_STAGING}.stg_timer_activities '
+    f'(project, project_number, project_did, site_name, site_id, '
+    f'task, task_clean, site_lat, site_long, user_lat, user_long, '
+    f'user_accuracy_m, site_vs_user_km, start_time, end_time, duration_min, '
+    f'user_name, user_email, user_role, run_id, run_date, start_date, end_date) '
+    f'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)'
+)
+
+# (project, member) pairs present in an EARLIER run of the same month bucket but absent
+# from THIS run, with the most recent earlier run that still carried them. Swift's timer
+# report drops a member the moment the account is deactivated (resignation), so without
+# this the month-bucket DELETE+INSERT below erases their month-to-date (Cho Jebulan,
+# Sep 1-4 2026). Keyed per project so a run where one project's extraction failed
+# (the extractor records 0 rows and still marks the run success) keeps that project's
+# rows for every member, including members who have rows in other projects.
+# "Earlier" = loaded before this run started, so replaying an old run never pulls
+# rows from runs loaded after it.
+VANISHED_MEMBERS_SQL = f'''
+WITH cur AS (
+    SELECT DISTINCT project_did, data->>'User Email' AS email
+    FROM {SCHEMA_RAW}.raw_timer_activities
+    WHERE run_id = $1
+),
+prior AS (
+    SELECT project_did, data->>'User Email' AS email, run_id, run_date,
+           MAX(loaded_at) AS loaded_at, COUNT(*) AS n,
+           MIN(data->>'Project') AS project
+    FROM {SCHEMA_RAW}.raw_timer_activities
+    WHERE start_date = $2 AND run_id <> $1
+      AND loaded_at < (SELECT MIN(loaded_at) FROM {SCHEMA_RAW}.raw_timer_activities WHERE run_id = $1)
+      AND COALESCE(data->>'User Email', '') <> ''
+    GROUP BY 1, 2, 3, 4
+)
+SELECT DISTINCT ON (p.project_did, p.email)
+       p.project_did, p.project, p.email, p.run_id, p.run_date, p.n,
+       NOT EXISTS (SELECT 1 FROM cur c2 WHERE c2.project_did = p.project_did) AS project_absent
+FROM prior p
+LEFT JOIN cur c ON c.project_did = p.project_did AND c.email = p.email
+WHERE c.email IS NULL
+ORDER BY p.project_did, p.email, p.loaded_at DESC
+'''
+
+
+def timer_raw_record_to_row(record) -> tuple:
+    """Map one raw_timer_activities record to a stg_timer_activities row.
+
+    Run provenance (run_id/run_date/start_date/end_date) is taken from the RECORD so
+    carried-forward rows keep pointing at the run that actually captured them.
+    """
+    data = record["data"]
+    project = data.get("Project", "")
+    task = data.get("Task")
+    return (
+        project, extract_project_number(project), record["project_did"],
+        data.get("Site Name"), data.get("Site ID"),
+        task, clean_task_name(task),
+        data.get("Site Lat"), data.get("Site Long"),
+        data.get("User Lat"), data.get("User Long"),
+        data.get("User Accuracy (m)"), data.get("Site vs User (km)"),
+        parse_timestamp(data.get("Start Time")), parse_timestamp(data.get("End Time")),
+        data.get("Duration (min)"),
+        data.get("User Name"), data.get("User Email"), data.get("User Role"),
+        record["run_id"], parse_date(record["run_date"]),
+        parse_date(record["start_date"]), parse_date(record["end_date"]),
+    )
+
+
+def _insert_timer_rows(db, rows, batch_size: int = 5000):
+    for i in range(0, len(rows), batch_size):
+        db.executemany(TIMER_STAGING_INSERT_SQL, rows[i:i + batch_size])
+
+
+def carry_forward_vanished_members(db, run_id, start_date) -> list:
+    """Re-insert, from raw, every (project, member) pair this run no longer returns.
+
+    A pair with rows in an earlier run of the same bucket but none in `run_id` is
+    copied back from the latest earlier run that carried it. Covers Swift dropping
+    deactivated (resigned) members and a run where a project's extraction failed.
+    Returns [{project_did, project, email, run_id, run_date, rows, project_absent}]
+    and logs a WARNING naming each member; `project_absent` marks pairs whose whole
+    project is missing from this run (extraction failure, not a resignation).
+    """
+    vanished = db.fetch(VANISHED_MEMBERS_SQL, run_id, start_date)
+    carried = []
+    for v in vanished:
+        records = db.fetch(
+            f"SELECT * FROM {SCHEMA_RAW}.raw_timer_activities "
+            f"WHERE run_id = $1 AND project_did = $2 AND data->>'User Email' = $3",
+            v["run_id"], v["project_did"], v["email"],
+        )
+        rows = [timer_raw_record_to_row(r) for r in records]
+        if rows:
+            _insert_timer_rows(db, rows)
+        carried.append({"project_did": v["project_did"], "project": v["project"],
+                        "email": v["email"], "run_id": v["run_id"],
+                        "run_date": v["run_date"], "rows": len(rows),
+                        "project_absent": bool(v["project_absent"])})
+    if carried:
+        absent = sorted({c["project"] or c["project_did"] for c in carried if c["project_absent"]})
+        if absent:
+            logger.warning(
+                f"Timer bucket {start_date}: run {run_id} returned NO rows for "
+                f"{', '.join(absent)} although earlier runs had them (extraction failure?); "
+                f"those projects were carried forward from raw."
+            )
+        members = sorted({c["email"] for c in carried if not c["project_absent"]})
+        if members:
+            per_member = {}
+            for c in carried:
+                if not c["project_absent"]:
+                    m = per_member.setdefault(c["email"], {"rows": 0, "run_date": c["run_date"]})
+                    m["rows"] += c["rows"]
+                    m["run_date"] = max(m["run_date"], c["run_date"])
+            detail = "; ".join(f"{e} ({per_member[e]['rows']} rows from run {per_member[e]['run_date']})"
+                               for e in members)
+            logger.warning(
+                f"Timer bucket {start_date}: {len(members)} member(s) absent from run {run_id} "
+                f"but present in earlier runs, carried forward from raw (deactivated in Swift?): {detail}"
+            )
+    return carried
+
+
 def transform_timer_activities(db, run_id: str):
     """Transform raw_timer_activities to stg_timer_activities (append mode - preserves all runs)"""
     print(f"[{datetime.now():%H:%M:%S}] Transforming timer activities...")
@@ -1026,46 +1149,24 @@ def transform_timer_activities(db, run_id: str):
     )
 
     if not result:
+        # Unreachable in practice (meta above comes from the same rows), kept
+        # defensive: the bucket was just deleted, so never return before the
+        # carry-forward below.
         print(f"[{datetime.now():%H:%M:%S}] No timer activities to transform")
-        return 0
 
-    rows = []
-    for record in result:
-        data = record["data"]
-        project = data.get("Project", "")
-        project_number = extract_project_number(project)
-        task = data.get("Task")
-        start_time = parse_timestamp(data.get("Start Time"))
-
-        rows.append((
-            project, project_number, record["project_did"],
-            data.get("Site Name"), data.get("Site ID"),
-            task, clean_task_name(task),
-            data.get("Site Lat"), data.get("Site Long"),
-            data.get("User Lat"), data.get("User Long"),
-            data.get("User Accuracy (m)"), data.get("Site vs User (km)"),
-            start_time, parse_timestamp(data.get("End Time")),
-            data.get("Duration (min)"),
-            data.get("User Name"), data.get("User Email"), data.get("User Role"),
-            run_id, run_date, start_date, end_date
-        ))
-
-    batch_size = 5000
+    rows = [timer_raw_record_to_row(record) for record in result]
     total = len(rows)
-    for i in range(0, total, batch_size):
-        batch = rows[i:i + batch_size]
-        db.executemany(
-            f'INSERT INTO {SCHEMA_STAGING}.stg_timer_activities '
-            f'(project, project_number, project_did, site_name, site_id, '
-            f'task, task_clean, site_lat, site_long, user_lat, user_long, '
-            f'user_accuracy_m, site_vs_user_km, start_time, end_time, duration_min, '
-            f'user_name, user_email, user_role, run_id, run_date, start_date, end_date) '
-            f'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)',
-            batch
-        )
+    _insert_timer_rows(db, rows)
 
-    print(f"[{datetime.now():%H:%M:%S}] Total timer activities transformed: {total:,}")
-    return total
+    # Members Swift no longer returns (deactivated) keep their month-to-date;
+    # a project whose extraction failed keeps its rows too.
+    carried = carry_forward_vanished_members(db, run_id, start_date)
+    carried_rows = sum(c["rows"] for c in carried)
+
+    logger.info(f"Total timer activities transformed: {total:,}"
+                + (f" (+{carried_rows:,} rows carried forward, {len(carried)} project/member pair(s))"
+                   if carried else ""))
+    return total, carried
 
 
 def run_timer_transform(run_id: str = None):
@@ -1091,7 +1192,7 @@ def run_timer_transform(run_id: str = None):
             print("No successful timer pipeline runs found")
             return
 
-    timer_count = transform_timer_activities(db, run_id)
+    timer_count, carried = transform_timer_activities(db, run_id)
 
     print(f"\nRow Count Validation:")
     validate_transform_counts(db, "raw_timer_activities", "stg_timer_activities", run_id, timer_count)
@@ -1100,6 +1201,7 @@ def run_timer_transform(run_id: str = None):
     print(f"Transformation Summary:")
     print(f"  Timer Activities: {timer_count:,}")
     print(f"{'='*60}\n")
+    return carried
 
 
 def transform_ar_aging(db, run_id: str):
