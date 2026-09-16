@@ -399,7 +399,11 @@ surviving copy is marked `COUNTED`, totals ignore set-asides, and an amber note
 explains how to finish cleaning via the daily email's still-valid buttons.
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 260 + 261 stated hours and cancelled reports
+migrations/` for recent changes. Latest: 263 approvals-view variance
+(`analytics.v_daily_report_approvals` gains `variance_hours` + `coverage_pct`, the same
+expressions `mv_hr_report_review` uses, so the DR Approval page shows DR Monitoring's
+Variance column with row-for-row parity; applied live 2026-09-15, 0 mismatches over
+3,782 rows); 260 + 261 stated hours and cancelled reports
 (`analytics.v_daily_report_approvals.total_hours` is now the sum of a report's requirement
 hours with `req_status = 'cancelled'` left out; 0 for a cancelled task or when every
 requirement is cancelled, NULL only when the report has no requirement rows yet; the task
