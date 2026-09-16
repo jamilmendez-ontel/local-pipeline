@@ -71,8 +71,11 @@ jobs:
       - name: Sync employees
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
+          # workflow_dispatch input, or the sheet menu's "Sync with Date"
+          # client_payload (was silently ignored before #75); empty = today.
+          EFFECTIVE_DATE="${{ github.event.inputs.effective_date || github.event.client_payload.effective_date }}"
           DATE_ARG=""
-          if [ -n "${{ github.event.inputs.effective_date }}" ]; then
-            DATE_ARG="--date ${{ github.event.inputs.effective_date }}"
+          if [ -n "$EFFECTIVE_DATE" ]; then
+            DATE_ARG="--date $EFFECTIVE_DATE"
           fi
           python -u sync_employees.py --apply $DATE_ARG
