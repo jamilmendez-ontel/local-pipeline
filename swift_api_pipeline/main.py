@@ -347,8 +347,21 @@ def run_timer_pipeline_full():
     logger.info(f"{'#'*60}")
 
     run_id = run_timer_pipeline()
-    run_timer_transform(run_id)
+    carried = run_timer_transform(run_id) or []
 
+    # A whole project missing from this run (extraction failure; the extractor
+    # records 0 rows and still marks the run success) is abnormal: red email.
+    # Individual members carried forward (resignations) stay a WARNING in the log.
+    absent = sorted({c["project"] or c["project_did"] for c in carried if c.get("project_absent")})
+    if absent:
+        rows = sum(c["rows"] for c in carried if c.get("project_absent"))
+        return PipelineOutcome(
+            run_id=str(run_id),
+            abnormal_projects=absent,
+            detail=(f"Timer extract returned no rows for {', '.join(absent)} although earlier "
+                    f"runs of the month had them; {rows:,} rows carried forward from raw. "
+                    f"Check the Swift API / extraction log."),
+        )
     return True
 
 
