@@ -32,6 +32,16 @@
 --     DROP COLUMN file_req_approved, DROP COLUMN file_req_rejected, DROP COLUMN form_req_total,
 --     DROP COLUMN form_req_uploaded, DROP COLUMN form_req_approved, DROP COLUMN form_req_rejected;
 --   (roll the platform image back first or the walk's INSERT fails on the missing columns)
+--
+-- APPLIED + VERIFIED 2026-09-16 ~22:30 ET against voqfjfngdpcvevbkikud via the Supabase
+-- MCP (dry run of DDL + one-project backfill inside ROLLBACK first, then apply_migration
+-- sections 1-3). Pre-flight: 265 free on every open PR, view has no dependents, live view
+-- body == 264. Post-apply: 18 new columns, view 44 columns, SELECT grants unchanged
+-- (postgres, service_role), 2 schema_metadata rows refreshed. ontel-data-platform #13
+-- (7b08845) deployed 02:26 UTC, THEN section-4 backfill in 3 calls (batch 0 = 81,275 rows
+-- in 22 s; batches 1-5 and 6-10 together ~2 min): 729,535 / 729,535 rows carry counts;
+-- req_count NULL on 55,235 (7.6%, Swift omits it), req_has_rejection true on 194,
+-- sum(req_count) 6,855,505, sum(req_approved) 2,971,240, sum(file_req_uploaded) 4,107,336.
 -- =============================================================================
 
 BEGIN;
