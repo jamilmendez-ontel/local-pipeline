@@ -388,18 +388,29 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 Supabase MCP `apply_migration` or `psql`. Migrations are
 versioned 000+ at time of writing.
 
-Duplicate-group rule since 2026-08-31: only MEMBER removals are final. A removal
-auto-collapses the group to the shortest alive snapshot; removing the survivor of a
-resolved group falls back to the shortest sibling the member never removed
-(`survivor_fallback`, reviving its `auto_resolved_sibling` removal); a group reaches
-zero only when the member has removed every copy personally. Since 2026-09-01 the
-confirmation email reflects this honestly: the REMOVED badge only ever marks removals
-the member made; system set-asides show as `DUPLICATE - NOT COUNTED`, the group's
-surviving copy is marked `COUNTED`, totals ignore set-asides, and an amber note
-explains how to finish cleaning via the daily email's still-valid buttons.
+Duplicate-group rule since 2026-09-17: ONLY the member removes timer entries. A
+member's Remove or Edit touches exactly the entry acted on; the system never writes an
+`entry_removals` row and never rejects a sibling. After each action the resolver
+re-clusters the group's alive copies (the acted-on entry excluded, it is settled) by time
+overlap: if 2+ alive copies still overlap,
+the group stays open (reminders continue) and its `entries` snapshot is narrowed to
+those copies so the provisional latest-end rule in `rebuild_timer_clean()` hides only
+the real leftovers; once nothing overlaps, the group resolves with
+`rejected_entries = []` (`resolved_by = 'member'`). Why: overlap clustering is
+transitive, so two runaway snapshots can bridge two real, non-overlapping sessions
+into one group; the previous collapse-to-one-survivor rule (2026-08-31, shortest alive
+snapshot + `survivor_fallback`) then set aside a real session as a "duplicate" of one it
+never overlapped (nath 2026-09-15; migration 267 restored 4 such sessions, ~4.7h).
+The confirmation email still renders legacy `auto_resolved_sibling` rows as
+`DUPLICATE - NOT COUNTED`; no new rows of that kind are written. Still system-driven
+and unchanged: `auto_resolve_stale` (7-day-old open groups keep the longest copy) and
+`_reconcile_resolved_group_stragglers` (late snapshots on a group resolved by Edit).
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 263 approvals-view variance
+migrations/` for recent changes. Latest: 267 member-rule restore (reverts the 4
+`auto_resolved_sibling` removals that set aside real sessions overlapping nothing, clears
+`rejected_entries` on their 4 groups; applied live 2026-09-17, ~4.7h returned to
+`stg_timer_activities_clean`); 263 approvals-view variance
 (`analytics.v_daily_report_approvals` gains `variance_hours` + `coverage_pct`, the same
 expressions `mv_hr_report_review` uses, so the DR Approval page shows DR Monitoring's
 Variance column with row-for-row parity; applied live 2026-09-15, 0 mismatches over

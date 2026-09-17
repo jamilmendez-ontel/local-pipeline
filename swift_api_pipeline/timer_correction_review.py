@@ -1595,146 +1595,60 @@ def _end_dur_match(end_a, dur_a, end_b, dur_b):
     return True
 
 
-def _pick_shortest(pool):
-    """Shortest non-zero-duration snapshot; zero/None durations only as a last resort."""
-    nonzero = [e for e in pool if float(e.get("duration_min") or 0) > 0]
-    candidates = nonzero or pool
-    return min(candidates, key=lambda e: float(e.get("duration_min") or 0))
+def _alive_duplicate_labels(entries: list[dict], group_start, removal_rows) -> set[str]:
+    """Labels of the group entries that are still alive (no active removal)
+    AND still sit in an overlap cluster of 2+ alive entries.
 
-
-def _fallback_after_survivor_removal(db, entry: dict, now: datetime):
-    """Member removed the SURVIVING entry of an already-resolved duplicate group.
-
-    Rule (Jamil 2026-08-31): only member removals are final; a system pick is
-    always provisional. Fall back to the shortest sibling the member never
-    removed personally, reviving its system-made 'auto_resolved_sibling'
-    removal when one exists. The group reaches zero only when the member has
-    removed every copy with their own clicks.
+    Legacy snapshots without a per-entry start_time inherit the group anchor.
+    Still-running copies (NULL end_time) cannot be clustered and are skipped.
     """
-    review = retry_db(
-        lambda: db.fetchrow(
-            f"""SELECT * FROM {SCHEMA_TIMER}.duplicate_reviews
-                WHERE status IN ('resolved', 'auto_resolved')
-                  AND project_did = $1
-                  AND user_email = $2
-                  AND start_time = $3
-                  AND site_name IS NOT DISTINCT FROM $4
-                  AND site_id IS NOT DISTINCT FROM $5
-                  AND task IS NOT DISTINCT FROM $6
-                ORDER BY resolved_at DESC NULLS LAST
-                LIMIT 1
-            """,
-            entry["project_did"], entry["user_email"], entry["start_time"],
-            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-        ),
-        description="check resolved duplicate group for survivor fallback",
-    )
-    if not review or not review["selected_entry"]:
-        return
+    def _already_removed(e):
+        return any(_end_dur_match(e.get("end_time"), e.get("duration_min"),
+                                  rm["end_time"], rm["duration_min"])
+                   for rm in removal_rows)
 
-    entries = review["entries"] if isinstance(review["entries"], list) else json.loads(review["entries"])
-    matched = next((e for e in entries
-                    if _end_dur_match(e.get("end_time"), e.get("duration_min"),
-                                      entry.get("end_time"), entry.get("duration_min"))), None)
-    if not matched or matched["label"] != review["selected_entry"]:
-        return  # an already-excluded copy, nothing to re-arbitrate
+    alive = []
+    for e in entries:
+        if _already_removed(e):
+            continue
+        end = _norm_end_dt(e.get("end_time"))
+        if end is None:
+            continue
+        alive.append({
+            "label": e["label"],
+            "start_time": _norm_end_dt(e.get("start_time")) or group_start,
+            "end_time": end,
+        })
 
-    removal_rows = retry_db(
-        lambda: db.fetch(
-            f"""SELECT end_time, duration_min, reason
-                FROM {SCHEMA_TIMER}.entry_removals
-                WHERE project_did = $1
-                  AND user_email = $2
-                  AND site_name IS NOT DISTINCT FROM $3
-                  AND site_id IS NOT DISTINCT FROM $4
-                  AND task IS NOT DISTINCT FROM $5
-                  AND reason IS DISTINCT FROM 'REVERTED'
-            """,
-            entry["project_did"], entry["user_email"],
-            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-        ),
-        description="fetch removals for survivor fallback",
-    )
-
-    def _removals_for(e):
-        return [rm for rm in removal_rows
-                if _end_dur_match(e.get("end_time"), e.get("duration_min"),
-                                  rm["end_time"], rm["duration_min"])]
-
-    def _member_removed(e):
-        return any(rm["reason"] != "auto_resolved_sibling" for rm in _removals_for(e))
-
-    eligible = [e for e in entries
-                if e["label"] != matched["label"] and not _member_removed(e)]
-    if not eligible:
-        return  # the member removed every copy personally; zero stands
-
-    new = _pick_shortest(eligible)
-    rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
-                for e in entries if e["label"] != new["label"]]
-
-    if _removals_for(new):
-        # ONE statement: reviving the sibling's auto removal and re-pointing the
-        # review must be atomic. A crash between two separate writes leaves the
-        # group permanently zeroed with nothing to replay the fallback (the
-        # member's response is an exact GSheet duplicate on the next --apply).
-        new_end = _norm_end_dt(new.get("end_time"))
-        retry_db(
-            lambda sel=new["label"], rej=rejected, et=new_end, dur=new.get("duration_min"): db.execute(
-                f"""WITH revive AS (
-                        UPDATE {SCHEMA_TIMER}.entry_removals
-                        SET reason = 'REVERTED', updated_at = $3
-                        WHERE project_did = $5 AND user_email = $6
-                          AND site_name IS NOT DISTINCT FROM $7
-                          AND site_id IS NOT DISTINCT FROM $8
-                          AND task IS NOT DISTINCT FROM $9
-                          AND end_time IS NOT DISTINCT FROM $10
-                          AND duration_min IS NOT DISTINCT FROM $11
-                          AND reason = 'auto_resolved_sibling'
-                    )
-                    UPDATE {SCHEMA_TIMER}.duplicate_reviews
-                    SET selected_entry = $1, rejected_entries = $2,
-                        resolved_by = 'survivor_fallback', updated_at = $3
-                    WHERE group_id = $4
-                """,
-                sel, rej, now, review["group_id"],
-                entry["project_did"], entry["user_email"],
-                entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-                et, dur,
-            ),
-            description=f"atomically revive {new['label']} + re-select for group {review['group_id']}",
-        )
-    else:
-        retry_db(
-            lambda sel=new["label"], rej=rejected: db.execute(
-                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
-                    SET selected_entry = $1, rejected_entries = $2,
-                        resolved_by = 'survivor_fallback', updated_at = $3
-                    WHERE group_id = $4
-                """,
-                sel, rej, now, review["group_id"],
-            ),
-            description=f"fallback re-select {new['label']} for group {review['group_id']}",
-        )
-    logger.info(f"Survivor removed in resolved duplicate group {review['group_id']}: "
-                f"fell back to {new['label']} ({new.get('duration_min')} min); "
-                f"zero only when every copy is member-removed")
+    still_duplicated: set[str] = set()
+    for cluster in _build_overlap_clusters(alive):
+        if len(cluster) >= 2:
+            still_duplicated.update(c["label"] for c in cluster)
+    return still_duplicated
 
 
 def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
-    """If the entry belongs to an unresolved duplicate group, auto-resolve it.
+    """Settle an open duplicate group after a member acted on one of its entries.
 
-    For corrections: corrected entry is kept, others rejected.
-    For removals: removed entry is rejected; the survivor is the SHORTEST
-    remaining non-zero snapshot that is not already covered by an active
-    removal. Same-start duplicate snapshots are drifted copies of one timer,
-    so the latest/longest copy is the runaway one, never the real session
-    (czarina 2026-08-17: picking by latest end_time auto-removed the 2.07h
-    real session and kept an 11.07h runaway; 8 groups went to zero that way).
-    A group whose entries are all removed resolves with no survivor.
-    Removing the survivor of an ALREADY-RESOLVED group falls back to the
-    shortest sibling the member never removed (see
-    _fallback_after_survivor_removal); zero requires member clicks on every copy.
+    Rule (Jamil 2026-09-17): only the member removes timer entries. The caller
+    has already stored the member's own removal/correction; this function
+    never writes an entry_removals row and never rejects a sibling. It only
+    decides whether the group is finished:
+
+    * Re-cluster the alive copies (no active removal, not the entry just
+      acted on) by time overlap.
+    * Copies still overlapping another alive copy: keep the group open so
+      reminders continue, and narrow `entries` to those copies so the
+      provisional latest-end rule in rebuild_timer_clean() hides only the real
+      leftovers. Everything else alive counts.
+    * Nothing overlaps any more: resolve with rejected_entries = [] (the
+      member's removals live in entry_removals already).
+
+    Background: overlap clustering is transitive, so two runaway snapshots can
+    bridge two real, non-overlapping sessions into one group (nath 2026-09-15:
+    08:05-09:32 and 14:43-15:13 bridged by two 08:05-16:12 runaways). The old
+    collapse-to-one-survivor rule then set aside a real session as a
+    "duplicate" of one it never overlapped.
     """
     review = retry_db(
         lambda: db.fetchrow(
@@ -1752,121 +1666,86 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         ),
         description="check duplicate group for action",
     )
-
     if not review:
-        if action == "remove":
-            _fallback_after_survivor_removal(db, entry, now)
         return
 
     group_id = review["group_id"]
     entries = review["entries"] if isinstance(review["entries"], list) else json.loads(review["entries"])
 
-    # Find which label matches this entry (by end_time + duration_min)
-    entry_end = entry.get("end_time")
-    entry_dur = entry.get("duration_min")
     matched_label = None
-
     for e in entries:
-        if _end_dur_match(e.get("end_time"), e.get("duration_min"), entry_end, entry_dur):
+        if _end_dur_match(e.get("end_time"), e.get("duration_min"),
+                          entry.get("end_time"), entry.get("duration_min")):
             matched_label = e["label"]
             break
-
     if not matched_label:
-        logger.warning(f"Entry matches duplicate group {group_id} but couldn't match a label — skipping auto-resolve")
+        # The snapshot was narrowed earlier (this copy already stood alone) or
+        # the row drifted; the member's action itself is already stored.
+        logger.info(f"Entry acted on for duplicate group {group_id} is not in its open "
+                    f"snapshot; nothing to settle")
         return
 
-    if action == "remove":
-        # Remove = reject this entry; survive the shortest snapshot still alive.
-        # An entry already covered by an active (non-REVERTED) removal must
-        # never be picked as survivor: selecting it silently zeroes the group.
-        removal_rows = retry_db(
-            lambda: db.fetch(
-                f"""SELECT end_time, duration_min
-                    FROM {SCHEMA_TIMER}.entry_removals
-                    WHERE project_did = $1
-                      AND user_email = $2
-                      AND site_name IS NOT DISTINCT FROM $3
-                      AND site_id IS NOT DISTINCT FROM $4
-                      AND task IS NOT DISTINCT FROM $5
-                      AND reason IS DISTINCT FROM 'REVERTED'
-                """,
-                entry["project_did"], entry["user_email"],
-                entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-            ),
-            description=f"fetch active removals for duplicate group {group_id}",
-        )
-
-        def _already_removed(e):
-            return any(_end_dur_match(e.get("end_time"), e.get("duration_min"),
-                                      rm["end_time"], rm["duration_min"])
-                       for rm in removal_rows)
-
-        remaining = [e for e in entries if e["label"] != matched_label]
-        alive = [e for e in remaining if not _already_removed(e)]
-        if not alive:
-            selected_label = None
-        else:
-            selected_label = _pick_shortest(alive)["label"]
-        rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
-                     for e in entries if e["label"] != selected_label]
-    else:
-        # Correct = keep this entry, reject others
-        selected_label = matched_label
-        rejected = [{"end_time": e.get("end_time"), "duration_min": e.get("duration_min")}
-                     for e in entries if e["label"] != selected_label]
-
-    # Any entry this resolution rejects beyond the one the user actually acted
-    # on (matched_label) has no other write path to app_timer.entry_removals —
-    # write it here so entry_removals and duplicate_reviews.rejected_entries
-    # can never drift apart. (2026-07-20 Milton Frank incident: a 3-way group
-    # auto-resolved here with 2 rejected entries, but only 1 ever got a real
-    # entry_removals row; a later unrelated removal against the surviving
-    # entry then silently emptied the whole group to zero.)
-    for e in entries:
-        if e["label"] in (matched_label, selected_label):
-            continue
-        e_end = e.get("end_time")
-        e_end_dt = datetime.fromisoformat(e_end) if isinstance(e_end, str) else e_end
-        if e_end_dt and e_end_dt.tzinfo is None:
-            e_end_dt = e_end_dt.replace(tzinfo=timezone.utc)
-        e_dur = e.get("duration_min")
-        sibling_id = _make_entry_id(
-            entry["project_did"], entry["user_email"], entry["start_time"],
+    removal_rows = retry_db(
+        lambda: db.fetch(
+            f"""SELECT end_time, duration_min
+                FROM {SCHEMA_TIMER}.entry_removals
+                WHERE project_did = $1
+                  AND user_email = $2
+                  AND site_name IS NOT DISTINCT FROM $3
+                  AND site_id IS NOT DISTINCT FROM $4
+                  AND task IS NOT DISTINCT FROM $5
+                  AND reason IS DISTINCT FROM 'REVERTED'
+            """,
+            entry["project_did"], entry["user_email"],
             entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-            e_end_dt, e_dur,
-        )
-        retry_db(
-            lambda eid=sibling_id, et=e_end_dt, dur=e_dur: db.execute(
-                f"""INSERT INTO {SCHEMA_TIMER}.entry_removals
-                    (entry_id, project_did, project, user_email, start_time,
-                     site_name, site_id, task, end_time, duration_min,
-                     reason, removed_at, created_at, updated_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$12)
-                    ON CONFLICT (entry_id) DO NOTHING
-                """,
-                eid, entry["project_did"], entry.get("project"), entry["user_email"],
-                entry["start_time"], entry.get("site_name"), entry.get("site_id"),
-                entry.get("task"), et, dur,
-                "auto_resolved_sibling", now,
-            ),
-            description=f"backfill sibling removal {sibling_id} for group {group_id}",
-        )
+        ),
+        description=f"fetch active removals for duplicate group {group_id}",
+    )
 
+    # The acted-on entry is settled by the member: a removal is already stored
+    # (do not rely on read-back), and a corrected entry must leave the open
+    # snapshot too, otherwise rebuild_timer_clean()'s provisional latest-end
+    # rule can hide its raw row while the corrections path inserts a synthetic
+    # corrected row, double counting the hours until the group resolves.
+    candidates = [e for e in entries if e["label"] != matched_label]
+
+    group_start = review["start_time"]
+    if group_start is not None and group_start.tzinfo is None:
+        group_start = group_start.replace(tzinfo=timezone.utc)
+    remaining = _alive_duplicate_labels(candidates, group_start, removal_rows)
+
+    if remaining:
+        kept = [e for e in entries if e["label"] in remaining]
+        retry_db(
+            lambda gid=group_id, ent=_entries_to_jsonb(kept): db.execute(
+                f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
+                    SET entries = $1, updated_at = $2
+                    WHERE group_id = $3
+                """,
+                ent, now, gid,
+            ),
+            description=f"narrow duplicate group {group_id} to its alive copies",
+        )
+        logger.info(f"Duplicate group {group_id}: member {action} on {matched_label}; "
+                    f"{len(kept)} overlapping copies still alive "
+                    f"({', '.join(sorted(remaining))}), group stays open")
+        return
+
+    selected_label = matched_label if action == "correct" else None
     retry_db(
-        lambda gid=group_id, sel=selected_label, rej=rejected: db.execute(
+        lambda gid=group_id, sel=selected_label: db.execute(
             f"""UPDATE {SCHEMA_TIMER}.duplicate_reviews
                 SET status = 'resolved', selected_entry = $1,
                     rejected_entries = $2,
-                    resolved_at = $3, resolved_by = 'correction', updated_at = $3
+                    resolved_at = $3, resolved_by = 'member', updated_at = $3
                 WHERE group_id = $4
             """,
-            sel, rej, now, gid,
+            sel, [], now, gid,
         ),
-        description=f"auto-resolve duplicate {group_id} via {action}",
+        description=f"resolve duplicate group {group_id} via member {action}",
     )
-    logger.info(f"Auto-resolved duplicate group {group_id} via {action}: "
-                f"kept {selected_label or 'no survivor (all entries removed)'}, "
-                f"rejected {len(rejected)} others")
+    logger.info(f"Duplicate group {group_id} resolved by member {action} on {matched_label}: "
+                f"no overlapping copies left, nothing rejected by the system")
 
 
 def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dict]:
