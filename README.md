@@ -391,7 +391,8 @@ versioned 000+ at time of writing.
 Duplicate-group rule since 2026-09-17: ONLY the member removes timer entries. A
 member's Remove or Edit touches exactly the entry acted on; the system never writes an
 `entry_removals` row and never rejects a sibling. After each action the resolver
-re-clusters the group's alive copies by time overlap: if 2+ alive copies still overlap,
+re-clusters the group's alive copies (the acted-on entry excluded, it is settled) by time
+overlap: if 2+ alive copies still overlap,
 the group stays open (reminders continue) and its `entries` snapshot is narrowed to
 those copies so the provisional latest-end rule in `rebuild_timer_clean()` hides only
 the real leftovers; once nothing overlaps, the group resolves with

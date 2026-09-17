@@ -1635,7 +1635,8 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
     never writes an entry_removals row and never rejects a sibling. It only
     decides whether the group is finished:
 
-    * Re-cluster the alive copies (no active removal) by time overlap.
+    * Re-cluster the alive copies (no active removal, not the entry just
+      acted on) by time overlap.
     * Copies still overlapping another alive copy: keep the group open so
       reminders continue, and narrow `entries` to those copies so the
       provisional latest-end rule in rebuild_timer_clean() hides only the real
@@ -1701,10 +1702,12 @@ def _resolve_duplicate_for_action(db, entry: dict, action: str, now: datetime):
         description=f"fetch active removals for duplicate group {group_id}",
     )
 
-    candidates = entries
-    if action == "remove":
-        # The caller stored this removal already; do not rely on read-back.
-        candidates = [e for e in entries if e["label"] != matched_label]
+    # The acted-on entry is settled by the member: a removal is already stored
+    # (do not rely on read-back), and a corrected entry must leave the open
+    # snapshot too, otherwise rebuild_timer_clean()'s provisional latest-end
+    # rule can hide its raw row while the corrections path inserts a synthetic
+    # corrected row, double counting the hours until the group resolves.
+    candidates = [e for e in entries if e["label"] != matched_label]
 
     group_start = review["start_time"]
     if group_start is not None and group_start.tzinfo is None:

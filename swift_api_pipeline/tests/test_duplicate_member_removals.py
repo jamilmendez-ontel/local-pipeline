@@ -247,13 +247,25 @@ def test_reverted_removals_are_ignored_server_side():
 # Edit keeps the edited entry and touches nothing else.
 # ---------------------------------------------------------------------------
 
-def test_correct_with_alive_siblings_keeps_group_open():
+def test_correct_with_alive_siblings_keeps_group_open_without_the_edited_entry():
+    # The edited entry is settled: it leaves the open snapshot so the
+    # provisional latest-end rule cannot hide its raw row (the correction is
+    # applied to that row in place); the two untouched copies stay provisional.
     db = FakeDB(_review(_same_start_entries()))
     _resolve_duplicate_for_action(db, _acted(S_END_B, S_DUR_B), "correct", NOW)
 
     (sql, args), = _review_updates(db)
     assert "status = 'resolved'" not in sql
-    assert _labels(args[0]) == ["A", "B", "C"]
+    assert _labels(args[0]) == ["A", "C"]
+
+
+def test_correct_leaving_one_sibling_resolves():
+    db = FakeDB(_review(_same_start_entries()[:2]))
+    _resolve_duplicate_for_action(db, _acted(S_END_B, S_DUR_B), "correct", NOW)
+
+    (sql, args), = _review_updates(db)
+    assert "status = 'resolved'" in sql
+    assert args[0] == "B" and args[1] == []
 
 
 def test_correct_when_siblings_already_removed_resolves_on_the_corrected_entry():
