@@ -24,6 +24,15 @@
 --     (schema_name = 'data_staging' AND table_name = 'stg_gc_tracker_requirements') OR
 --     (schema_name = 'analytics'    AND table_name = 'v_gc_tracker_requirements'));
 --   (roll the platform image back first; the walk INSERTs into these tables)
+--
+-- APPLIED + VERIFIED 2026-09-17 ~00:15 ET against voqfjfngdpcvevbkikud via the Supabase
+-- MCP (ROLLBACK dry run first). Pre-flight: 266 free (dir + open PRs), 0 name collisions.
+-- Post-apply: 2 tables with RLS, view 30 columns, SELECT grants postgres/service_role/
+-- tdt_reader, 3 schema_metadata rows. Local proof with ontel-data-platform #15: Spencer
+-- VZW/MP Small Cell (3 tasks) 22 rows = task metrics exactly; VZW/OPW NSB Macro (348 tasks)
+-- 3,100 rows in 153 s, 0 mismatches vs req_count, the 54 row-less tasks all claim 0.
+-- Footprint measured: raw 1,228 B heap + 136 B index per row, staging 435 + 157 B, about
+-- 2 KB per requirement all in (the spec estimated 0.55 KB): ~14 GB for the 297 projects.
 -- =============================================================================
 
 BEGIN;
