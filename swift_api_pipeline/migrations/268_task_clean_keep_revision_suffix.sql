@@ -1,6 +1,40 @@
 -- =============================================================================
 -- 268_task_clean_keep_revision_suffix.sql
 --
+-- APPLIED 2026-09-23 02:45-03:05 ET (code merged first: local-pipeline 5bb3798).
+--   Backfill, rows updated / expected:
+--     stg_asset_tasks            479,291 / 479,291   (253.6s)
+--     stg_asset_tasks_inc        215,728 / 215,728   ( 55.7s)
+--     stg_qa_form                147,994 / 147,994   ( 24.5s)
+--     stg_timer_activities       129,920 / 129,920   ( 30.8s)
+--     stg_timer_activities_clean 129,298 / 129,298   ( 32.4s)
+--     stg_gc_tracker_tasks         6,214 /   6,214   ( 11.6s)
+--     stg_user_priorities            581 /     581   (  0.3s)
+--     app_timer.entry_additions          5 /       5
+--     stg_asset_tasks_gc                 0 /       0   (empty)
+--   Every count matched the preflight estimate exactly. Assertion: all 9 pass.
+--
+--   VERIFIED after apply:
+--     stg_timer_activities_clean NULL task_clean   119,761 -> 0
+--     stg_timer_activities_clean prefixed            2,782 -> 0
+--     rate keys reachable                          36 -> 54 of 60 (as predicted)
+--     approved-LR asset set                    18,484 -> 18,483 (the one predicted asset)
+--     agent.schema_metadata rows stating the old rule    4 -> 0
+--     mv_timer_revenue  133,943 -> 208,275 rows; priced 192,456 rows / $12,721,122.96
+--       The +74,332 is dominated by 2025 (71,145 rows, $4,320,793.13), which could
+--       never be priced while its task_clean was NULL. That revenue was always
+--       earned; it was simply unattributable. The rule change itself re-rates
+--       7,725 rows across 72 revision labels, $157,168.99.
+--     mv_po_issued_status 661 -> 767 and mv_qp_to_po_duration 220 -> 266 are NOT
+--       effects of this change ('PO Issued'/'Quote Provided' identities are
+--       unchanged). Neither MV is in refresh_analytics() or on cron, so nothing
+--       had refreshed them; the jump is accumulated staleness being corrected.
+--
+--   GOTCHA worth remembering: the first apply aborted at the assertion because
+--   the 5-minute user_priorities_extract was still running pre-merge code from
+--   GitHub main and rewrote 581 rows with the old rule mid-migration. Push main
+--   BEFORE applying, not just merge locally.
+--
 -- RULE CHANGE (Jamil, 2026-09-23). The cleaned task-name columns keep the
 -- trailing revision number; only the leading sequence prefix is stripped.
 --
