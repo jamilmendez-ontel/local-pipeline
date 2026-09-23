@@ -100,14 +100,16 @@ def test_audit_hash_columns_are_populated():
     assert by_col["task_did"] == "task-1"
     assert by_col["task_status"] == "approved"
     assert by_col["task_scheduled"] == date(2025, 7, 9)
-    assert by_col["task_name_clean"] == "Install Equipment"
+    assert by_col["task_name_clean"] == "Install Equipment 2"
 
 
-def test_task_name_clean_strips_prefix_and_suffix():
+def test_task_name_clean_strips_prefix_and_keeps_suffix():
+    # Rule change 2026-09-23 (migration 268): the trailing revision number is a
+    # distinct task with its own rate, so only the prefix is stripped.
     row = task_to_stg_row(PROJECT, ASSET, TASK)
     by_col = dict(zip(STG_COL_LIST, row))
     assert by_col["task_name"] == "1. Install Equipment 2"
-    assert by_col["task_name_clean"] == "Install Equipment"
+    assert by_col["task_name_clean"] == "Install Equipment 2"
 
 
 def test_last_updated_is_a_datetime():

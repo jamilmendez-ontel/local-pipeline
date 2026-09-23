@@ -99,7 +99,7 @@ def test_row_mapping_keeps_the_record_own_run_provenance():
     rec = _raw(RUN_OLD, date(2026, 9, 7), CHO)
     row = timer_raw_record_to_row(rec)
     assert row[0] == "TECH-OPS: TS19" and row[1] == 19 and row[2] == TS19
-    assert row[5] == "3. Closeout 2" and row[6] == "Closeout"
+    assert row[5] == "3. Closeout 2" and row[6] == "Closeout 2"   # revision kept (migration 268)
     assert row[15] == 60 and row[17] == CHO
     # provenance comes from the RECORD, not from the run being transformed
     assert row[19:23] == (RUN_OLD, date(2026, 9, 7), BUCKET, date(2026, 9, 6))

@@ -149,9 +149,9 @@ Edit here for reference, then apply changes via SQL in Supabase SQL Editor.
 
 ### `task_name_clean`
 - **Description:** Cleaned task type name
-- **Business Context:** Standardized task name with trailing numbers removed. Use for grouping by task type.
-- **Example Values:** Punch Item Live Review Complete, COP Punch Items Received, 3rd Party COP Rejections Reviewed
-- **Data Notes:** TEXT. Derived from task_name via regex cleanup.
+- **Business Context:** Task name with the leading sequence prefix ("7. ", "3F. ") removed. The trailing revision number is KEPT: "COP Revision Complete 2" is a distinct task from "COP Revision Complete" and carries its own rate. Use for grouping by task type.
+- **Example Values:** Punch Item Live Review Complete, COP Punch Items Received, COP Revision Complete 2
+- **Data Notes:** TEXT. Derived from task_name via regex cleanup (migration 268).
 
 ### `task_scheduled`
 - **Description:** Scheduled date for the task

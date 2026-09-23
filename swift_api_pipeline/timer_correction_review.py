@@ -853,7 +853,8 @@ def _lookup_task_dids(db, entries: list[dict]) -> dict[tuple, str]:
             JOIN {SCHEMA_STAGING}.stg_asset_tasks a
               ON a.asset_did = w.asset_did
              AND (btrim(a.task_name) = w.task
-                  OR btrim(a.task_name_clean) = btrim(regexp_replace(w.task, '^\\d+\\.\\s+', '')))
+                  OR btrim(a.task_name_clean) = btrim(regexp_replace(
+                       w.task, '^([0-9]+[a-zA-Z]?\\.[[:space:]]*)+', '')))
             WHERE a.task_did IS NOT NULL
             ORDER BY w.asset_did, w.task,
                      (btrim(a.task_name) = w.task) DESC,

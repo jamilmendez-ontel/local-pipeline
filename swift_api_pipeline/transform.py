@@ -19,21 +19,26 @@ logger = get_logger("transform")
 # Timezone for all date conversions
 TZ_ET = ZoneInfo("America/New_York")
 
-# Regex patterns for cleaning task names
-# Removes leading sequence numbers (e.g., "1. ", "10. ", "4B. ", "10B. ", "1.2. ")
-# and trailing revision numbers (e.g., " 2", " 3")
-TASK_NAME_PREFIX_PATTERN = re.compile(r'^(\d+[a-zA-Z]?\.\s*)+')
-
-TASK_NAME_SUFFIX_PATTERN = re.compile(r'\s+\d+$')
+# Regex pattern for cleaning task names.
+# Removes leading sequence numbers only (e.g., "1. ", "10. ", "4B. ", "10B. ", "1.2. ").
+#
+# The trailing revision number ("COP Revision Complete 2") is KEPT: it is a distinct
+# task with its own rate in reference.ref_task_revenue_rates, and stripping it billed
+# every revision at the full first-pass rate. Rule changed 2026-09-23 (migration 268).
+#
+# Whitespace is the explicit ASCII set, NOT \s and NOT bare .strip(): this must agree
+# byte-for-byte with the SQL mirrors below, which use '[[:space:]]*' + BTRIM(E' \t\n\r\f\v').
+# Python's \s and .strip() also match Unicode spaces (NBSP) that Postgres does not, and
+# task_clean is a join key -- the same raw name reaching two pipelines must clean the same.
+_WS = ' \t\n\r\f\v'
+TASK_NAME_PREFIX_PATTERN = re.compile(r'^(\d+[a-zA-Z]?\.[ \t\n\r\f\v]*)+')
 
 
 def clean_task_name(task_name: str) -> str:
-    """Remove sequence prefix and revision suffix from task name"""
+    """Remove the leading sequence prefix from a task name. Revision suffix is kept."""
     if not task_name:
         return None
-    cleaned = TASK_NAME_PREFIX_PATTERN.sub('', task_name)
-    cleaned = TASK_NAME_SUFFIX_PATTERN.sub('', cleaned)
-    return cleaned.strip()
+    return TASK_NAME_PREFIX_PATTERN.sub('', task_name).strip(_WS)
 
 
 def parse_date(val) -> _date:
@@ -247,12 +252,11 @@ def _prio_ts(field):
     return f"NULLIF(r.data->>'{field}', '')::timestamptz"
 
 
-# SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
-# Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
+# SQL clean_task_name -- strip prefix "1. 2a. " only; revision suffix " 2" is kept.
+# Matches Python's TASK_NAME_PREFIX_PATTERN.
 _PRIO_CLEAN_EXPR = (
-    "TRIM(REGEXP_REPLACE("
-    "  REGEXP_REPLACE(r.data->>'Task Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-    "  '\\s+[0-9]+$', ''))"
+    "BTRIM(REGEXP_REPLACE(r.data->>'Task Name', "
+    "'^([0-9]+[a-zA-Z]?\\.[[:space:]]*)+', ''), E' \\t\\n\\r\\f\\v')"
 )
 USER_PRIORITY_COLUMNS = [
     ("task_did", "r.data->>'Task DID'"),
@@ -669,12 +673,11 @@ def _at_date_expr(field):
     )
 
 
-# SQL clean_task_name -- strip prefix "1. 2a. " and suffix " 123"
-# Matches Python's TASK_NAME_PREFIX_PATTERN and TASK_NAME_SUFFIX_PATTERN
+# SQL clean_task_name -- strip prefix "1. 2a. " only; revision suffix " 2" is kept.
+# Matches Python's TASK_NAME_PREFIX_PATTERN.
 _AT_CLEAN_EXPR = (
-    "TRIM(REGEXP_REPLACE("
-    "  REGEXP_REPLACE(r.data->>'Task_Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-    "  '\\s+[0-9]+$', ''))"
+    "BTRIM(REGEXP_REPLACE(r.data->>'Task_Name', "
+    "'^([0-9]+[a-zA-Z]?\\.[[:space:]]*)+', ''), E' \\t\\n\\r\\f\\v')"
 )
 ASSET_TASK_COLUMNS = [
     ("project_did", "r.project_did"),
@@ -811,11 +814,10 @@ def transform_qa_forms(db, run_id: str):
     db.execute(f'DELETE FROM {SCHEMA_STAGING}.stg_qa_form')
     print(f"[{datetime.now():%H:%M:%S}] Cleared old data from stg_qa_form")
 
-    # SQL: clean_task_name — strip prefix "1. 2a. " and suffix " 123"
+    # SQL: clean_task_name — strip prefix "1. 2a. " only; revision suffix " 2" is kept
     clean_task = (
-        "TRIM(REGEXP_REPLACE("
-        "  REGEXP_REPLACE(r.data->>'Task', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-        "  '\\s+[0-9]+$', ''))"
+        "BTRIM(REGEXP_REPLACE(r.data->>'Task', "
+        "'^([0-9]+[a-zA-Z]?\\.[[:space:]]*)+', ''), E' \\t\\n\\r\\f\\v')"
     )
 
     # SQL helper: COALESCE for fields with alternate key names (replaces Python get_val)
@@ -1669,10 +1671,10 @@ def transform_asset_tasks_gc(db, run_id: str):
             f"ELSE NULL END"
         )
 
+    # strip prefix "1. 2a. " only; revision suffix " 2" is kept
     clean_expr = (
-        "TRIM(REGEXP_REPLACE("
-        "  REGEXP_REPLACE(r.data->>'Task_Name', '^([0-9]+[a-zA-Z]?\\. *)+', ''), "
-        "  '\\s+[0-9]+$', ''))"
+        "BTRIM(REGEXP_REPLACE(r.data->>'Task_Name', "
+        "'^([0-9]+[a-zA-Z]?\\.[[:space:]]*)+', ''), E' \\t\\n\\r\\f\\v')"
     )
 
     sql = (

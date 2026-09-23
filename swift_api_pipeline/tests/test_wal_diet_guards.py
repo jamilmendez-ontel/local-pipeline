@@ -124,11 +124,14 @@ def test_user_priorities_merge_is_one_statement_with_delete():
 
 
 def test_user_priorities_transform_keeps_the_clean_name_regexes():
-    # Behaviour parity with the pre-merge transform (prefix "1. 2a. " and
-    # trailing " 123" are stripped from Task Name).
+    # Prefix "1. 2a. " is stripped from Task Name; the trailing revision number
+    # is KEPT (rule change 2026-09-23, migration 268). Pinned as full equality:
+    # a substring check cannot catch the expression being re-wrapped or appended to.
     clean = dict(USER_PRIORITY_COLUMNS)["task_name_clean"]
-    assert r"'^([0-9]+[a-zA-Z]?\. *)+'" in clean
-    assert r"'\s+[0-9]+$'" in clean
+    assert clean == (
+        "BTRIM(REGEXP_REPLACE(r.data->>'Task Name', "
+        r"'^([0-9]+[a-zA-Z]?\.[[:space:]]*)+', ''), E' \t\n\r\f\v')"
+    )
 
 
 def test_pipeline_db_has_copy_merge():
@@ -164,8 +167,12 @@ def test_asset_tasks_merge_is_one_statement_with_delete_and_dedupe():
 
 def test_asset_tasks_transform_keeps_the_date_and_clean_name_parsing():
     exprs = dict(ASSET_TASK_COLUMNS)
-    assert r"'^([0-9]+[a-zA-Z]?\. *)+'" in exprs["task_name_clean"]
-    assert r"'\s+[0-9]+$'" in exprs["task_name_clean"]
+    # trailing revision number is KEPT (rule change 2026-09-23, migration 268).
+    # Pinned as full equality so the expression cannot drift or be re-wrapped.
+    assert exprs["task_name_clean"] == (
+        "BTRIM(REGEXP_REPLACE(r.data->>'Task_Name', "
+        r"'^([0-9]+[a-zA-Z]?\.[[:space:]]*)+', ''), E' \t\n\r\f\v')"
+    )
     for col in ("task_scheduled", "task_submitted_on", "task_approved_on", "task_cancelled_on"):
         e = exprs[col]
         assert "> 9999999999" in e and "/ 1000.0" in e and "LEFT(" in e and "America/New_York" in e, col
