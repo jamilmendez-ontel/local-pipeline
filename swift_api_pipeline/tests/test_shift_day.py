@@ -190,3 +190,21 @@ def test_fetch_classified_day_entries_uses_shift_day_bounds():
     assert db.sql.count("start_time < $3") == 2
     lo, hi = shift_day_bounds(date(2026, 9, 22))
     assert db.params == ("a@ontel.co", lo, hi)
+
+
+def test_fetch_current_day_entries_uses_shift_day_bounds():
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    tcr._fetch_current_day_entries(db, "a@ontel.co", date(2026, 9, 22))
+    assert "America/New_York" not in db.sql
+    assert "c.start_time >= $2 AND c.start_time < $3" in db.sql
+    lo, hi = shift_day_bounds(date(2026, 9, 22))
+    assert db.params == ("a@ontel.co", lo, hi)
+
+
+def test_find_days_needing_resend_cutoff_is_shift_day_based():
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    tcr.find_days_needing_resend(db, lookback_days=7)
+    expect = shift_day(datetime.now(timezone.utc)) - timedelta(days=7)
+    assert db.params == (expect,)

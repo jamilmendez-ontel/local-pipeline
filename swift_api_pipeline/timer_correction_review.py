@@ -3181,6 +3181,7 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
     the resend shows the full corrected day with current Edit / Remove
     buttons. Two emails serve different purposes.
     """
+    lo, hi = shift_day_bounds(entry_date)
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT
@@ -3200,9 +3201,9 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
                AND corr.corrected_end_time IS NOT DISTINCT FROM c.end_time
                AND corr.corrected_duration_min IS NOT DISTINCT FROM c.duration_min
             WHERE c.user_email = $1
-              AND DATE(c.start_time AT TIME ZONE 'America/New_York') = $2
+              AND c.start_time >= $2 AND c.start_time < $3
             ORDER BY c.start_time, c.site_name, c.task
-        """, user_email, entry_date),
+        """, user_email, lo, hi),
         description=f"current-day entries for {user_email} on {entry_date}",
     )
     return [dict(r) for r in rows] if rows else []
@@ -3217,7 +3218,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     with the current set silently and NOT returned as resend candidates,
     so we don't blast a re-send to every tech the day after this migration.
     """
-    cutoff = (datetime.now(TZ_EASTERN) - timedelta(days=lookback_days)).date()
+    cutoff = shift_day(datetime.now(timezone.utc)) - timedelta(days=lookback_days)
     # Surface unexpectedly large batches — a clean steady state is a
     # handful of candidates per day. A spike usually means an upstream
     # extractor reloaded a big window or the lookback was widened by
