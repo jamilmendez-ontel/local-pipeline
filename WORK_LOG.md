@@ -3703,3 +3703,17 @@ the next shift's email; the email's day is 6 h offset from DRMC / variance /
 Excel exports, which stay on ET calendar dates (email-only scope, Jamil's
 call). Relabelling the header ("Shift ending 06:00 PHT ...") is a one-line
 follow-up if members ask.
+
+CUTOVER TIMING DECIDED (Jamil, 2026-09-23 ~22:15 ET): Sunday 2026-09-27, between
+20:00 PHT and Monday 06:00 PHT (Sunday 08:00-18:00 ET); aim for 20:00-21:00 PHT,
+~15 min total. Not before 20:00 PHT because Sunday's last old-style email fires
+17:45-18:15 PHT and the workflow can take 45 min; step 0 is confirming the latest
+"Pipeline: Timer Emails" run is green and finished. Not after Monday 06:00 PHT
+because the old trigger would fire again at 18:00 PHT with the new code. Then,
+in order: (1) Jamil pings, Claude runs premerge-review, Jamil marks the PR ready
+and merges; (2) Claude runs the daily_notifications snapshot reset; (3) Jamil
+pastes pipeline_trigger.gs whole and runs setupTimerEmailsTrigger() once,
+Triggers page shows triggerTimerEmails at 6:30 AM Asia/Manila and no 6 AM ET
+entry. Expected: Monday 06:30 PHT email covers Sunday's shift (near-empty, the
+smoke test); Tuesday 06:30 PHT is the first real one (Monday's shift). No gap,
+no double send.
