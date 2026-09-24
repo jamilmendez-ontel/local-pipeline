@@ -2367,6 +2367,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
     correction and drop the surviving edit from the email. Matching the
     clean table by its natural key avoids that entirely.
     """
+    lo, hi = shift_day_bounds(entry_date)
     rows = retry_db(
         lambda: db.fetch(f"""
             WITH surviving AS (
@@ -2375,7 +2376,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                        t.site_name, t.site_id, t.task, t.task_clean
                 FROM {SCHEMA_STAGING}.stg_timer_activities_clean t
                 WHERE t.user_email = $1
-                  AND DATE(t.start_time AT TIME ZONE 'America/New_York') = $2
+                  AND t.start_time >= $2 AND t.start_time < $3
             )
             SELECT s.project_did, s.project, s.user_email,
                    s.start_time, s.end_time, s.duration_min,
@@ -2429,11 +2430,11 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                    rm.reason AS removal_reason
             FROM {SCHEMA_TIMER}.entry_removals rm
             WHERE rm.user_email = $1
-              AND DATE(rm.start_time AT TIME ZONE 'America/New_York') = $2
+              AND rm.start_time >= $2 AND rm.start_time < $3
               AND rm.reason IS DISTINCT FROM 'REVERTED'
 
             ORDER BY start_time, site_name, task
-        """, user_email, entry_date),
+        """, user_email, lo, hi),
         description=f"classify entries for {user_email} on {entry_date}",
     )
 
@@ -2965,10 +2966,7 @@ def run_remind(test_mode: bool = False):
     for r in unresolved:
         entries = r["entries"] if isinstance(r["entries"], list) else json.loads(r["entries"])
         days_pending = (now - r["notified_at"]).days
-        st = r["start_time"]
-        if st.tzinfo is None:
-            st = st.replace(tzinfo=timezone.utc)
-        entry_date = st.astimezone(TZ_EASTERN).date()
+        entry_date = shift_day(r["start_time"])
         key = (r["user_email"], entry_date)
         by_user_date.setdefault(key, []).append({
             "group_id": r["group_id"],

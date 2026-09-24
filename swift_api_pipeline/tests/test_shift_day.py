@@ -179,3 +179,14 @@ def test_resolve_stale_response_uses_form_lookup_bounds():
     assert db.params[0] == lo
     assert db.params[1] == hi
     assert "start_time >= $1 AND start_time < $2" in db.sql
+
+
+def test_fetch_classified_day_entries_uses_shift_day_bounds():
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    tcr._fetch_classified_day_entries(db, "a@ontel.co", date(2026, 9, 22))
+    assert "America/New_York" not in db.sql
+    assert db.sql.count("start_time >= $2 AND") == 2      # surviving + removals
+    assert db.sql.count("start_time < $3") == 2
+    lo, hi = shift_day_bounds(date(2026, 9, 22))
+    assert db.params == ("a@ontel.co", lo, hi)
