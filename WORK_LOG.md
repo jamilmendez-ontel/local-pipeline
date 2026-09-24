@@ -3636,3 +3636,84 @@ Open: (1) Jamil pastes whole `scripts/pipeline_trigger.gs` into the nanoninth Ap
 - `mv_po_issued_status` 661 -> 767 and `mv_qp_to_po_duration` 220 -> 266 are NOT effects of this change (`PO Issued`/`Quote Provided` identities verified unchanged). Neither is in `refresh_analytics()` nor on cron, so nothing had ever refreshed them; the jump is accumulated staleness being corrected.
 - Shipped: local-pipeline `5bb3798`, gc-asset-lake `40e73a0`, ontel-data-platform `08dd80b` (gc-asset-lake has no remote; the other two pushed). Tests at baseline in all three: local-pipeline 210 passed / 6 pre-existing asset-tasks resilience failures, gc-asset-lake 168, ontel-data-platform 156.
 - Deferred (named): `stg_cop_invoice_forecast.task_name_clean` cannot be backfilled (stores only the cleaned value, no source column) and regenerates when that pipeline is fixed on PR #44; `gap_report.*` and `scorecard.*` carry their own `task_name_clean` copies and shift on their next refresh — their owners need telling; `autountrack.v_untrack_queue` likewise; `_update_schema_metadata.py` is gitignored by `.gitignore:60` so its fix lives only on this machine; the empty-string divergence (JSONB `''` yields `''` via SQL but `None` via Python) is pre-existing and untouched.
+
+### 2026-09-23 20:49-21:50 ET — Timer Entries email: 06:30 PHT on a 06:00 PHT shift day (feat/timer-emails-shift-day, INIT-043)
+
+Jamil: move the daily Timer Entries email from 18:00 PHT to 06:00 PHT, covering
+06:00 PHT to 06:00 PHT. The 13:15 PHT data + exports run is untouched. Cutover
+target Monday 2026-09-28.
+
+Found before coding: the email had no PHT window at all; every bucketing site
+in `timer_correction_review.py` used the ET calendar date, which is noon PHT to
+noon PHT. A trigger retime to 18:00 ET targeting "today ET" would fire at the
+75% mark of the ET day and drop the 06:00-12:00 PHT overtime band: 1,309 of
+12,681 entries (10.3%), 65 of 82 members, 26 of 30 days (last 30 days). So the
+day is re-anchored instead of the clock moved.
+
+Spec `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`, plan
+`docs/superpowers/plans/2026-09-23-timer-emails-shift-day.md`.
+
+- `timer_correction_review.py`: `shift_day` / `shift_day_bounds` /
+  `form_lookup_bounds` / `last_closed_shift_day`. `--send`, `--remind`,
+  `--resend` and the `--apply` change records all bucket on the shift day; SQL
+  moved from `DATE(start_time AT TIME ZONE 'America/New_York') = $1` to a
+  sargable `start_time >= $lo AND start_time < $hi`. `_entry_date_et` removed.
+  The form-reply lookup uses the union of both definitions (30 h) so replies
+  to pre-cutover emails still resolve.
+- `pipeline_trigger.gs`: `TIMER_EMAILS_HOUR/MINUTE = 6:30`,
+  `setupTimerEmailsTrigger` pinned `inTimezone('Asia/Manila')`; minute 30 so
+  the +/-15 min jitter can never fire before the 06:00 window closes.
+- Workflow headers, README updated. Tests: `tests/test_shift_day.py` (23).
+  Suite 337 passed / 6 failed, the six pre-existing in
+  `test_asset_tasks_resilience.py` on main `ed3671a`.
+- Verified against production (Supabase MCP, read-only): range predicate ==
+  closed-form expression on all 8 shift days checked
+  (`out/timer_emails_shift_day_check.sql`, gitignored). The exact new `--send`
+  statement for shift day 2026-09-22 returns 764 entries / 74 members, earliest
+  06:00:55 PHT 9/22, latest 05:59:01 PHT 9/23, 0 rows at/after 06:00 PHT 9/23,
+  0 rows with the wrong shift day; 95 rows in the 06-12 PHT 9/22 band that the
+  ET-day query put in the previous day.
+- NOT done, on purpose: the plan's `--send --test` dry run. The
+  `daily_notifications` upsert (`:1213`) is not gated on `test_mode`, so a
+  test send would overwrite every real member's thread for that day with a
+  thread in Jamil's inbox and break in-thread `--resend`. Replaced by the
+  read-only row-set check above. Local direct-DB run also failed on DNS (WARP
+  off), so the check ran through the Supabase MCP.
+
+CUTOVER CHECKLIST (Jamil; window = after an old 18:00 PHT send and before the
+next 06:15 PHT, i.e. Sunday 9/27 evening PHT for a Monday-morning first send,
+or Monday 9/28 evening PHT for Tuesday morning). ALL THREE STEPS INSIDE THE
+WINDOW, IN THIS ORDER. PR #80 is a draft until then: the old 18:00 PHT trigger
+dispatches the same workflow and the workflow runs main, so merging earlier
+would flip the window on the very next 18:00 PHT send and trip the --resend
+snapshot mismatch before the reset SQL. Jamil 2026-09-23: effective Monday
+only, unchanged until then.
+1. premerge-review, then merge the PR.
+2. Snapshot reset, once, so `--resend` re-bootstraps silently instead of
+   treating the definition change as new entries for up to ~65 members:
+   `UPDATE app_timer.daily_notifications SET last_sent_entry_ids = NULL WHERE send_date >= CURRENT_DATE - 8;`
+3. Paste `scripts/pipeline_trigger.gs` whole into the Apps Script editor, run
+   `setupTimerEmailsTrigger()` once, confirm the Triggers page shows
+   triggerTimerEmails at 6:30 AM Asia/Manila and no 6 AM ET entry remains.
+4. Next morning: check the workflow run and one member email (date label =
+   the date the shift started; 05:xx PHT entries present; 06:xx absent).
+
+Known consequences (spec 3.7): overtime that STARTS after 06:00 PHT lands in
+the next shift's email; the email's day is 6 h offset from DRMC / variance /
+Excel exports, which stay on ET calendar dates (email-only scope, Jamil's
+call). Relabelling the header ("Shift ending 06:00 PHT ...") is a one-line
+follow-up if members ask.
+
+CUTOVER TIMING DECIDED (Jamil, 2026-09-23 ~22:15 ET): Sunday 2026-09-27, between
+20:00 PHT and Monday 06:00 PHT (Sunday 08:00-18:00 ET); aim for 20:00-21:00 PHT,
+~15 min total. Not before 20:00 PHT because Sunday's last old-style email fires
+17:45-18:15 PHT and the workflow can take 45 min; step 0 is confirming the latest
+"Pipeline: Timer Emails" run is green and finished. Not after Monday 06:00 PHT
+because the old trigger would fire again at 18:00 PHT with the new code. Then,
+in order: (1) Jamil pings, Claude runs premerge-review, Jamil marks the PR ready
+and merges; (2) Claude runs the daily_notifications snapshot reset; (3) Jamil
+pastes pipeline_trigger.gs whole and runs setupTimerEmailsTrigger() once,
+Triggers page shows triggerTimerEmails at 6:30 AM Asia/Manila and no 6 AM ET
+entry. Expected: Monday 06:30 PHT email covers Sunday's shift (near-empty, the
+smoke test); Tuesday 06:30 PHT is the first real one (Monday's shift). No gap,
+no double send.

@@ -41,7 +41,7 @@ import base64
 import hashlib
 import json
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
@@ -52,6 +52,71 @@ from config import SCHEMA_STAGING, SCHEMA_TIMER, get_logger, get_db, close_db, r
 logger = get_logger("timer_correction")
 
 TZ_EASTERN = ZoneInfo("America/New_York")
+TZ_MANILA = ZoneInfo("Asia/Manila")
+
+# The member-facing Timer Entries email is bucketed on a SHIFT DAY: the 24
+# hours from 06:00 Asia/Manila on date D to 06:00 Asia/Manila on D+1,
+# labelled D (the date the 18:00 PHT shift starts). Before 2026-09-28 it was
+# bucketed on the ET calendar date (noon PHT to noon PHT), which disagreed
+# with the members' 06:00 PHT shift end on ~10% of entries (the 06:00-12:00
+# PHT overtime band). Asia/Manila has no DST, so the boundary never moves.
+# Everything the emails run touches (--send, --remind, --resend, the change
+# records --apply writes) uses these helpers; nothing downstream (DRMC,
+# variance, exports) does, they stay on ET calendar dates.
+SHIFT_DAY_START_HOUR = 6
+
+
+def _as_aware_utc(dt) -> datetime:
+    """ISO string or datetime -> tz-aware datetime; naive means UTC."""
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def shift_day(dt) -> date:
+    """Shift day an instant belongs to: the Asia/Manila date of (dt - 6h)."""
+    local = _as_aware_utc(dt).astimezone(TZ_MANILA)
+    return (local - timedelta(hours=SHIFT_DAY_START_HOUR)).date()
+
+
+def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """[06:00 PHT day, 06:00 PHT day+1) as tz-aware UTC datetimes.
+
+    Use as `start_time >= $lo AND start_time < $hi`: sargable on the
+    start_time index, unlike the DATE(... AT TIME ZONE ...) = $1 form.
+    """
+    lo = datetime(day.year, day.month, day.day, SHIFT_DAY_START_HOUR,
+                  tzinfo=TZ_MANILA).astimezone(timezone.utc)
+    return lo, lo + timedelta(days=1)
+
+
+def form_lookup_bounds(day: date) -> tuple[datetime, datetime]:
+    """Window for resolving a member's form reply that names `day`.
+
+    The union of the OLD ET-calendar-day window and the NEW shift-day
+    window: opens at 06:00 PHT `day`, closes at 00:00 ET `day`+1 (30 h).
+    Replies to emails sent before the 2026-09-28 cutover carry ET-day
+    dates; replies after it carry shift-day dates. The group lookup also
+    matches on site/task/start, so the extra hours cannot make it
+    ambiguous. Safe to keep forever.
+    """
+    lo, _ = shift_day_bounds(day)
+    et_end = (datetime(day.year, day.month, day.day, tzinfo=TZ_EASTERN)
+              + timedelta(days=1)).astimezone(timezone.utc)
+    return lo, et_end
+
+
+def last_closed_shift_day(now: datetime | None = None) -> date:
+    """The most recent shift day whose window has fully closed.
+
+    At the ~06:30 PHT send this is yesterday's shift day. If a run ever
+    fired before 06:00 PHT it would (correctly) target the day before that
+    rather than email a still-open window.
+    """
+    now = _as_aware_utc(now or datetime.now(timezone.utc))
+    return shift_day(now) - timedelta(days=1)
 
 
 def _entries_to_jsonb(entries):
@@ -277,7 +342,7 @@ def _parse_entry_details(details: str) -> dict | None:
         "project": None if project in ("", "(no project)") else project,
         "site": None if site in ("", "(no site)") else site,
         "task": None if task in ("", "(no task)") else task,
-        "start_date": start_date,  # Eastern calendar date of start_time
+        "start_date": start_date,  # the date shown in the email (shift day since 2026-09-28)
         # _fmt_duration string of the snapshot the member actually saw in the
         # review email. Identifies WHICH row of a start-key group the response
         # targets — a group can mix runaway/ghost snapshots with a real session.
@@ -348,15 +413,6 @@ def _fmt_time_short(dt) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(TZ_EASTERN).strftime("%m/%d %I:%M %p")
-
-
-def _entry_date_et(dt) -> "date":
-    """Return the calendar date of dt interpreted in Eastern Time."""
-    if isinstance(dt, str):
-        dt = datetime.fromisoformat(dt)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(TZ_EASTERN).date()
 
 
 def _fmt_date(dt) -> str:
@@ -654,21 +710,24 @@ def _parse_duration_response(value: str) -> float | None:
 # --------------------------------------------------------------------------
 
 def get_previous_day_entries(db, target_date=None) -> list[dict]:
-    """Query timer entries for a given date (Eastern Time). Defaults to yesterday."""
+    """Timer entries for one shift day (06:00 PHT to 06:00 PHT).
+
+    Defaults to the last CLOSED shift day, which at the ~06:30 PHT send is
+    yesterday's. Range predicate on start_time so the index is used.
+    """
     if target_date is None:
-        now_et = datetime.now(TZ_EASTERN)
-        target_date = (now_et - timedelta(days=1)).date()
-    yesterday = target_date
+        target_date = last_closed_shift_day()
+    lo, hi = shift_day_bounds(target_date)
 
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT DISTINCT project_did, project, user_email, start_time, end_time,
                    duration_min, site_name, site_id, task, task_clean, asset_did
             FROM {SCHEMA_STAGING}.stg_timer_activities
-            WHERE DATE(start_time AT TIME ZONE 'America/New_York') = $1
+            WHERE start_time >= $1 AND start_time < $2
             ORDER BY user_email, site_name, task, start_time
-        """, yesterday),
-        description="fetch previous day timer entries",
+        """, lo, hi),
+        description=f"fetch timer entries for shift day {target_date}",
     )
 
     return [dict(r) for r in rows] if rows else []
@@ -1019,8 +1078,8 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         by_user.setdefault(e["user_email"], []).append(e)
 
     if target_date is None:
-        target_date = (datetime.now(TZ_EASTERN) - timedelta(days=1)).date()
-    yesterday = target_date  # variable name preserved — used as the entry date below
+        target_date = last_closed_shift_day()
+    yesterday = target_date  # variable name preserved; it is the shift day (spec 3.1)
     date_str = yesterday.strftime("%B %d, %Y")
 
     service = authenticate()
@@ -1297,12 +1356,12 @@ def run_send(test_mode: bool = False, target_date=None):
 
     db = get_db()
 
-    date_label = target_date or "previous day"
+    date_label = target_date or f"shift day {last_closed_shift_day()}"
     logger.info(f"Fetching timer entries for {date_label}...")
     entries = get_previous_day_entries(db, target_date=target_date)
 
     if not entries:
-        logger.info("No timer entries found for previous day")
+        logger.info(f"No timer entries found for {date_label}")
         return
 
     n_techs = len(set(e['user_email'] for e in entries))
@@ -1445,9 +1504,9 @@ def _resolve_stale_response(db, resp: dict) -> list[dict] | None:
     parsed = _parse_entry_details(resp.get("details") or "")
     if not parsed:
         return None
-    day_start = datetime(parsed["start_date"].year, parsed["start_date"].month,
-                         parsed["start_date"].day, tzinfo=TZ_EASTERN)
-    day_end = day_start + timedelta(days=1)
+    # Union of the pre-2026-09-28 ET-day window and the shift-day window
+    # for the date the member's reply names; see form_lookup_bounds.
+    day_start, day_end = form_lookup_bounds(parsed["start_date"])
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT project_did, project, user_email, start_time, site_name,
@@ -1869,7 +1928,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}) "
                         f"for {group[0].get('user_email')} / "
                         f"{group[0].get('site_name') or '(no site)'} on "
-                        f"{_entry_date_et(group[0]['start_time'])}; "
+                        f"{shift_day(group[0]['start_time'])}; "
                         f"entry drifted materially — skipping for manual review")
                     continue
                 # The FIRST row is stored under the response's own stale
@@ -1908,7 +1967,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         "entry_id": row_eid,
                         "action": "remove",
                         "user_email": row["user_email"],
-                        "entry_date": _entry_date_et(row["start_time"]),
+                        "entry_date": shift_day(row["start_time"]),
                         "entry": row,
                         "original_duration_min": row.get("duration_min"),
                         "corrected_duration_min": None,
@@ -1978,7 +2037,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                 "entry_id": entry_id,
                 "action": "correct",
                 "user_email": entry["user_email"],
-                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry_date": shift_day(entry["start_time"]),
                 "entry": entry,
                 "original_duration_min": entry.get("duration_min"),
                 "corrected_duration_min": corrected_duration,
@@ -2013,7 +2072,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                 "entry_id": entry_id,
                 "action": "remove",
                 "user_email": entry["user_email"],
-                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry_date": shift_day(entry["start_time"]),
                 "entry": entry,
                 "original_duration_min": entry.get("duration_min"),
                 "corrected_duration_min": None,
@@ -2308,6 +2367,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
     correction and drop the surviving edit from the email. Matching the
     clean table by its natural key avoids that entirely.
     """
+    lo, hi = shift_day_bounds(entry_date)
     rows = retry_db(
         lambda: db.fetch(f"""
             WITH surviving AS (
@@ -2316,7 +2376,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                        t.site_name, t.site_id, t.task, t.task_clean
                 FROM {SCHEMA_STAGING}.stg_timer_activities_clean t
                 WHERE t.user_email = $1
-                  AND DATE(t.start_time AT TIME ZONE 'America/New_York') = $2
+                  AND t.start_time >= $2 AND t.start_time < $3
             )
             SELECT s.project_did, s.project, s.user_email,
                    s.start_time, s.end_time, s.duration_min,
@@ -2370,11 +2430,11 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
                    rm.reason AS removal_reason
             FROM {SCHEMA_TIMER}.entry_removals rm
             WHERE rm.user_email = $1
-              AND DATE(rm.start_time AT TIME ZONE 'America/New_York') = $2
+              AND rm.start_time >= $2 AND rm.start_time < $3
               AND rm.reason IS DISTINCT FROM 'REVERTED'
 
             ORDER BY start_time, site_name, task
-        """, user_email, entry_date),
+        """, user_email, lo, hi),
         description=f"classify entries for {user_email} on {entry_date}",
     )
 
@@ -2906,10 +2966,7 @@ def run_remind(test_mode: bool = False):
     for r in unresolved:
         entries = r["entries"] if isinstance(r["entries"], list) else json.loads(r["entries"])
         days_pending = (now - r["notified_at"]).days
-        st = r["start_time"]
-        if st.tzinfo is None:
-            st = st.replace(tzinfo=timezone.utc)
-        entry_date = st.astimezone(TZ_EASTERN).date()
+        entry_date = shift_day(r["start_time"])
         key = (r["user_email"], entry_date)
         by_user_date.setdefault(key, []).append({
             "group_id": r["group_id"],
@@ -3124,6 +3181,7 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
     the resend shows the full corrected day with current Edit / Remove
     buttons. Two emails serve different purposes.
     """
+    lo, hi = shift_day_bounds(entry_date)
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT
@@ -3143,9 +3201,9 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
                AND corr.corrected_end_time IS NOT DISTINCT FROM c.end_time
                AND corr.corrected_duration_min IS NOT DISTINCT FROM c.duration_min
             WHERE c.user_email = $1
-              AND DATE(c.start_time AT TIME ZONE 'America/New_York') = $2
+              AND c.start_time >= $2 AND c.start_time < $3
             ORDER BY c.start_time, c.site_name, c.task
-        """, user_email, entry_date),
+        """, user_email, lo, hi),
         description=f"current-day entries for {user_email} on {entry_date}",
     )
     return [dict(r) for r in rows] if rows else []
@@ -3160,7 +3218,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     with the current set silently and NOT returned as resend candidates,
     so we don't blast a re-send to every tech the day after this migration.
     """
-    cutoff = (datetime.now(TZ_EASTERN) - timedelta(days=lookback_days)).date()
+    cutoff = shift_day(datetime.now(timezone.utc)) - timedelta(days=lookback_days)
     # Surface unexpectedly large batches — a clean steady state is a
     # handful of candidates per day. A spike usually means an upstream
     # extractor reloaded a big window or the lookback was widened by
@@ -3515,7 +3573,9 @@ def main():
     parser.add_argument("--resend-lookback-days", type=int, default=7,
                         help="How many days back to check for resend candidates (default 7)")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
-    parser.add_argument("--date", type=str, help="Target date YYYY-MM-DD (default: yesterday). For backfill sends.")
+    parser.add_argument("--date", type=str,
+                        help="Target SHIFT DAY YYYY-MM-DD, i.e. the date the 18:00 PHT shift "
+                             "started (default: the last closed shift day). For backfill sends.")
     args = parser.parse_args()
 
     if not any([args.send, args.apply, args.remind, args.resend]):
