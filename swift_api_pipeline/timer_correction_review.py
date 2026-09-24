@@ -415,15 +415,6 @@ def _fmt_time_short(dt) -> str:
     return dt.astimezone(TZ_EASTERN).strftime("%m/%d %I:%M %p")
 
 
-def _entry_date_et(dt) -> "date":
-    """Return the calendar date of dt interpreted in Eastern Time."""
-    if isinstance(dt, str):
-        dt = datetime.fromisoformat(dt)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(TZ_EASTERN).date()
-
-
 def _fmt_date(dt) -> str:
     """Format a datetime to Eastern date string."""
     if dt is None:
@@ -719,21 +710,24 @@ def _parse_duration_response(value: str) -> float | None:
 # --------------------------------------------------------------------------
 
 def get_previous_day_entries(db, target_date=None) -> list[dict]:
-    """Query timer entries for a given date (Eastern Time). Defaults to yesterday."""
+    """Timer entries for one shift day (06:00 PHT to 06:00 PHT).
+
+    Defaults to the last CLOSED shift day, which at the ~06:30 PHT send is
+    yesterday's. Range predicate on start_time so the index is used.
+    """
     if target_date is None:
-        now_et = datetime.now(TZ_EASTERN)
-        target_date = (now_et - timedelta(days=1)).date()
-    yesterday = target_date
+        target_date = last_closed_shift_day()
+    lo, hi = shift_day_bounds(target_date)
 
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT DISTINCT project_did, project, user_email, start_time, end_time,
                    duration_min, site_name, site_id, task, task_clean, asset_did
             FROM {SCHEMA_STAGING}.stg_timer_activities
-            WHERE DATE(start_time AT TIME ZONE 'America/New_York') = $1
+            WHERE start_time >= $1 AND start_time < $2
             ORDER BY user_email, site_name, task, start_time
-        """, yesterday),
-        description="fetch previous day timer entries",
+        """, lo, hi),
+        description=f"fetch timer entries for shift day {target_date}",
     )
 
     return [dict(r) for r in rows] if rows else []
@@ -1084,8 +1078,8 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         by_user.setdefault(e["user_email"], []).append(e)
 
     if target_date is None:
-        target_date = (datetime.now(TZ_EASTERN) - timedelta(days=1)).date()
-    yesterday = target_date  # variable name preserved — used as the entry date below
+        target_date = last_closed_shift_day()
+    yesterday = target_date  # variable name preserved; it is the shift day (spec 3.1)
     date_str = yesterday.strftime("%B %d, %Y")
 
     service = authenticate()
@@ -1362,12 +1356,12 @@ def run_send(test_mode: bool = False, target_date=None):
 
     db = get_db()
 
-    date_label = target_date or "previous day"
+    date_label = target_date or f"shift day {last_closed_shift_day()}"
     logger.info(f"Fetching timer entries for {date_label}...")
     entries = get_previous_day_entries(db, target_date=target_date)
 
     if not entries:
-        logger.info("No timer entries found for previous day")
+        logger.info(f"No timer entries found for {date_label}")
         return
 
     n_techs = len(set(e['user_email'] for e in entries))
@@ -1934,7 +1928,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}) "
                         f"for {group[0].get('user_email')} / "
                         f"{group[0].get('site_name') or '(no site)'} on "
-                        f"{_entry_date_et(group[0]['start_time'])}; "
+                        f"{shift_day(group[0]['start_time'])}; "
                         f"entry drifted materially — skipping for manual review")
                     continue
                 # The FIRST row is stored under the response's own stale
@@ -1973,7 +1967,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         "entry_id": row_eid,
                         "action": "remove",
                         "user_email": row["user_email"],
-                        "entry_date": _entry_date_et(row["start_time"]),
+                        "entry_date": shift_day(row["start_time"]),
                         "entry": row,
                         "original_duration_min": row.get("duration_min"),
                         "corrected_duration_min": None,
@@ -2043,7 +2037,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                 "entry_id": entry_id,
                 "action": "correct",
                 "user_email": entry["user_email"],
-                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry_date": shift_day(entry["start_time"]),
                 "entry": entry,
                 "original_duration_min": entry.get("duration_min"),
                 "corrected_duration_min": corrected_duration,
@@ -2078,7 +2072,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                 "entry_id": entry_id,
                 "action": "remove",
                 "user_email": entry["user_email"],
-                "entry_date": _entry_date_et(entry["start_time"]),
+                "entry_date": shift_day(entry["start_time"]),
                 "entry": entry,
                 "original_duration_min": entry.get("duration_min"),
                 "corrected_duration_min": None,
@@ -3580,7 +3574,9 @@ def main():
     parser.add_argument("--resend-lookback-days", type=int, default=7,
                         help="How many days back to check for resend candidates (default 7)")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
-    parser.add_argument("--date", type=str, help="Target date YYYY-MM-DD (default: yesterday). For backfill sends.")
+    parser.add_argument("--date", type=str,
+                        help="Target SHIFT DAY YYYY-MM-DD, i.e. the date the 18:00 PHT shift "
+                             "started (default: the last closed shift day). For backfill sends.")
     args = parser.parse_args()
 
     if not any([args.send, args.apply, args.remind, args.resend]):

@@ -125,3 +125,43 @@ def test_last_closed_shift_day_default_uses_now():
     got = last_closed_shift_day()
     expect = shift_day(datetime.now(timezone.utc)) - timedelta(days=1)
     assert got == expect
+
+
+# ---------------------------------------------------------------------------
+# Wiring: every bucketing site in the emails run uses the shift day.
+# retry_db calls the lambda synchronously, so a plain fake with a sync fetch
+# that records the SQL and parameters is enough.
+# ---------------------------------------------------------------------------
+
+class _RecordingDB:
+    def __init__(self):
+        self.sql = None
+        self.params = None
+
+    def fetch(self, sql, *params):
+        self.sql = " ".join(sql.split())
+        self.params = params
+        return []
+
+
+def test_entry_date_et_is_gone():
+    # The ET-calendar helper must not survive; every caller moved to shift_day.
+    import timer_correction_review as tcr
+    assert not hasattr(tcr, "_entry_date_et")
+
+
+def test_get_previous_day_entries_uses_shift_day_bounds():
+    """The --send query must be a half-open range on the shift day."""
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    tcr.get_previous_day_entries(db, target_date=date(2026, 9, 22))
+    assert "start_time >= $1 AND start_time < $2" in db.sql
+    assert "America/New_York" not in db.sql
+    assert db.params == shift_day_bounds(date(2026, 9, 22))
+
+
+def test_get_previous_day_entries_default_is_last_closed_shift_day():
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    tcr.get_previous_day_entries(db)
+    assert db.params == shift_day_bounds(last_closed_shift_day())
