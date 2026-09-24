@@ -3682,8 +3682,13 @@ Spec `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`, plan
 
 CUTOVER CHECKLIST (Jamil; window = after an old 18:00 PHT send and before the
 next 06:15 PHT, i.e. Sunday 9/27 evening PHT for a Monday-morning first send,
-or Monday 9/28 evening PHT for Tuesday morning):
-1. Merge the PR (safe any time before; nothing fires until the trigger moves).
+or Monday 9/28 evening PHT for Tuesday morning). ALL THREE STEPS INSIDE THE
+WINDOW, IN THIS ORDER. PR #80 is a draft until then: the old 18:00 PHT trigger
+dispatches the same workflow and the workflow runs main, so merging earlier
+would flip the window on the very next 18:00 PHT send and trip the --resend
+snapshot mismatch before the reset SQL. Jamil 2026-09-23: effective Monday
+only, unchanged until then.
+1. premerge-review, then merge the PR.
 2. Snapshot reset, once, so `--resend` re-bootstraps silently instead of
    treating the definition change as new entries for up to ~65 members:
    `UPDATE app_timer.daily_notifications SET last_sent_entry_ids = NULL WHERE send_date >= CURRENT_DATE - 8;`
