@@ -342,7 +342,7 @@ def _parse_entry_details(details: str) -> dict | None:
         "project": None if project in ("", "(no project)") else project,
         "site": None if site in ("", "(no site)") else site,
         "task": None if task in ("", "(no task)") else task,
-        "start_date": start_date,  # Eastern calendar date of start_time
+        "start_date": start_date,  # the date shown in the email (shift day since 2026-09-28)
         # _fmt_duration string of the snapshot the member actually saw in the
         # review email. Identifies WHICH row of a start-key group the response
         # targets — a group can mix runaway/ghost snapshots with a real session.
@@ -1504,9 +1504,9 @@ def _resolve_stale_response(db, resp: dict) -> list[dict] | None:
     parsed = _parse_entry_details(resp.get("details") or "")
     if not parsed:
         return None
-    day_start = datetime(parsed["start_date"].year, parsed["start_date"].month,
-                         parsed["start_date"].day, tzinfo=TZ_EASTERN)
-    day_end = day_start + timedelta(days=1)
+    # Union of the pre-2026-09-28 ET-day window and the shift-day window
+    # for the date the member's reply names; see form_lookup_bounds.
+    day_start, day_end = form_lookup_bounds(parsed["start_date"])
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT project_did, project, user_email, start_time, site_name,

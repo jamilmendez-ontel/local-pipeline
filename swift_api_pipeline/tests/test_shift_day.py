@@ -165,3 +165,17 @@ def test_get_previous_day_entries_default_is_last_closed_shift_day():
     db = _RecordingDB()
     tcr.get_previous_day_entries(db)
     assert db.params == shift_day_bounds(last_closed_shift_day())
+
+
+def test_resolve_stale_response_uses_form_lookup_bounds():
+    """A member's reply names a date; look it up across BOTH day definitions."""
+    import timer_correction_review as tcr
+    db = _RecordingDB()
+    # Real prefill format: project | site | task | date | duration
+    resp = {"entry_id": "deadbeef", "respondent": "a@ontel.co",
+            "details": "Proj | Site A | 6. Final COP | Sep 22, 2026 | 1h 30m"}
+    tcr._resolve_stale_response(db, resp)
+    lo, hi = form_lookup_bounds(date(2026, 9, 22))
+    assert db.params[0] == lo
+    assert db.params[1] == hi
+    assert "start_time >= $1 AND start_time < $2" in db.sql
