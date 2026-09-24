@@ -41,7 +41,7 @@ import base64
 import hashlib
 import json
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
@@ -52,6 +52,71 @@ from config import SCHEMA_STAGING, SCHEMA_TIMER, get_logger, get_db, close_db, r
 logger = get_logger("timer_correction")
 
 TZ_EASTERN = ZoneInfo("America/New_York")
+TZ_MANILA = ZoneInfo("Asia/Manila")
+
+# The member-facing Timer Entries email is bucketed on a SHIFT DAY: the 24
+# hours from 06:00 Asia/Manila on date D to 06:00 Asia/Manila on D+1,
+# labelled D (the date the 18:00 PHT shift starts). Before 2026-09-28 it was
+# bucketed on the ET calendar date (noon PHT to noon PHT), which disagreed
+# with the members' 06:00 PHT shift end on ~10% of entries (the 06:00-12:00
+# PHT overtime band). Asia/Manila has no DST, so the boundary never moves.
+# Everything the emails run touches (--send, --remind, --resend, the change
+# records --apply writes) uses these helpers; nothing downstream (DRMC,
+# variance, exports) does, they stay on ET calendar dates.
+SHIFT_DAY_START_HOUR = 6
+
+
+def _as_aware_utc(dt) -> datetime:
+    """ISO string or datetime -> tz-aware datetime; naive means UTC."""
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def shift_day(dt) -> date:
+    """Shift day an instant belongs to: the Asia/Manila date of (dt - 6h)."""
+    local = _as_aware_utc(dt).astimezone(TZ_MANILA)
+    return (local - timedelta(hours=SHIFT_DAY_START_HOUR)).date()
+
+
+def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """[06:00 PHT day, 06:00 PHT day+1) as tz-aware UTC datetimes.
+
+    Use as `start_time >= $lo AND start_time < $hi`: sargable on the
+    start_time index, unlike the DATE(... AT TIME ZONE ...) = $1 form.
+    """
+    lo = datetime(day.year, day.month, day.day, SHIFT_DAY_START_HOUR,
+                  tzinfo=TZ_MANILA).astimezone(timezone.utc)
+    return lo, lo + timedelta(days=1)
+
+
+def form_lookup_bounds(day: date) -> tuple[datetime, datetime]:
+    """Window for resolving a member's form reply that names `day`.
+
+    The union of the OLD ET-calendar-day window and the NEW shift-day
+    window: opens at 06:00 PHT `day`, closes at 00:00 ET `day`+1 (30 h).
+    Replies to emails sent before the 2026-09-28 cutover carry ET-day
+    dates; replies after it carry shift-day dates. The group lookup also
+    matches on site/task/start, so the extra hours cannot make it
+    ambiguous. Safe to keep forever.
+    """
+    lo, _ = shift_day_bounds(day)
+    et_end = (datetime(day.year, day.month, day.day, tzinfo=TZ_EASTERN)
+              + timedelta(days=1)).astimezone(timezone.utc)
+    return lo, et_end
+
+
+def last_closed_shift_day(now: datetime | None = None) -> date:
+    """The most recent shift day whose window has fully closed.
+
+    At the ~06:30 PHT send this is yesterday's shift day. If a run ever
+    fired before 06:00 PHT it would (correctly) target the day before that
+    rather than email a still-open window.
+    """
+    now = _as_aware_utc(now or datetime.now(timezone.utc))
+    return shift_day(now) - timedelta(days=1)
 
 
 def _entries_to_jsonb(entries):
