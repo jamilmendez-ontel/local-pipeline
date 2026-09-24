@@ -158,11 +158,10 @@ jobs:
         continue-on-error: true
         run: python -u upload_to_shared_drive.py --export timer-clean
 
-      # Member-facing emails (--remind / --send / --resend) moved to
-      # pipeline-timer-emails.yml (~6:00 AM ET / 18:00 PHT, 2026-08-28). That
-      # run re-extracts first so stops that reach Swift late (hours after the
-      # shift, seen 3x in Aug 2026) are settled before anyone is emailed. This
-      # run is data + exports only. Do NOT add the send steps back here.
+      # Member-facing emails (--remind / --send / --resend) live in
+      # pipeline-timer-emails.yml (~06:30 PHT since 2026-09-28, previously
+      # ~6:00 AM ET / 18:00 PHT from 2026-08-28). This run is data + exports
+      # only. Do NOT add the send steps back here.
 
       # Turn a silently-skipped clean export into a red run + email alert.
       # The export step is continue-on-error, so without this a transient

@@ -148,19 +148,28 @@ function setupTimerTrigger() {
 }
 
 /**
- * Target time (project timezone, ET) for the daily Timer EMAILS run:
- * ~6:00 AM ET = 18:00 PHT (19:00 PHT while ET is on standard time), the
- * members' shift start. This is run 2 of 2 for timer data: it re-extracts so
- * stops that reached Swift late (hours after the shift; 3 cases in Aug 2026)
- * are settled, then sends the member-facing emails (--remind / --send /
- * --resend). Run 1 (triggerLightPipelines, ~1:15 AM ET) is data + Excel
- * exports only since 2026-08-28.
+ * Target time for the daily Timer EMAILS run: ~06:30 Asia/Manila, just
+ * after the members' 06:00 PHT shift end. Since 2026-09-28 the email is
+ * bucketed on a SHIFT DAY (06:00 PHT to 06:00 PHT) and sent as soon as
+ * that window closes; before that it fired ~6:00 AM ET (18:00 PHT, the
+ * next shift's start) and covered the ET calendar date.
+ *
+ * Minute 30, not 0: Apps Script jitter is +/-15 min and the window MUST be
+ * closed before the run, so 06:15-06:45 PHT rather than 05:45-06:15. The
+ * trigger is pinned to Asia/Manila (see setupTimerEmailsTrigger) so it does
+ * not drift an hour at US DST changes. Late stops that reach Swift after
+ * the send are picked up in-thread by the next morning's --resend.
+ *
+ * This is run 2 of 2 for timer data: it re-extracts, applies corrections,
+ * rebuilds the clean table, then sends the member-facing emails
+ * (--remind / --send / --resend). Run 1 (triggerLightPipelines, ~1:15 AM
+ * ET / 13:15 PHT) is data + Excel exports only since 2026-08-28.
  *
  * DIFFERENT dispatch type from 'pipeline-timer' on purpose: the two runs must
  * never be fired by the same trigger.
  */
-var TIMER_EMAILS_HOUR = 6;
-var TIMER_EMAILS_MINUTE = 0;
+var TIMER_EMAILS_HOUR = 6;     // Asia/Manila
+var TIMER_EMAILS_MINUTE = 30;
 
 function triggerTimerEmails() {
   fireDispatch_('pipeline-timer-emails');
@@ -168,13 +177,13 @@ function triggerTimerEmails() {
 
 /**
  * Idempotently (re)create the daily time-driven trigger for
- * triggerTimerEmails() at ~6:00 AM ET. RUN THIS ONCE from the Apps Script
- * editor after deploying this file (and again after editing
+ * triggerTimerEmails() at ~06:30 Asia/Manila. RUN THIS ONCE from the Apps
+ * Script editor after deploying this file (and again after editing
  * TIMER_EMAILS_HOUR/MINUTE); it deletes any existing trigger on the same
  * handler first, so re-running is safe.
  *
- * NOTE: atHour() fires in the project's time zone (America/New_York), so the
- * PHT arrival time shifts by an hour with US DST. Accepted 2026-08-28.
+ * CUTOVER (2026-09-28): run this only BETWEEN an old 18:00 PHT send and the
+ * next 06:15 PHT, after the daily_notifications snapshot reset (spec 3.5).
  */
 function setupTimerEmailsTrigger() {
   var existing = ScriptApp.getProjectTriggers();
@@ -189,11 +198,12 @@ function setupTimerEmailsTrigger() {
     .everyDays(1)
     .atHour(TIMER_EMAILS_HOUR)
     .nearMinute(TIMER_EMAILS_MINUTE)
+    .inTimezone('Asia/Manila')
     .create();
 
   Logger.log('Created triggerTimerEmails trigger at ~' +
              TIMER_EMAILS_HOUR + ':' + (TIMER_EMAILS_MINUTE < 10 ? '0' : '') + TIMER_EMAILS_MINUTE +
-             ' ET daily (18:00 PHT in summer).');
+             ' Asia/Manila daily (+/-15 min).');
 }
 
 /**

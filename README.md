@@ -32,7 +32,7 @@ Script time-driven triggers under the notifier account. See
 |---|---|---|
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
 | `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | Run 1 of 2: `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + corrections apply + clean rebuild + MV refresh. **No member emails** since 2026-08-28 |
-| `pipeline-timer-emails.yml` | Apps Script ~6:00 AM ET (18:00 PHT, `triggerTimerEmails`) | Run 2 of 2: re-extract + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`). Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
+| `pipeline-timer-emails.yml` | Apps Script ~06:30 PHT (`triggerTimerEmails`, pinned to Asia/Manila) | Run 2 of 2: re-extract + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`) for the shift day that closed at 06:00 PHT. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
@@ -109,9 +109,17 @@ extract and only appeared after 01:27 ET). With extract and send 9 minutes apart
 the daily email flagged such timers as "still running" and the hours were short
 until the next night. The fix is scheduling, not code: `pipeline-timer.yml`
 (~1:15 AM ET / 13:15 PHT) is now data + exports only, and the new
-`pipeline-timer-emails.yml` (~6:00 AM ET / 18:00 PHT, members' shift start)
-re-extracts first and then runs `--remind` / `--send` / `--resend`, giving late
-stops ~12 hours to land. The two workflows use different `repository_dispatch`
+`pipeline-timer-emails.yml` re-extracts first and then runs `--remind` /
+`--send` / `--resend`. From 2026-08-28 to 2026-09-27 it ran ~6:00 AM ET /
+18:00 PHT (members' shift start), giving late stops ~12 hours to land. Since
+2026-09-28 it runs ~06:30 PHT, just after the 06:00 PHT shift end, and the
+email is bucketed on a **shift day** (06:00 PHT to 06:00 PHT, labelled with
+the date the shift started) instead of the ET calendar date; the ET date is
+noon PHT to noon PHT and disagreed with the shift on the 06:00-12:00 PHT
+overtime band (~10% of entries, 65 of 82 members over 30 days). Late stops
+now arrive in-thread via the next morning's `--resend`. Only this run uses
+the shift day; DRMC, variance and the Excel exports stay on ET calendar
+dates. Design: `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`. The two workflows use different `repository_dispatch`
 types (`pipeline-timer` vs `pipeline-timer-emails`, both from
 `scripts/pipeline_trigger.gs`) and share the `pipeline-timer` concurrency group
 with `timer-correction-apply.yml` so no two of them ever overlap. Every
