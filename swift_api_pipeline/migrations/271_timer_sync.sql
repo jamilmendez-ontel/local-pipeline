@@ -30,7 +30,11 @@
 --     (schema_name = 'reference'    AND table_name = 'ref_swift_users') OR
 --     (schema_name = 'analytics'    AND table_name = 'v_timer_entries_live'));
 --
--- STATUS: APPLIED: pending (deploy order step 2, after the platform PR review)
+-- STATUS: APPLIED 2026-09-25 ~03:40 ET via MCP apply_migration (after ontel-data-platform PR #18 merged as 992864d).
+-- VERIFIED: relrowsecurity = true on stg_timer_activities_inc, raw_timer_activities_inc, ref_swift_users;
+--   agent.schema_metadata rows for the 4 objects = 4; pipeline.inc_audit_results.pipeline text DEFAULT 'asset_tasks'
+--   (600 existing rows defaulted); analytics.v_timer_entries_live selects (0 rows); 7 indexes on the staging table;
+--   35 staging columns; view grants: service_role only.
 -- =============================================================================
 
 BEGIN;
