@@ -3775,3 +3775,104 @@ DEFERRED: (a) per-row Date vs header date on the 06:00-12:00 PHT band, relabel
 only if members ask; (b) Triggers page eyeball that no 6 AM ET triggerTimerEmails
 entry remains (the log confirms the create, not the page); (c) worktree
 .claude/worktrees/timer-emails-shift-day is locked and left in place.
+
+### 2026-09-27 23:30-23:59 ET - Old GC asset-task pipeline retired in favour of the GC tracker sync (chore/retire-gc-asset-tasks, mig 273 DRAFT, INIT-065)
+
+Jamil's question: is the GC tracker on ontel-data-platform the same thing as the GC
+asset task pipeline, and more complete? Verdict: yes. Read from the live DB:
+  old:     raw_asset_tasks_gc 0 rows, stg_asset_tasks_gc 0, stg_assets_gc 0,
+           pipeline.gc_lake_runs 0 runs; workflow disabled_manually, last run
+           2026-05-27; gc-asset-lake repo local only, tasks 1-7 of 12.
+  tracker: 377 projects (all enabled) / 14 markets, ~22k sites, ~791k tasks,
+           ~7.3M requirements, hourly.
+  columns: stg_gc_tracker_tasks (47) holds every column of stg_asset_tasks_gc (30)
+           except the surrogate id and run_id, plus last_updated and 18 counts.
+Jamil: proceed. INIT-065 closed as superseded; remaining coverage stays in INIT-807.
+
+BRANCH chore/retire-gc-asset-tasks (worktree .claude/worktrees/retire-gc-asset-tasks),
+committed locally, NOT pushed, NO PR yet:
+  removed  swift_api_pipeline/extract_asset_tasks_gc.py (377 lines)
+           .github/workflows/pipeline-asset-tasks-gc.yml
+           transform.py GC block (5 functions, 268 lines)
+           main.py: 4 wrappers, 4 PIPELINE_NAMES rows, 4 --pipeline choices
+           pipeline_notifier.py: 4 PIPELINE_TABLES entries
+           scripts/pipeline_trigger.gs: triggerAssetTasksGC + its schedule line
+           README workflow row
+  added    migrations/273_retire_gc_asset_tasks.sql (DRAFT, NOT APPLIED)
+Gates from swift_api_pipeline/: 337 passed, 6 failed, the six being the known
+tests/test_asset_tasks_resilience.py failures (same six on untouched main).
+py_compile clean; `main.py --pipeline asset_tasks_gc` now exits "invalid choice".
+
+MIGRATION 273 drops 3 MVs, 3 tables, pipeline.gc_lake_runs,
+data_raw.aggregate_assets_gc(text), and replaces analytics.refresh_one_mv from the
+LIVE definition minus the three _gc branches. No CASCADE; a guard aborts if any of
+the four tables has rows. Pre-flight (read-only): pg_depend shows the 3 MVs as the
+only dependents; no FK, policy, publication or pg_cron job; 0 agent.schema_metadata
+rows; pg_stat_statements has no application query on any of them.
+DRY RUN on the live DB inside one DO block ending in an unconditional RAISE (so it
+can only roll back): leftover_objects=0, refresh_one_mv_mentions_gc=f,
+gc_tracker_objects=9. Re-checked after: all objects and the 5,809 / 1,063 / 91 MV
+rows still present.
+
+FINDING, corrects my first answer ("all empty"): the three _gc MVs are NOT empty.
+They are a frozen snapshot of the 2026-05-27 / 06-03 runs (5,809 / 1,063 / 91 rows),
+11 Ericsson projects, approval dates 2020-05-14 to 2026-02-23. Their sources are
+empty so a refresh would wipe them (migration 268 already warns about this). 4 of
+the 11 are in the tracker; 7 are not: Ericsson/T-Mobile/FL - Excalibur, BAWA -
+Overlay, SFL - Excalibur, GA - Overlay, UPNY - Overlay, Ericsson/AT&T/STX, NTX.
+Dropping the MVs destroys that snapshot; it is rebuildable only from Swift by
+seeding those projects in the tracker. Also NOT old-GC despite the name, left alone:
+analytics.v_asset_gc (feeds v_page5_po_status, v_page5_qp_to_po), v_pmi_gc_aging,
+v_pmi_gc_aging_history.
+
+APPLY ORDER when Jamil gives the go: premerge-review -> merge + push main -> Apps
+Script: delete the triggerAssetTasksGC time trigger FIRST, then paste the whole
+pipeline_trigger.gs -> apply 273 -> run its VERIFY block.
+
+DEFERRED: (a) Jamil's call on the frozen MV snapshot (drop as drafted, or seed the 7
+Ericsson projects first); (b) push + PR + premerge-review; (c) archive the
+gc-asset-lake folder; (d) docs/plans + docs/superpowers/specs for the old pipeline
+stay as history.
+
+### 2026-09-28 00:10-00:30 ET - Retire old GC pipeline: PR #84 opened (DRAFT), premerge review running, frozen MV snapshot exported
+
+Jamil: proceed (drop the frozen snapshot as drafted; push, PR, premerge-review).
+
+PHASE 0 SCOPE: 1 commit (1787e0f) on chore/retire-gc-asset-tasks vs main da4ad0b, 10
+files, +252 / -872. Class: pipeline-touching + DB-touching. Lanes A (code review) and
+C (DB preflight) apply; lane B does not (no new reads or routes). Migration number
+re-checked at review time: 269/270 on feat/home-org-pulse-rpc, 271 on main, 272 on PR
+#81, no 273 on any remote branch, so 273 is still free.
+
+SAFETY COPY before any drop: out/gc-mv-snapshot-2026-09-28/ (gitignored), read-only
+export script export_gc_mv_snapshot.py, row counts asserted equal to live:
+  mv_daily_completion_gc.csv   5,809 rows   8 cols   992,334 bytes  sha256 e1671c337ca90c81
+  mv_project_summary_gc.csv    1,063 rows  22 cols   115,464 bytes  sha256 979c0e815a8952d1
+  mv_technician_stats_gc.csv      91 rows  14 cols     6,780 bytes  sha256 1feb83e41393c2b9
+So dropping the MVs no longer loses the snapshot.
+GOTCHA: the first export died with "gaierror 11001 getaddrinfo failed": .env points
+at the direct host db.voqfjfngdpcvevbkikud.supabase.co, which is IPv6-only and does
+not resolve with WARP off. Worked with per-command overrides, .env untouched:
+SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+SUPABASE_USER=postgres.voqfjfngdpcvevbkikud SUPABASE_PORT=5432.
+
+PUSHED + PR: branch pushed to origin, DRAFT PR #84
+https://github.com/jamilmendez-ontel/local-pipeline/pull/84
+
+LANE A (code review): APPROVE, 1 minor finding, fixed in this branch.
+  README.md:172 still planned "(and gc-asset-tasks after it)" as phase 2 of the
+  incremental pilot; the parenthetical is removed.
+  Checked clean: no over-deletion (cut points keep 2 blank lines, only one docstring
+  reworded in a surviving function); no dangling reference in any .py / .yml / .gs /
+  .json / .toml; config.py has no GC constants; no other workflow chains on the
+  deleted one; PIPELINE_NAMES, argparse choices and the dispatch map were cut in
+  lockstep so no KeyError path; pipeline_notifier ALL_TABLES is derived from
+  PIPELINE_TABLES so row-count snapshots will not hit a dropped table; no test names
+  the removed functions; no Apps Script setup function looks for triggerAssetTasksGC;
+  all 8 MV names the code still passes to analytics.refresh_one_mv are branches in
+  the replacement function (no "Unknown view" risk).
+
+LANE C (independent DB preflight, read-only): STILL RUNNING when this entry was
+written. No verdict yet.
+
+NOT DONE YET: merge, Apps Script trigger removal, apply of migration 273.

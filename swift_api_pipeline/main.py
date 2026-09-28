@@ -36,12 +36,8 @@ PIPELINE_NAMES = {
     "asset_tasks": "Asset Tasks",
     "asset_tasks_extract": "Asset Tasks Extract",
     "asset_tasks_transform": "Asset Tasks Transform",
-    "asset_tasks_gc": "Asset Tasks GC",
-    "asset_tasks_gc_extract": "Asset Tasks GC Extract",
-    "asset_tasks_gc_transform": "Asset Tasks GC Transform",
     "targeted_asset_tasks": "Targeted Asset Tasks",
     "targeted_task_requirements": "Targeted Task Requirements",
-    "analytics_gc": "Analytics GC MV Refresh",
     "forms": "QA Forms",
     "invoicing": "Invoicing Form",
     "timer": "Timer Activities",
@@ -173,60 +169,10 @@ def run_asset_tasks_transform_pipeline():
     return True
 
 
-def run_asset_tasks_gc_pipeline():
-    """Run GC asset tasks combined extract + inline transforms.
-
-    Calls extract_asset_tasks_gc.run_asset_task_gc_pipeline which performs
-    extract + inline run_assets_gc_transform + run_asset_tasks_gc_transform.
-    """
-    from extract_asset_tasks_gc import run_asset_task_gc_pipeline
-
-    logger.info(f"\n{'#'*60}")
-    logger.info(f"# ASSET TASKS GC PIPELINE")
-    logger.info(f"{'#'*60}")
-
-    run_asset_task_gc_pipeline()
-    return True
-
-
-def run_asset_tasks_gc_extract_pipeline():
-    """Run GC asset_tasks EXTRACT only (Swift API -> raw_asset_tasks_gc).
-
-    v1 implementation note: currently aliases the full pipeline (extract +
-    inline transforms). Splitting is YAGNI until a use case for
-    extract-only emerges.
-    """
-    from extract_asset_tasks_gc import run_asset_task_gc_pipeline
-
-    logger.info(f"\n{'#'*60}")
-    logger.info(f"# ASSET TASKS GC EXTRACT (aliases full GC pipeline)")
-    logger.info(f"{'#'*60}")
-
-    run_asset_task_gc_pipeline()
-    return True
-
-
-def run_asset_tasks_gc_transform_pipeline():
-    """Run GC asset_tasks TRANSFORM only.
-
-    Looks up the latest successful asset_tasks_gc_extract run_id and runs
-    the SQL aggregation + Python-driven INSERT-SELECT pair.
-    """
-    from transform import run_assets_gc_transform, run_asset_tasks_gc_transform
-
-    logger.info(f"\n{'#'*60}")
-    logger.info(f"# ASSET TASKS GC TRANSFORM")
-    logger.info(f"{'#'*60}")
-
-    run_assets_gc_transform()
-    run_asset_tasks_gc_transform()
-    return True
-
-
 def run_targeted_asset_tasks_pipeline_wrapper():
     """Run the targeted asset_tasks pipeline.
 
-    Lighter walk than the GC pipeline (uses /api/projects/{p}/assets +
+    Light walk (uses /api/projects/{p}/assets +
     /api/asset-projects/{a}/asset-tasks instead of the heavy _export
     endpoint). Reads targets from reference.report_targets, writes to
     data_staging.stg_targeted_asset_tasks with TRUNCATE-and-reload
@@ -267,21 +213,6 @@ def run_targeted_task_requirements_pipeline_wrapper():
 
     report_name = os.environ.get("REPORT_NAME") or None
     return run_targeted_task_requirements_pipeline(report_name=report_name)
-
-
-def run_analytics_gc_refresh():
-    """Refresh the three _gc analytics MVs (mv_project_summary_gc, etc).
-
-    Ontel MVs are untouched by this refresh.
-    """
-    from transform import refresh_analytics_gc
-
-    logger.info(f"\n{'#'*60}")
-    logger.info(f"# ANALYTICS GC MV REFRESH")
-    logger.info(f"{'#'*60}")
-
-    refresh_analytics_gc()
-    return True
 
 
 def run_forms_pipeline():
@@ -874,7 +805,7 @@ Examples:
     group.add_argument(
         "--pipeline",
         type=str,
-        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "asset_tasks_gc", "asset_tasks_gc_extract", "asset_tasks_gc_transform", "targeted_asset_tasks", "targeted_task_requirements", "analytics_gc", "forms", "invoicing", "timer", "aging", "sales", "backfill", "analytics", "assets"],
+        choices=["orgs", "user_priorities", "asset_tasks", "asset_tasks_extract", "asset_tasks_transform", "targeted_asset_tasks", "targeted_task_requirements", "forms", "invoicing", "timer", "aging", "sales", "backfill", "analytics", "assets"],
         help="Run a specific pipeline (extract + transform)"
     )
 
@@ -910,12 +841,8 @@ Examples:
         "asset_tasks": run_asset_tasks_pipeline,
         "asset_tasks_extract": run_asset_tasks_extract_pipeline,
         "asset_tasks_transform": run_asset_tasks_transform_pipeline,
-        "asset_tasks_gc": run_asset_tasks_gc_pipeline,
-        "asset_tasks_gc_extract": run_asset_tasks_gc_extract_pipeline,
-        "asset_tasks_gc_transform": run_asset_tasks_gc_transform_pipeline,
         "targeted_asset_tasks": run_targeted_asset_tasks_pipeline_wrapper,
         "targeted_task_requirements": run_targeted_task_requirements_pipeline_wrapper,
-        "analytics_gc": run_analytics_gc_refresh,
         "forms": run_forms_pipeline,
         "invoicing": run_invoicing_pipeline,
         "timer": run_timer_pipeline_full,

@@ -56,8 +56,6 @@
  *               date-validator-daily at its end. Chain: scraper -> asset tasks
  *               -> date-validator, since 2026-09-08. Skipped Sat/Sun ET by the
  *               scrape workflow, not by this trigger.
- *   02:00 AM  — Asset Tasks GC (parallel pipeline for ~294 non-Ontel GC orgs,
- *               fires after the Ontel pipeline completes)
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
  *               run after User Priorities is fresh. Create via own trigger.)
  *   5:00 AM & 5:00 PM — Calendar Events (twice daily; was 6 AM/6 PM, before that 12:30 AM once daily.
@@ -366,23 +364,6 @@ function setupCalendarEventsTriggers() {
  */
 function triggerAssetTasks() {
   fireDispatch_('pipeline-asset-tasks');
-}
-
-/**
- * Trigger GC asset_tasks pipeline (the parallel ~294-org pipeline for all
- * non-Ontel General Contractors).
- *
- * Schedule daily at 02:00 AM EST — well after the Ontel pipeline finishes
- * (~01:00 ET post-Task-6 cutover) so we avoid Swift API rate-limit
- * collisions and DB pool contention.
- *
- * GC pipeline writes to separate _gc tables (raw_asset_tasks_gc,
- * stg_asset_tasks_gc, stg_assets_gc) and refreshes its own MVs
- * (mv_project_summary_gc, mv_technician_stats_gc, mv_daily_completion_gc).
- * No downstream dispatches in v1 — no export or validator emails.
- */
-function triggerAssetTasksGC() {
-  fireDispatch_('pipeline-asset-tasks-gc');
 }
 
 /**
