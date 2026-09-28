@@ -127,7 +127,22 @@
 --      back after "mv_project_summary".
 --   The MVs come back EMPTY. Their old rows exist only in the CSV export.
 --
--- STATUS: DRAFT, NOT APPLIED.
+-- STATUS: APPLIED 2026-09-28 01:10:57 ET via MCP apply_migration (recorded as
+--   20260928051057 273_retire_gc_asset_tasks), after local-pipeline PR #84 merged
+--   as 912b2da (04:35:52 UTC) and the nightly asset_tasks_extract had finished
+--   (00:19-00:57 ET). 19 post-merge workflow runs on 912b2da were green before
+--   the apply.
+-- BEFORE: MVs 5,809 / 1,063 / 91 rows; the 4 tables 0 rows; agent.schema_metadata
+--   972 rows; no other session held a lock on any target; no refresh in flight.
+-- VERIFIED (01:11:16 ET), every VERIFY query below returned its expected value:
+--   dropped objects left 0; aggregate_assets_gc 0; refresh_one_mv mentions _gc = f
+--   with 8 REFRESH branches, SECURITY DEFINER, config {statement_timeout=300s,
+--   work_mem=64MB}, ACL unchanged (PUBLIC, postgres, service_role); gc_tracker
+--   objects 9; v_asset_gc / v_pmi_gc_aging / v_pmi_gc_aging_history 3;
+--   stale semantic-layer texts 0; agent.schema_metadata still 972 rows (0 deleted,
+--   1 updated); analytics.v_page5_po_status still selects.
+-- STILL OPEN (by hand, Jamil): Apps Script, delete the triggerAssetTasksGC time
+--   trigger, then paste the whole pipeline_trigger.gs.
 -- =============================================================================
 
 BEGIN;
