@@ -169,7 +169,7 @@ Pilot scope is TS17–19 (`--projects all13` widens to phase 2). Measured
   all TS13+ after 7 days of every-2h runs with zero unexplained audit
   mismatches and delete-propagation covered (natively or by the Sunday
   `--full-walk`); phase 2 → restructure the current pipeline on this
-  pattern (and gc-asset-tasks after it) after 7+ clean days at full scope
+  pattern after 7+ clean days at full scope
   with runtime/IO a small fraction of the full reload's.
 
 ### Dynamic TS project coverage + QA form auto-discovery (2026-08-11)

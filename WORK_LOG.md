@@ -3833,3 +3833,46 @@ DEFERRED: (a) Jamil's call on the frozen MV snapshot (drop as drafted, or seed t
 Ericsson projects first); (b) push + PR + premerge-review; (c) archive the
 gc-asset-lake folder; (d) docs/plans + docs/superpowers/specs for the old pipeline
 stay as history.
+
+### 2026-09-28 00:10-00:30 ET - Retire old GC pipeline: PR #84 opened (DRAFT), premerge review running, frozen MV snapshot exported
+
+Jamil: proceed (drop the frozen snapshot as drafted; push, PR, premerge-review).
+
+PHASE 0 SCOPE: 1 commit (1787e0f) on chore/retire-gc-asset-tasks vs main da4ad0b, 10
+files, +252 / -872. Class: pipeline-touching + DB-touching. Lanes A (code review) and
+C (DB preflight) apply; lane B does not (no new reads or routes). Migration number
+re-checked at review time: 269/270 on feat/home-org-pulse-rpc, 271 on main, 272 on PR
+#81, no 273 on any remote branch, so 273 is still free.
+
+SAFETY COPY before any drop: out/gc-mv-snapshot-2026-09-28/ (gitignored), read-only
+export script export_gc_mv_snapshot.py, row counts asserted equal to live:
+  mv_daily_completion_gc.csv   5,809 rows   8 cols   992,334 bytes  sha256 e1671c337ca90c81
+  mv_project_summary_gc.csv    1,063 rows  22 cols   115,464 bytes  sha256 979c0e815a8952d1
+  mv_technician_stats_gc.csv      91 rows  14 cols     6,780 bytes  sha256 1feb83e41393c2b9
+So dropping the MVs no longer loses the snapshot.
+GOTCHA: the first export died with "gaierror 11001 getaddrinfo failed": .env points
+at the direct host db.voqfjfngdpcvevbkikud.supabase.co, which is IPv6-only and does
+not resolve with WARP off. Worked with per-command overrides, .env untouched:
+SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+SUPABASE_USER=postgres.voqfjfngdpcvevbkikud SUPABASE_PORT=5432.
+
+PUSHED + PR: branch pushed to origin, DRAFT PR #84
+https://github.com/jamilmendez-ontel/local-pipeline/pull/84
+
+LANE A (code review): APPROVE, 1 minor finding, fixed in this branch.
+  README.md:172 still planned "(and gc-asset-tasks after it)" as phase 2 of the
+  incremental pilot; the parenthetical is removed.
+  Checked clean: no over-deletion (cut points keep 2 blank lines, only one docstring
+  reworded in a surviving function); no dangling reference in any .py / .yml / .gs /
+  .json / .toml; config.py has no GC constants; no other workflow chains on the
+  deleted one; PIPELINE_NAMES, argparse choices and the dispatch map were cut in
+  lockstep so no KeyError path; pipeline_notifier ALL_TABLES is derived from
+  PIPELINE_TABLES so row-count snapshots will not hit a dropped table; no test names
+  the removed functions; no Apps Script setup function looks for triggerAssetTasksGC;
+  all 8 MV names the code still passes to analytics.refresh_one_mv are branches in
+  the replacement function (no "Unknown view" risk).
+
+LANE C (independent DB preflight, read-only): STILL RUNNING when this entry was
+written. No verdict yet.
+
+NOT DONE YET: merge, Apps Script trigger removal, apply of migration 273.
