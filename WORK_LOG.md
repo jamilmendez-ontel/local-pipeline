@@ -3717,3 +3717,61 @@ Triggers page shows triggerTimerEmails at 6:30 AM Asia/Manila and no 6 AM ET
 entry. Expected: Monday 06:30 PHT email covers Sunday's shift (near-empty, the
 smoke test); Tuesday 06:30 PHT is the first real one (Monday's shift). No gap,
 no double send.
+
+### 2026-09-27 23:00-23:40 ET — Timer Entries email shift day: CUTOVER DONE (PR #80 merged bf3ad07, INIT-800 / INIT-816)
+
+The planned Sunday 9/27 20:00-21:00 PHT cutover did not happen (Jamil was off).
+Verified first, read-only, at Mon 9/28 11:04 PHT: PR #80 still open + draft, main at
+0eba08a, no "Pipeline: Timer Emails" run at 06:30 PHT (latest = Sun 18:00 PHT,
+success), 0 NULL snapshots. The old 18:00 PHT schedule was still live.
+
+Done Mon 9/28 ~11:16-11:33 PHT, OUTSIDE the written window (the window assumed the
+last old 18:00 PHT send had already gone out). Jamil's choice: cut over now and run
+the workflow once by hand, which is the original Sunday plan five hours late.
+
+PREMERGE REVIEW: READY TO MERGE. Lane A (code review) only; no migration, no app
+reads, so lanes B and C did not apply. Gates from swift_api_pipeline/: 337 passed,
+6 failed, the six being the known tests/test_asset_tasks_resilience.py failures on
+main (spec baseline 314 + 23 new shift-day tests). Clean merge against main.
+- Reviewer's one BLOCKER rejected after checking the code: the per-row Date cell
+  (_fmt_date, ET) reads D-1 under a header of D for the 06:00-12:00 PHT band. The
+  row is accurate and sits beside Start/End cells that also print the ET date
+  (_fmt_time_short, "%m/%d %I:%M %p"); switching it to the shift day would put
+  "Sep 22" next to "09/21 07:00 PM". Cosmetic, same family as the header relabel
+  follow-up in spec 3.7. NOT changed.
+- Nit fixed (41d04c2): _fetch_classified_day_entries docstring said ET.
+
+SHIP SEQUENCE (UTC 2026-09-28):
+1. 03:16 squash-merge PR #80 -> bf3ad07.
+2. Snapshot reset: UPDATE app_timer.daily_notifications SET last_sent_entry_ids =
+   NULL WHERE send_date >= CURRENT_DATE - 8 -> 371 rows, 79 members, send dates
+   9/20-9/26 (preflight count matched exactly).
+3. 03:16:54 workflow_dispatch of pipeline-timer-emails.yml on main, run
+   36373116301, success, finished 03:32:35.
+   --send: shift day 2026-09-27, 13 entries, 4 members, 4 emails. 12 of the 13
+     entries were in Sunday's old email too (Sun 06:00-12:00 PHT band), the one
+     overlap the plan accepted.
+   --resend: "No days need a re-send". 369 lookback snapshots rebuilt silently,
+     0 emails on send dates 9/21-9/26. The 6 rows on 9/20 stay NULL, outside the
+     7-day lookback, harmless.
+   --remind: 1 duplicate reminder to 1 member for 2026-09-26 (2 groups). Normal
+     remind behaviour, but it is an extra send caused by running at 11:23 PHT.
+4. 03:27 (11:27 PM ET) Jamil pasted scripts/pipeline_trigger.gs whole and ran
+   setupTimerEmailsTrigger(); log line "Created triggerTimerEmails trigger at
+   ~6:30 Asia/Manila daily (+/-15 min)." The old 6 AM ET trigger is deleted by the
+   same function, so nothing fires at 18:00 PHT today.
+
+ROLLBACK: revert bf3ad07 and re-paste the previous pipeline_trigger.gs + run
+setupTimerEmailsTrigger(). The snapshot reset needs no restore: a NULL snapshot
+re-bootstraps silently under either day definition.
+
+NEXT (INIT-816): first scheduled send Tue 9/29 ~06:30 PHT (06:15-06:45), covering
+Mon 9/28 06:00 PHT to Tue 9/29 06:00 PHT. Check: run fired by repository_dispatch
+in that band and green; no run at 18:00 PHT Monday; 70-76 members emailed; one
+member email has entries up to 05:59 PHT and none from 06:00; resend quiet.
+INIT-800 and INIT-816 close together after that (Jamil).
+
+DEFERRED: (a) per-row Date vs header date on the 06:00-12:00 PHT band, relabel
+only if members ask; (b) Triggers page eyeball that no 6 AM ET triggerTimerEmails
+entry remains (the log confirms the create, not the page); (c) worktree
+.claude/worktrees/timer-emails-shift-day is locked and left in place.
