@@ -3876,3 +3876,68 @@ LANE C (independent DB preflight, read-only): STILL RUNNING when this entry was
 written. No verdict yet.
 
 NOT DONE YET: merge, Apps Script trigger removal, apply of migration 273.
+
+### 2026-09-28 00:30-01:20 ET - Old GC pipeline retired: PR #84 MERGED (912b2da), migration 273 APPLIED + VERIFIED (INIT-817)
+
+PREMERGE REVIEW VERDICT: READY TO MERGE.
+  Lane A (code review): APPROVE, 1 minor finding (README.md:172), fixed in d495870.
+  Lane C (independent DB preflight, read-only, live DB 00:20-00:31 ET): SAFE TO
+  APPLY, 0 blocking findings. Folded into the migration in 6ae9b3e:
+    IMPORTANT  the rollback said "re-apply 054". 054 is a May CREATE OR REPLACE
+               with 6 branches and no work_mem; re-applying it would strip the 3
+               quote and 2 timer-revenue branches from refresh_one_mv and every
+               such refresh (361 calls since 09-16, about 30 a day) would raise
+               'Unknown view'. The header now writes out the 3 branches to add
+               back to section 1 of 273 instead.
+    minor      053 rebuilds with LIKE ... INCLUDING ALL, so a rollback is not
+               identical (stg_assets_gc 18 columns vs 17, more indexes). Noted.
+    minor      agent.schema_metadata row for data_staging.stg_timer_activities
+               and that table's COMMENT named mv_project_summary_gc. Verified
+               myself, then added an UPDATE and a COMMENT ON TABLE to section 5.
+    minor      no lock_timeout. Added SET LOCAL lock_timeout = '5s'.
+    minor      the frozen snapshot is not real data: all 11 projects have
+               total_tasks an exact multiple of 1,000 (351,000 to 363,000) and
+               one single tasks_completed value per project = total / 1000, i.e.
+               1,000 tasks repeated 351-363 times. Verified myself with a query.
+    minor      pg_stat_* evidence covers only 12 days (server restart 2026-09-16
+               09:19 ET). Compensating proof written into the header.
+    minor      gc-asset-lake folder still names the dropped tables. Noted.
+  Apply order corrected: the Apps Script step does not gate the migration (the
+  old trigger fires a dispatch nothing listens to).
+
+GATES (re-run after the fixes, from swift_api_pipeline/): 337 passed, 6 failed, the
+known tests/test_asset_tasks_resilience.py six, identical on main. py_compile clean.
+DRY RUN 2 on the live DB (DO block ending in an unconditional RAISE, rolled back):
+leftover_objects=0, refresh_fn_mentions_gc=f, refresh_fn_branches=8,
+gc_tracker_objects=9, named_alike_views=3, metadata_rows_updated=1,
+stale_texts_left=0.
+
+MERGE: PR #84 squash-merged 00:35:52 ET as 912b2da. origin/main has no
+extract_asset_tasks_gc.py and no pipeline-asset-tasks-gc.yml. There is no deploy
+step for this repo: every workflow runs from main on dispatch. Post-merge proof:
+19 runs created after the merge, all on 912b2da, all success (User Priorities,
+Daily Reports Rolling, Audit: Swift Schedule Feed); Asset Tasks Export and
+Invoicing Form started 01:09 ET on 912b2da.
+
+APPLY: waited for the nightly run (asset_tasks_extract 00:19-00:57 ET success,
+assets_extract 01:04-01:05). Pre-apply check 01:10:21 ET: 0 other sessions locking
+the targets, 0 refreshes in flight, oldest open transaction 11 s, guard rows 0.
+Applied 01:10:57 ET via MCP apply_migration (20260928051057).
+
+VERIFY 01:11:16 ET, all as expected: dropped objects left 0; aggregate_assets_gc 0;
+refresh_one_mv has no _gc, 8 branches, SECURITY DEFINER, statement_timeout 300s +
+work_mem 64MB, ACL unchanged; gc_tracker objects 9; the 3 named-alike views 3;
+stale semantic-layer texts 0; agent.schema_metadata 972 rows before and after;
+v_page5_po_status still selects.
+
+STILL OPEN:
+  (a) Jamil, by hand: Apps Script Triggers page, delete the triggerAssetTasksGC
+      time trigger FIRST, then paste the whole scripts/pipeline_trigger.gs.
+  (b) archive the gc-asset-lake folder (never scheduled or deployed).
+  (c) optional, under INIT-807: seed the 7 Ericsson projects the tracker lacks.
+  (d) first real refresh_one_mv call after the apply not yet observed (quote MVs
+      refresh about 30 times a day; nothing calls a _gc name).
+OUT OF SCOPE, found by lane C, NOT touched: cron.job id 24
+(devperf_report_subscriptions, inactive) carries a bearer token in its command
+text, rotate it; analytics.refresh_one_mv is SECURITY DEFINER with PUBLIC EXECUTE
+(inert, no non-service role has USAGE on analytics).
