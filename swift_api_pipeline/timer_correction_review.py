@@ -2352,7 +2352,7 @@ _STATUS_BADGE_HTML = {
 
 
 def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]:
-    """Fetch all timer entries for (user_email, entry_date in ET) and
+    """Fetch all timer entries for (user_email, entry_date as a shift day) and
     classify each as UNCHANGED / EDITED / ADDED / REMOVED.
 
     The surviving set is sourced directly from stg_timer_activities_clean
