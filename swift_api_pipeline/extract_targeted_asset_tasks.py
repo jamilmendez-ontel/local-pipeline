@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Targeted Asset-Task extraction for report-driven data needs.
 
-Lighter alternative to extract_asset_tasks_gc.py for use cases where:
+Lighter alternative to the full /assets/_export walk for use cases where:
   - Only a known list of (org, project) tuples is needed (configured in
     `reference.report_targets`)
   - Flat task-level rows are sufficient (no nested asset/requirement JSONB)
