@@ -32,7 +32,7 @@ Script time-driven triggers under the notifier account. See
 |---|---|---|
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
 | `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | Run 1 of 2: `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + corrections apply + clean rebuild + MV refresh. **No member emails** since 2026-08-28 |
-| `pipeline-timer-emails.yml` | Apps Script ~06:30 PHT (`triggerTimerEmails`, pinned to Asia/Manila) | Run 2 of 2: re-extract + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`) for the shift day that closed at 06:00 PHT. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
+| `pipeline-timer-emails.yml` | Apps Script ~06:30 PHT (`triggerTimerEmails`, pinned to Asia/Manila) | Run 2 of 2: re-extract through today ET (`--through-today`) + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`) for the shift day that closed at 06:00 PHT. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
@@ -118,7 +118,13 @@ noon PHT to noon PHT and disagreed with the shift on the 06:00-12:00 PHT
 overtime band (~10% of entries, 65 of 82 members over 30 days). Late stops
 now arrive in-thread via the next morning's `--resend`. Only this run uses
 the shift day; DRMC, variance and the Excel exports stay on ET calendar
-dates. Design: `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`. The two workflows use different `repository_dispatch`
+dates. Its pull runs with `--through-today` (ends at today ET, not yesterday): at
+06:30 PHT it is 18:30 ET the day before and the shift day reaches 18:00 ET
+today, so the closed-day default left only the first six hours of the shift
+day in the table (2026-09-29, the first scheduled send: 3 members emailed of
+65). On the 1st of the month ET that pull is two month buckets (previous month,
+then the 1st alone) because staging is replaced per bucket. The ~1:15 AM ET run
+keeps the closed-day pull. Design: `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`. The two workflows use different `repository_dispatch`
 types (`pipeline-timer` vs `pipeline-timer-emails`, both from
 `scripts/pipeline_trigger.gs`) and share the `pipeline-timer` concurrency group
 with `timer-correction-apply.yml` so no two of them ever overlap. Every

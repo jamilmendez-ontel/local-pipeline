@@ -268,17 +268,26 @@ def run_invoicing_pipeline():
     return True
 
 
-def run_timer_pipeline_full():
-    """Run timer extraction + transformation (append mode)"""
-    from extract_timer import run_timer_pipeline
+def run_timer_pipeline_full(through_today: bool = False):
+    """Run timer extraction + transformation (append mode).
+
+    through_today=True ends the pull at today ET instead of yesterday. Used by the
+    run in front of the Timer Entries email (pipeline-timer-emails.yml), whose shift
+    day reaches 18:00 ET today. One extract + transform per month bucket; there are
+    two only on the 1st of the month with through_today.
+    """
+    from extract_timer import run_timer_pipeline, calculate_date_ranges
     from transform import run_timer_transform
 
     logger.info(f"\n{'#'*60}")
-    logger.info(f"# TIMER ACTIVITIES PIPELINE")
+    logger.info("# TIMER ACTIVITIES PIPELINE" + (" (through today ET)" if through_today else ""))
     logger.info(f"{'#'*60}")
 
-    run_id = run_timer_pipeline()
-    carried = run_timer_transform(run_id) or []
+    run_ids, carried = [], []
+    for start_date, end_date in calculate_date_ranges(through_today=through_today):
+        run_id = run_timer_pipeline(start_date=start_date, end_date=end_date)
+        run_ids.append(str(run_id))
+        carried += run_timer_transform(run_id) or []
 
     # A whole project missing from this run (extraction failure; the extractor
     # records 0 rows and still marks the run success) is abnormal: red email.
@@ -287,7 +296,7 @@ def run_timer_pipeline_full():
     if absent:
         rows = sum(c["rows"] for c in carried if c.get("project_absent"))
         return PipelineOutcome(
-            run_id=str(run_id),
+            run_id=run_ids[-1],
             abnormal_projects=absent,
             detail=(f"Timer extract returned no rows for {', '.join(absent)} although earlier "
                     f"runs of the month had them; {rows:,} rows carried forward from raw. "
@@ -827,12 +836,21 @@ Examples:
         help="Recover a single project (use with --pipeline asset_tasks only). E.g. --project TS16"
     )
 
+    parser.add_argument(
+        "--through-today",
+        action="store_true",
+        help="Timer only: end the pull at today ET instead of yesterday. Used by the run "
+             "in front of the Timer Entries email, whose shift day reaches 18:00 ET today."
+    )
+
     args = parser.parse_args()
     send_email = not args.no_email
     email_on_success = not args.email_on_failure_only
 
     if args.project and args.pipeline != "asset_tasks":
         parser.error("--project can only be used with --pipeline asset_tasks")
+    if args.through_today and args.pipeline != "timer":
+        parser.error("--through-today can only be used with --pipeline timer")
 
     # Map pipeline names to functions
     pipeline_funcs = {
@@ -861,6 +879,8 @@ Examples:
         elif args.pipeline:
             if args.pipeline == "asset_tasks" and args.project:
                 func = lambda: run_asset_tasks_pipeline(project_filter=args.project)
+            elif args.pipeline == "timer" and args.through_today:
+                func = lambda: run_timer_pipeline_full(through_today=True)
             else:
                 func = pipeline_funcs[args.pipeline]
             name = PIPELINE_NAMES[args.pipeline]
