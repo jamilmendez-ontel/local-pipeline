@@ -137,7 +137,7 @@ def test_no_vanished_pair_means_no_extra_insert_and_no_warning(caplog):
 def test_run_with_no_raw_rows_returns_before_deleting_the_bucket():
     """meta comes from the run's own raw rows, so a rowless run never touches staging."""
     db = FakeDb([], [_vanished(CHO)], {}, meta=False)
-    assert transform_timer_activities(db, str(RUN_NEW)) == 0
+    assert transform_timer_activities(db, str(RUN_NEW)) == (0, [])
     assert db.executed == [] and db.inserted == []
 
 

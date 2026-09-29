@@ -152,3 +152,48 @@ The 2026-08-28 move to 18:00 PHT existed so stops that reach Swift hours after t
 - A platform-wide shift-day definition.
 - Relabelling the email header.
 - A second same-day catch-up run.
+
+## Addendum 2026-09-29: the pull in front of the email
+
+This design re-anchored the email's day window and moved the trigger. It did not look at
+the pull that runs first in the same workflow, which ended at yesterday in
+America/New_York (`extract_timer.calculate_date_range`). At the old 06:00 ET send,
+"yesterday ET" was exactly the day being emailed, so the pull and the email agreed by
+construction. At 06:30 PHT it is 18:30 ET the day before: the shift day being emailed
+runs 18:00 ET yesterday to 18:00 ET today, and the pull held only the part before
+midnight ET, the 06:00-12:00 PHT band.
+
+First scheduled send, 2026-09-29 (run 36492289277): fired 06:25 PHT, green, pull
+`2026-09-01 to 2026-09-27`, 3 members and 5 entries emailed. The shift day had 65
+members and 569 entries.
+
+Fix: `main.py --pipeline timer --through-today`, used only by
+`pipeline-timer-emails.yml`. The pull ends at today ET. On the 1st of the month ET it
+is two month buckets (the previous month, then the 1st alone), never one range across
+the boundary, because `transform_timer_activities` replaces staging per bucket
+(`DELETE WHERE start_date`). `pipeline-timer.yml` keeps the closed-day pull.
+
+Checked against Swift before the change (read only, 2026-09-29 07:23 ET): the report
+returns entries for the open ET day, including a running timer with no end time.
+
+What this does to the rest of the warehouse: staging and clean now hold the current ET
+day from about 18:30 ET instead of from 01:15 ET the next morning. Open timers were
+already possible in the data (a timer started yesterday and still running at 01:15 ET).
+A manual closed-day run between 18:30 ET and midnight ET would drop the current ET day
+from staging until the next run; nothing schedules one.
+
+Found by the pre-merge impact audit and fixed in the same change: a bucket with no
+entries stopped the run. `transform_timer_activities` returned a bare `0` for a run
+with no raw rows and `run_timer_transform` unpacked it as a pair. The one-day bucket
+on the 1st of a month can be empty (a weekend or holiday 1st), so it now returns
+`(0, [])`.
+
+Known and accepted, not changed here:
+- DRMC reads the current ET day's timer hours from about 18:45 ET instead of from
+  01:30 ET the next morning. A member who keeps working after the pull reads short on
+  coverage until the 01:15 ET reload.
+- An entry captured by the 18:30 ET pull and deleted in Swift before 01:15 ET, when it
+  was that member's only entry in that project for the month, is carried forward by
+  `carry_forward_vanished_members` for the rest of the month.
+- "Timer: Clean Export (manual)" run between 18:30 ET and 01:15 ET includes the open
+  ET day.

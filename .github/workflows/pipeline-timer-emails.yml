@@ -6,7 +6,7 @@ name: "Pipeline: Timer Emails"
 # is sent as soon as that window closes. (Before that it ran ~6:00 AM ET /
 # 18:00 PHT and covered the ET calendar date, which is noon PHT to noon PHT
 # and disagreed with the shift on the 06:00-12:00 PHT overtime band, ~10% of
-# entries.) It re-extracts the month-to-date first, then runs the
+# entries.) It re-extracts the month-to-date THROUGH TODAY ET first, then runs the
 # member-facing steps: duplicate reminders, the daily Timer Entries email and
 # the threaded re-sends. Stops that reach Swift after the send are delivered
 # in-thread by the next morning's --resend. No Excel exports here: those stay
@@ -81,13 +81,19 @@ jobs:
       # First extract of the PHT day. --email-on-failure-only: the 1:15 AM ET run
       # already sends the routine success email; a second green email per day
       # is noise, a red one still matters.
+      #
+      # --through-today is REQUIRED here. At ~06:30 PHT it is ~18:30 ET the day
+      # before, and the shift day being emailed ends at 18:00 ET today. The
+      # default pull stops at YESTERDAY ET and leaves only the first six hours
+      # of the shift day in the table (2026-09-29: 3 members emailed of 65).
+      # Keep it on BOTH lines; tests/test_timer_pull_range.py guards it.
       - name: Run timer pipeline (with retry)
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
-          python -u main.py --pipeline timer --email-on-failure-only || {
+          python -u main.py --pipeline timer --through-today --email-on-failure-only || {
             echo "Timer failed, retrying after 2 minutes..."
             sleep 120
-            python -u main.py --pipeline timer --email-on-failure-only
+            python -u main.py --pipeline timer --through-today --email-on-failure-only
           }
 
       # Same reason as in pipeline-timer.yml: the transform re-inserts the

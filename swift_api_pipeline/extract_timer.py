@@ -27,32 +27,48 @@ LOAD_BATCH_SIZE = 1000
 TIMEZONE = "America/New_York"
 
 
-def calculate_date_range() -> Tuple[str, str]:
+def calculate_date_ranges(now: datetime = None, through_today: bool = False) -> List[Tuple[str, str]]:
     """
-    Calculate the date range for extraction.
+    Date ranges to extract, one per month bucket, as (start_date, end_date) YYYY-MM-DD.
 
-    Rules:
-    - If today is NOT the 1st: start_date = 1st of current month, end_date = yesterday
-    - If today IS the 1st: start_date = 1st of previous month, end_date = last day of previous month
+    Dates are America/New_York calendar dates. Every range starts on the 1st of its
+    month and stays inside that month, because staging is replaced per bucket
+    (DELETE WHERE start_date = the range's start).
 
-    Returns:
-        Tuple of (start_date, end_date) in YYYY-MM-DD format
+    Closed-day default (through_today=False), the ~1:15 AM ET run:
+    - today is NOT the 1st: 1st of the current month to yesterday
+    - today IS the 1st: the whole previous month
+
+    through_today=True, the run in front of the Timer Entries email (~06:30 PHT):
+    the pull ends at TODAY. At 06:30 PHT it is 18:30 ET the day before, and the shift
+    day being emailed (06:00 PHT to 06:00 PHT) ends at 18:00 ET today, so a pull that
+    stops at yesterday holds only its first six hours (2026-09-29: 3 members emailed
+    of 65).
+    - today is NOT the 1st: 1st of the current month to today
+    - today IS the 1st: the whole previous month, then the 1st on its own
     """
     import zoneinfo
     tz = zoneinfo.ZoneInfo(TIMEZONE)
-    today = datetime.now(tz).date()
+    today = (now.astimezone(tz) if now is not None else datetime.now(tz)).date()
+    fmt = "%Y-%m-%d"
 
     if today.day == 1:
-        # Today is the 1st - use previous month
+        # Today is the 1st - previous month, 1st to its last day
         last_month = today - relativedelta(months=1)
-        start_date = last_month.replace(day=1)
-        end_date = today - timedelta(days=1)  # Last day of previous month
+        ranges = [(last_month.replace(day=1), today - timedelta(days=1))]
+        if through_today:
+            ranges.append((today, today))
     else:
-        # Normal case - 1st of current month to yesterday
-        start_date = today.replace(day=1)
-        end_date = today - timedelta(days=1)
+        # Normal case - 1st of current month to yesterday (or today)
+        end_date = today if through_today else today - timedelta(days=1)
+        ranges = [(today.replace(day=1), end_date)]
 
-    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    return [(start.strftime(fmt), end.strftime(fmt)) for start, end in ranges]
+
+
+def calculate_date_range() -> Tuple[str, str]:
+    """The closed-day default as a single range. See calculate_date_ranges()."""
+    return calculate_date_ranges()[0]
 
 
 def _queue_join_with_timeout(q, timeout):
