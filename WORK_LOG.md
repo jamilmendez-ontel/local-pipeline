@@ -3980,3 +3980,35 @@ unchanged.
 
 NOT CHANGED: assigned_approver (Swift's queue text) and the approver lists from
 the HR sheet (ref_employee_approvers.approver_name).
+
+PRE-MERGE REVIEW (7:45 AM - 8:20 AM ET), PR #87, two lanes in parallel.
+  Lane A code review: no blocking findings. View body differs from 263 only in
+    the approved_by expression and the appr lateral select list. 3 nits, all in
+    comments.
+  Lane C database check (read-only): 0 blocking, 1 should fix, 6 notes.
+    Live body equals the file; 36 columns unchanged; 3 dependents and 8 SQL
+    function readers all select; refresh job 9 ran 7 of 7 times after the apply
+    (mean 5.45 s, prior mean 4.91 s); anon and authenticated hold no privilege.
+    Full-row reads: 14 days 115 ms warm and 604 ms cold, 60 days 438 ms, whole
+    view 1,218 ms, one report 2.4 ms.
+  FIXED in the file (comments only, nothing re-applied): rollback note now names
+    both edits and the comment to restore; the second edit carries its own 274
+    marker; verification query skips approvers with no report name; header says
+    8 SQL function readers, states when the lateral runs, and qualifies the
+    timing figures.
+GATES: pytest from swift_api_pipeline/ 337 passed, 6 failed, the known
+  tests/test_asset_tasks_resilience.py six. The branch changes no Python.
+
+ROY RIOTOC (Jamil): the double space is what Swift holds, so it is what DRMC
+shows once the pull lands. Nothing changed for it.
+
+FOUND, NOT CAUSED BY 274, NOT TOUCHED:
+  (a) Charles Bercasio's report for 2026-09-04 was approved in DRMC at
+      11:03 AM ET that day and re-submitted at 8:33 PM ET. Swift holds it as
+      submitted, DRMC shows it approved by Roel Longcop until the 30-day overlay
+      lapses on 2026-10-04 11:03 AM ET, then it returns to the approval queue.
+  (b) approved_members_for_email and approver_groups_for_email match
+      approved_by on nickname + last name or first + last name. Czarina Sanchez,
+      Mikaela Patolot and Roy's double-space name match neither key.
+  (c) during the window before the pull, Roy's overlay name ("Roy Riotoc") and
+      his Swift name ("Roy  Riotoc") are two keys in the approver lists.

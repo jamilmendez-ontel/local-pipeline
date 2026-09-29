@@ -25,10 +25,15 @@
 --
 -- Mechanics: CREATE OR REPLACE, column list and types unchanged, so dependents
 -- (mv_hr_report_review, v_approver_options, v_daily_report_approver_stats and
--- the plpgsql readers) are untouched. The extra lookup sits inside the appr
--- lateral, which only produces a row for an overlay-approved report, and reads
--- stg_daily_reports through idx_stg_dr_tasks_emp. Body otherwise equals
--- pg_get_viewdef as of 263. Rollback at the bottom.
+-- the 8 SQL function readers) are untouched. The extra lookup sits inside the
+-- appr lateral, which returns a row for every report that has an approved
+-- DRMC log row in the last 30 days (1,638 on 2026-09-29), whether or not the
+-- overlay value is the one displayed. The planner memoizes the lateral per
+-- approver email, so the lookup ran 12 to 17 times per read; each run reads the
+-- approver's own reports (about 365 rows) through idx_stg_dr_tasks_emp in
+-- under 1 ms. Without the memoize node a 30-day read would gain about 1.2 s,
+-- still under the 8 s PostgREST timeout. Body otherwise equals pg_get_viewdef
+-- as of 263. Rollback at the bottom.
 --
 -- STATUS: APPLIED 2026-09-29 07:25:23 ET via MCP apply_migration (recorded as
 --   20260929112523 274_approved_by_swift_name).
@@ -36,10 +41,18 @@
 -- TESTED on a temporary copy (analytics.v_daily_report_approvals_test_274,
 --   dropped before the apply): 33,184 rows compared with the live view, 0 rows
 --   missing, 0 differences in any other column, 1 approved_by change
---   ("Roel Rivera Longcop" -> "Roel Longcop"). 14-day read 29.6 ms before,
---   37.7 ms after; the new lookup ran 12 times (memoized per approver email).
+--   ("Roel Rivera Longcop" -> "Roel Longcop"). 14-day read of task_did and
+--   approved_by only, warm cache: 29.6 ms before, 37.7 ms after.
 -- VERIFIED after the apply: view 33,184 rows; verification query below 0 rows;
 --   the 3 dependents present, mv_hr_report_review populated; grants unchanged.
+-- INDEPENDENT CHECK (pre-merge review, read-only, same day): live body equals
+--   this file (comments and whitespace stripped); 36 columns, same order and
+--   types; 3 dependents and 8 function readers all select; the 5-minute
+--   refresh job ran 7 of 7 times after the apply; anon and authenticated hold
+--   no privilege. Full-row reads: 14 days 115 ms warm and 604 ms cold, 60 days
+--   438 ms, whole view 1,218 ms, one report 2.4 ms. All 18 DRMC approvers
+--   resolve through the report name; 17 equal Swift's name exactly, Roy Riotoc
+--   differs only by the double space Swift holds ("Roy  Riotoc").
 
 SET LOCAL lock_timeout = '15s';
 
@@ -141,6 +154,7 @@ CREATE OR REPLACE VIEW analytics.v_daily_report_approvals AS
                 END) AT TIME ZONE 'America/New_York'::text) AS approved_on_et,
             COALESCE(t.approved_by,
                 CASE
+                    -- 274: appr.display_name, was appr.full_name.
                     WHEN la.task_did IS NOT NULL AND la.swift_status = 'approved'::text THEN COALESCE(appr.display_name, la.approver_email)
                     ELSE NULL::text
                 END) AS approved_by,
@@ -228,14 +242,25 @@ CREATE OR REPLACE VIEW analytics.v_daily_report_approvals AS
 COMMENT ON VIEW analytics.v_daily_report_approvals IS
   'Daily-report approval serving view over stg_daily_reports + mv_daily_report_task_rollup. total_hours (migrations 260/261): 0 for a cancelled task or when every requirement is cancelled; otherwise the sum of the non-cancelled requirements; NULL only when the report has no requirement rows yet. req_count still counts every requirement. is_tardy per 215/230. variance_hours / coverage_pct (263): same expressions as mv_hr_report_review (stated net of the 1h break vs raw timer minutes; NULL with an open timer, no timer rollup row, or no stated hours) so DR Approval and DR Monitoring agree. approved_by (274): Swift''s approver name; for a report approved in DRMC and not yet pulled, the approver''s own report name, then roster full_name, then email.';
 
--- Verification (run after apply; expect 0 rows):
---   SELECT v.task_did, v.approved_by, d.full_name
+-- Verification (run after apply; expect 0 rows). A row means a report still
+-- shows the legal name although the approver has a different report name. An
+-- approver with no report name is skipped: full_name is the intended fallback.
+--   SELECT DISTINCT v.task_did, v.approved_by, d.report_display_name
 --   FROM analytics.v_daily_report_approvals v
 --   JOIN app_hr.report_approval_log l USING (task_did)
 --   JOIN analytics.v_employee_directory d ON lower(d.email) = lower(l.approver_email)
 --   WHERE l.ok AND v.approved_by = d.full_name
---     AND d.report_display_name IS DISTINCT FROM d.full_name;
+--     AND d.report_display_name IS NOT NULL
+--     AND d.report_display_name <> d.full_name;
 --
--- Rollback: CREATE OR REPLACE the view with this file's body, the appr lateral
--- reading "SELECT re2.full_name" and approved_by reading
--- "COALESCE(appr.full_name, la.approver_email)" (the two edits marked 274).
+-- Rollback: CREATE OR REPLACE the view with this file's body after reverting
+-- BOTH edits marked "274" (revert one without the other and the statement
+-- fails, because approved_by and the lateral must name the same column):
+--   1. in the approved_by expression, COALESCE(appr.display_name, la.approver_email)
+--      goes back to COALESCE(appr.full_name, la.approver_email);
+--   2. in the appr lateral, the select list
+--      "SELECT COALESCE(( SELECT ... LIMIT 1), re2.full_name) AS display_name"
+--      goes back to "SELECT re2.full_name".
+-- Then run COMMENT ON VIEW with the text above minus its last sentence
+-- ("approved_by (274): ..."). Never DROP the view: mv_hr_report_review and two
+-- views depend on it.
