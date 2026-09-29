@@ -420,7 +420,10 @@ and unchanged: `auto_resolve_stale` (7-day-old open groups keep the longest copy
 `_reconcile_resolved_group_stragglers` (late snapshots on a group resolved by Edit).
 
 See `migrations/` for the full history. Run `git log --oneline
-migrations/` for recent changes. Latest: 267 member-rule restore (reverts the 4
+migrations/` for recent changes. Latest: 274 approved-by Swift name
+(`analytics.v_daily_report_approvals.approved_by` shows the approver's own report name,
+not the roster's legal name, on a report approved inside DRMC and not yet pulled; applied
+live 2026-09-29); 267 member-rule restore (reverts the 4
 `auto_resolved_sibling` removals that set aside real sessions overlapping nothing, clears
 `rejected_entries` on their 4 groups; applied live 2026-09-17, ~4.7h returned to
 `stg_timer_activities_clean`); 263 approvals-view variance

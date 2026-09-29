@@ -3941,3 +3941,74 @@ OUT OF SCOPE, found by lane C, NOT touched: cron.job id 24
 (devperf_report_subscriptions, inactive) carries a bearer token in its command
 text, rotate it; analytics.refresh_one_mv is SECURITY DEFINER with PUBLIC EXECUTE
 (inert, no non-service role has USAGE on analytics).
+
+## 2026-09-29 (6:55 AM - 7:35 AM ET) - DRMC "Approved by" shows the Swift name (migration 274)
+
+ASK (Jamil): "in the approved by the name there is still the complete name not
+the swift name. it should be the swift name".
+
+ROOT CAUSE: analytics.v_daily_report_approvals.approved_by has two sources.
+Swift's own approvedBy.name (stg_daily_reports.approved_by) is already the short
+name. The app overlay (migrations 156/184), which marks a report approved the
+moment it is approved inside DRMC, resolved the approver's email to
+reference.ref_employees.full_name, the legal name. So a report approved in DRMC
+read "Coleen Panganiban Clarita" until the next daily-reports pull wrote
+"Coleen Clarita". Reproduced on the live view: 1 row, "Roel Rivera Longcop"
+(work date 2026-09-04, Swift value never pulled).
+
+FIX: migration 274, CREATE OR REPLACE of the view. The overlay branch now reads
+the name on the approver's own latest daily report (asset_name minus the
+"_<emp_id>" suffix, the same parse as employee_name in 163 and
+report_display_name in 188), then full_name, then the email. Column list and
+types unchanged. No app code change: DR Approval table, report drawer and the
+export all read this column.
+
+SOURCE CHOICE: for the 18 approvers who have used DRMC, the report name equals
+the name Swift writes for 18 of 18 (Roy Riotoc differs only by Swift's double
+space). reference.ref_swift_users holds 13 of the 18, so it was not used.
+
+PRE-FLIGHT: live definition read with pg_get_viewdef (equals 263); dependents
+mv_hr_report_review, v_approver_options, v_daily_report_approver_stats; temporary
+copy analytics.v_daily_report_approvals_test_274 compared with the live view:
+33,184 rows, 0 missing, 0 differences in any other column, 1 approved_by change.
+14-day read 29.6 ms before, 37.7 ms after. Temporary copy dropped.
+
+APPLY: 07:25:23 ET via MCP apply_migration (20260929112523).
+VERIFY: view 33,184 rows; rows still showing a legal name 0; the Roel row reads
+"Roel Longcop"; 3 dependents present; mv_hr_report_review populated; grants
+unchanged.
+
+NOT CHANGED: assigned_approver (Swift's queue text) and the approver lists from
+the HR sheet (ref_employee_approvers.approver_name).
+
+PRE-MERGE REVIEW (7:45 AM - 8:20 AM ET), PR #87, two lanes in parallel.
+  Lane A code review: no blocking findings. View body differs from 263 only in
+    the approved_by expression and the appr lateral select list. 3 nits, all in
+    comments.
+  Lane C database check (read-only): 0 blocking, 1 should fix, 6 notes.
+    Live body equals the file; 36 columns unchanged; 3 dependents and 8 SQL
+    function readers all select; refresh job 9 ran 7 of 7 times after the apply
+    (mean 5.45 s, prior mean 4.91 s); anon and authenticated hold no privilege.
+    Full-row reads: 14 days 115 ms warm and 604 ms cold, 60 days 438 ms, whole
+    view 1,218 ms, one report 2.4 ms.
+  FIXED in the file (comments only, nothing re-applied): rollback note now names
+    both edits and the comment to restore; the second edit carries its own 274
+    marker; verification query skips approvers with no report name; header says
+    8 SQL function readers, states when the lateral runs, and qualifies the
+    timing figures.
+GATES: pytest from swift_api_pipeline/ 337 passed, 6 failed, the known
+  tests/test_asset_tasks_resilience.py six. The branch changes no Python.
+
+ROY RIOTOC (Jamil): the double space is what Swift holds, so it is what DRMC
+shows once the pull lands. Nothing changed for it.
+
+FOUND, NOT CAUSED BY 274, NOT TOUCHED:
+  (a) Charles Bercasio's report for 2026-09-04 was approved in DRMC at
+      11:03 AM ET that day and re-submitted at 8:33 PM ET. Swift holds it as
+      submitted, DRMC shows it approved by Roel Longcop until the 30-day overlay
+      lapses on 2026-10-04 11:03 AM ET, then it returns to the approval queue.
+  (b) approved_members_for_email and approver_groups_for_email match
+      approved_by on nickname + last name or first + last name. Czarina Sanchez,
+      Mikaela Patolot and Roy's double-space name match neither key.
+  (c) during the window before the pull, Roy's overlay name ("Roy Riotoc") and
+      his Swift name ("Roy  Riotoc") are two keys in the approver lists.
