@@ -181,3 +181,19 @@ day from about 18:30 ET instead of from 01:15 ET the next morning. Open timers w
 already possible in the data (a timer started yesterday and still running at 01:15 ET).
 A manual closed-day run between 18:30 ET and midnight ET would drop the current ET day
 from staging until the next run; nothing schedules one.
+
+Found by the pre-merge impact audit and fixed in the same change: a bucket with no
+entries stopped the run. `transform_timer_activities` returned a bare `0` for a run
+with no raw rows and `run_timer_transform` unpacked it as a pair. The one-day bucket
+on the 1st of a month can be empty (a weekend or holiday 1st), so it now returns
+`(0, [])`.
+
+Known and accepted, not changed here:
+- DRMC reads the current ET day's timer hours from about 18:45 ET instead of from
+  01:30 ET the next morning. A member who keeps working after the pull reads short on
+  coverage until the 01:15 ET reload.
+- An entry captured by the 18:30 ET pull and deleted in Swift before 01:15 ET, when it
+  was that member's only entry in that project for the month, is carried forward by
+  `carry_forward_vanished_members` for the rest of the month.
+- "Timer: Clean Export (manual)" run between 18:30 ET and 01:15 ET includes the open
+  ET day.

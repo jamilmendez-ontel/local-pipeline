@@ -193,6 +193,26 @@ def test_an_absent_project_in_any_bucket_is_still_reported(monkeypatch):
     assert "40" in outcome.detail
 
 
+def test_a_bucket_with_no_entries_does_not_stop_the_run(monkeypatch):
+    """The 1st alone can be empty (a weekend or holiday 1st, nobody has clocked in by the
+    pull). transform_timer_activities used to return a bare 0 there and
+    run_timer_transform unpacked it as a pair: TypeError, and no email that day."""
+    import transform
+
+    class _EmptyRunDb:
+        def fetchrow(self, *a):
+            return None
+
+        def fetch(self, *a):
+            raise AssertionError("an empty run must not read or write staging")
+
+        execute = executemany = fetch
+
+    monkeypatch.setattr(transform, "get_db", lambda: _EmptyRunDb())
+    monkeypatch.setattr(transform, "validate_transform_counts", lambda *a, **kw: None)
+    assert transform.run_timer_transform("33333333-3333-3333-3333-333333333333") == []
+
+
 # ---- the workflows ---------------------------------------------------------------------
 
 def _timer_commands(workflow):

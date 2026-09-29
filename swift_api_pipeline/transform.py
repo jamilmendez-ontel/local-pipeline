@@ -1128,7 +1128,7 @@ def transform_timer_activities(db, run_id: str):
     )
     if not meta:
         print(f"[{datetime.now():%H:%M:%S}] No timer data found for run_id: {run_id}")
-        return 0
+        return 0, []
 
     run_date = parse_date(meta["run_date"])
     start_date = parse_date(meta["start_date"])
