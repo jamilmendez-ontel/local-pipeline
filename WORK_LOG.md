@@ -3941,3 +3941,42 @@ OUT OF SCOPE, found by lane C, NOT touched: cron.job id 24
 (devperf_report_subscriptions, inactive) carries a bearer token in its command
 text, rotate it; analytics.refresh_one_mv is SECURITY DEFINER with PUBLIC EXECUTE
 (inert, no non-service role has USAGE on analytics).
+
+## 2026-09-29 (6:55 AM - 7:35 AM ET) - DRMC "Approved by" shows the Swift name (migration 274)
+
+ASK (Jamil): "in the approved by the name there is still the complete name not
+the swift name. it should be the swift name".
+
+ROOT CAUSE: analytics.v_daily_report_approvals.approved_by has two sources.
+Swift's own approvedBy.name (stg_daily_reports.approved_by) is already the short
+name. The app overlay (migrations 156/184), which marks a report approved the
+moment it is approved inside DRMC, resolved the approver's email to
+reference.ref_employees.full_name, the legal name. So a report approved in DRMC
+read "Coleen Panganiban Clarita" until the next daily-reports pull wrote
+"Coleen Clarita". Reproduced on the live view: 1 row, "Roel Rivera Longcop"
+(work date 2026-09-04, Swift value never pulled).
+
+FIX: migration 274, CREATE OR REPLACE of the view. The overlay branch now reads
+the name on the approver's own latest daily report (asset_name minus the
+"_<emp_id>" suffix, the same parse as employee_name in 163 and
+report_display_name in 188), then full_name, then the email. Column list and
+types unchanged. No app code change: DR Approval table, report drawer and the
+export all read this column.
+
+SOURCE CHOICE: for the 18 approvers who have used DRMC, the report name equals
+the name Swift writes for 18 of 18 (Roy Riotoc differs only by Swift's double
+space). reference.ref_swift_users holds 13 of the 18, so it was not used.
+
+PRE-FLIGHT: live definition read with pg_get_viewdef (equals 263); dependents
+mv_hr_report_review, v_approver_options, v_daily_report_approver_stats; temporary
+copy analytics.v_daily_report_approvals_test_274 compared with the live view:
+33,184 rows, 0 missing, 0 differences in any other column, 1 approved_by change.
+14-day read 29.6 ms before, 37.7 ms after. Temporary copy dropped.
+
+APPLY: 07:25:23 ET via MCP apply_migration (20260929112523).
+VERIFY: view 33,184 rows; rows still showing a legal name 0; the Roel row reads
+"Roel Longcop"; 3 dependents present; mv_hr_report_review populated; grants
+unchanged.
+
+NOT CHANGED: assigned_approver (Swift's queue text) and the approver lists from
+the HR sheet (ref_employee_approvers.approver_name).
