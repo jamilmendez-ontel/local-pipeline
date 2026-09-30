@@ -124,7 +124,13 @@ today, so the closed-day default left only the first six hours of the shift
 day in the table (2026-09-29, the first scheduled send: 3 members emailed of
 65). On the 1st of the month ET that pull is two month buckets (previous month,
 then the 1st alone) because staging is replaced per bucket. The ~1:15 AM ET run
-keeps the closed-day pull. Design: `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`. The two workflows use different `repository_dispatch`
+keeps the closed-day pull. Since 2026-09-30 every shift-day email (daily, resend,
+correction confirmation) opens with an amber "What this email covers" callout
+stating the window in both zones (`coverage_note_html`): members compare the
+email with Swift's list, which is labelled by ET date, and read the 6 PM ET
+onward band as missing (first report: Cris Baligod, 2026-09-29, five entries
+started 18:01-20:30 ET that belonged to the next shift day). Subject unchanged.
+Design: `docs/superpowers/specs/2026-09-23-timer-emails-shift-day-design.md`. The two workflows use different `repository_dispatch`
 types (`pipeline-timer` vs `pipeline-timer-emails`, both from
 `scripts/pipeline_trigger.gs`) and share the `pipeline-timer` concurrency group
 with `timer-correction-apply.yml` so no two of them ever overlap. Every

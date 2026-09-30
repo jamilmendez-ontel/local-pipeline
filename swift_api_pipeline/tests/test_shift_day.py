@@ -208,3 +208,33 @@ def test_find_days_needing_resend_cutoff_is_shift_day_based():
     tcr.find_days_needing_resend(db, lookback_days=7)
     expect = shift_day(datetime.now(timezone.utc)) - timedelta(days=7)
     assert db.params == (expect,)
+
+
+# --- coverage note (the "What this email covers" callout) ------------------
+
+def test_coverage_note_states_both_zones_for_the_shift_day():
+    from timer_correction_review import coverage_note_html
+    html = coverage_note_html(date(2026, 9, 28))
+    assert "What this email covers" in html
+    assert "Monday, September 28" in html
+    # PHT side: 06:00 D to 06:00 D+1
+    assert "6:00 AM Sep 28 to 6:00 AM Sep 29 Philippine time" in html
+    # ET side follows DST: September is EDT (UTC-4) -> 18:00 the previous day
+    assert "6:00 PM Sep 27 to 6:00 PM Sep 28 Eastern" in html
+    assert "after 6:00 AM PHT Sep 29" in html
+
+
+def test_coverage_note_et_side_follows_standard_time():
+    from timer_correction_review import coverage_note_html
+    # January is EST (UTC-5): 06:00 PHT = 17:00 ET the previous day
+    html = coverage_note_html(date(2027, 1, 12))
+    assert "Tuesday, January 12" in html
+    assert "6:00 AM Jan 12 to 6:00 AM Jan 13 Philippine time" in html
+    assert "5:00 PM Jan 11 to 5:00 PM Jan 12 Eastern" in html
+
+
+def test_coverage_note_crosses_month_and_year_boundaries():
+    from timer_correction_review import coverage_note_html
+    html = coverage_note_html(date(2026, 12, 31))
+    assert "6:00 AM Dec 31 to 6:00 AM Jan 01 Philippine time" in html
+    assert "5:00 PM Dec 30 to 5:00 PM Dec 31 Eastern" in html

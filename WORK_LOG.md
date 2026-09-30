@@ -4012,3 +4012,37 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
       Mikaela Patolot and Roy's double-space name match neither key.
   (c) during the window before the pull, Roy's overlay name ("Roy Riotoc") and
       his Swift name ("Roy  Riotoc") are two keys in the approver lists.
+
+## 2026-09-29 (8:35 PM - 9:25 PM ET) - Timer email: first scheduled send with #86 verified; "What this email covers" callout (feat/timer-email-coverage-note)
+
+CHECK (read-only): the first scheduled Timer Entries send with the #86 fix,
+  run 36639472362 (Wed 09-30 06:25 PHT, main c09fe82): Date Range 2026-09-01
+  to 2026-09-29, 1047 entries, 71 members emailed (daily_notifications 09-29 =
+  71; 09-24 70, 09-25 56, 09-26 Sat 15, 09-27 Sun 4, 09-28 catch-up 65). The
+  09-29 morning miss (3 of 65) was a one-time cutover effect; not recurring.
+  --remind sent 47 emails / 84 groups: NORMAL volume (09-26 49/77, 09-27
+  62/105); the runs that show 1 were manual runs inside the 20-hour gate.
+  Side find: akira@ontel.co logged 351 entries on shift day 09-29 (1 task,
+  avg 36 s, 20:51-02:26 PHT) against 1-2 a day; looks like a runaway
+  start/stop loop in Swift, flagged to Jamil, nothing touched.
+
+MEMBER REPORT (Cris Baligod, the 09-28 email): five entries "missing" (Data
+  Pre-Fill OSBORN 18:01 ET; 48Hr/Test Package, Data Post-Fill x2, Final COP
+  PHI WISSINOMING 19:06-20:30 ET). All start at or after 18:00 ET 09-28 =
+  06:00 PHT 09-29, so they are shift day 09-29 and went out in the 09-30 06:25
+  PHT email (Cris: 16 entries). The two OSBORN Site Set-Up entries at 16:56 and
+  17:19 ET were in the 09-28 email. Swift labels its list by ET date, the email
+  by shift day; nothing lost.
+
+BUILT (Jamil's call: body callout, subject unchanged; wording confirmed by him):
+  coverage_note_html(day) in timer_correction_review.py, an amber box under
+  "Hi {name}," in the daily email, the resend and the correction confirmation
+  (not the duplicate reminder): "What this email covers: the shift day of
+  Monday, September 28, from 6:00 AM Sep 28 to 6:00 AM Sep 29 Philippine time
+  (6:00 PM Sep 27 to 6:00 PM Sep 28 Eastern). Entries started after 6:00 AM
+  PHT Sep 29 will be in the next day's email." Times come from
+  shift_day_bounds, so the ET side follows DST (5 PM in winter).
+  Tests: 3 new in tests/test_shift_day.py (EDT, EST, year boundary).
+  Sample render: out/coverage-note-sample.{html,png} (headless Edge).
+GATES: pytest from swift_api_pipeline/ 251 passed, 6 failed, the known
+  tests/test_asset_tasks_resilience.py six.

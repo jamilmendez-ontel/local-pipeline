@@ -92,6 +92,35 @@ def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
     return lo, lo + timedelta(days=1)
 
 
+def _clock(dt: datetime) -> str:
+    """'6:00 AM Sep 28' (no leading zero on the hour, portable)."""
+    return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p %b %d')}"
+
+
+def coverage_note_html(day: date) -> str:
+    """The 'What this email covers' callout for a shift-day email.
+
+    Members compare the email against Swift's list, which is labelled by
+    ET calendar date, and read the 06:00-12:00 PHT band (6 PM ET onward) as
+    missing. This box states the window in both zones so the cut is visible
+    without changing the subject line. The ET side is derived from the
+    bounds, so it follows DST on its own (6 PM in summer, 5 PM in winter).
+    """
+    lo, hi = shift_day_bounds(day)
+    lo_pht, hi_pht = lo.astimezone(TZ_MANILA), hi.astimezone(TZ_MANILA)
+    lo_et, hi_et = lo.astimezone(TZ_EASTERN), hi.astimezone(TZ_EASTERN)
+    label = f"{day.strftime('%A, %B')} {day.day}"
+    cut_time, cut_date = _clock(hi_pht).rsplit(" ", 2)[0], hi_pht.strftime("%b %d")
+    return f"""
+                <div style="background:#fff8e1;border-left:4px solid #f9a825;border-radius:4px;padding:10px 14px;margin:0 0 16px;font-size:13px;color:#5d4037;">
+                    <strong>What this email covers:</strong> the shift day of <strong>{label}</strong>,
+                    from <strong>{_clock(lo_pht)} to {_clock(hi_pht)} Philippine time</strong>
+                    ({_clock(lo_et)} to {_clock(hi_et)} Eastern).
+                    Entries started after {cut_time} PHT {cut_date} will be in the next day's email.
+                </div>
+    """
+
+
 def form_lookup_bounds(day: date) -> tuple[datetime, datetime]:
     """Window for resolving a member's form reply that names `day`.
 
@@ -1166,6 +1195,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
+                {coverage_note_html(yesterday)}
                 {running_notice}
                 <p>{intro}</p>
                 {entries_section}
@@ -2780,6 +2810,7 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         <div style="padding:24px;">
 
             <p>Hi {_first_name(user_email)},</p>
+            {coverage_note_html(entry_date)}
             <p>Your timer entries for <strong>{date_str}</strong> were updated based on the corrections you submitted. Below is the full updated view of your day &mdash; unchanged entries, edits, and removals are all shown for context.</p>
 
             <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Updated Daily Task Summary</h3>
@@ -3462,6 +3493,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
+                {coverage_note_html(send_date)}
                 {callout_html}
                 {running_notice}
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
