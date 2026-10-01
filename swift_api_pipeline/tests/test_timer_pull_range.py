@@ -30,7 +30,7 @@ sys.path.insert(0, PIPELINE_DIR)
 
 import extract_timer  # noqa: E402
 from extract_timer import calculate_date_range, calculate_date_ranges  # noqa: E402
-from timer_correction_review import last_closed_shift_day, shift_day_bounds  # noqa: E402
+from timer_correction_review import last_closed_window, window_bounds  # noqa: E402
 
 PHT = ZoneInfo("Asia/Manila")
 ET = ZoneInfo("America/New_York")
@@ -78,27 +78,31 @@ def test_through_today_is_the_run_that_failed():
     assert calculate_date_ranges(now=now, through_today=True) == [("2026-09-01", "2026-09-28")]
 
 
-def test_through_today_covers_the_shift_day_being_emailed_every_day_of_a_year():
-    """For every 06:30 PHT send, the pull holds every ET date the closed shift day touches."""
-    send = datetime(2026, 1, 1, 6, 30, tzinfo=PHT)
-    for _ in range(366):
-        lo, hi = shift_day_bounds(last_closed_shift_day(send))
-        needed = {lo.astimezone(ET).date(), (hi - timedelta(seconds=1)).astimezone(ET).date()}
-        covered = _et_dates_covered(calculate_date_ranges(now=send, through_today=True))
-        assert needed <= covered, f"send {send:%Y-%m-%d}: pull misses {sorted(needed - covered)}"
-        send += timedelta(days=1)
+def test_through_today_covers_the_window_being_emailed_every_day_of_a_year():
+    """For every 18:30 ET and 09:00 ET send, the pull holds the ET date of the closed window."""
+    for hour, minute in ((18, 30), (9, 0)):
+        send = datetime(2026, 1, 1, hour, minute, tzinfo=ET)
+        for _ in range(366):
+            day, part = last_closed_window(send)
+            lo, hi = window_bounds(day, part)
+            needed = {lo.astimezone(ET).date(), (hi - timedelta(seconds=1)).astimezone(ET).date()}
+            covered = _et_dates_covered(calculate_date_ranges(now=send, through_today=True))
+            assert needed <= covered, f"send {send:%Y-%m-%d %H:%M}: pull misses {sorted(needed - covered)}"
+            send += timedelta(days=1)
 
 
 def test_closed_day_default_does_not_cover_it():
-    """The regression itself: without through_today the 06:30 PHT pull is a day short."""
-    send = datetime(2026, 9, 29, 6, 30, tzinfo=PHT)
-    lo, hi = shift_day_bounds(last_closed_shift_day(send))
+    """The regression itself: without through_today the 18:30 ET pull is a day short."""
+    send = datetime(2026, 9, 29, 18, 30, tzinfo=ET)
+    day, part = last_closed_window(send)
+    lo, hi = window_bounds(day, part)
     needed = {lo.astimezone(ET).date(), (hi - timedelta(seconds=1)).astimezone(ET).date()}
     assert not needed <= _et_dates_covered(calculate_date_ranges(now=send))
 
 
 def test_through_today_on_the_first_is_two_month_buckets():
-    """06:30 PHT Fri 2026-10-02 = 18:30 ET Thu 2026-10-01: shift day spans Sep 30 and Oct 1 ET."""
+    """18:30 ET Thu 2026-10-01 (first window of Oct 1): the pull is Sep as one bucket, Oct 1 alone.
+    The 09:00 ET run on the 1st needs the previous day's second window, i.e. the September bucket."""
     now = datetime(2026, 10, 2, 6, 30, tzinfo=PHT)
     assert calculate_date_ranges(now=now, through_today=True) == [
         ("2026-09-01", "2026-09-30"),
