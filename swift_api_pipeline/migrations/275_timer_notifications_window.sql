@@ -13,9 +13,13 @@
 -- never before (the old code's ON CONFLICT (user_email, send_date) needs the
 -- old key; the new code's needs the new one).
 --
--- Live preflight (fill in at apply time):
---   constraints before: <paste>
---   dependents (pg_depend via pg_rewrite): <paste, expected none>
+-- Live preflight (run 2026-10-01 ~08:40 ET via the IPv4 session pooler):
+--   constraints before: stg_timer_daily_notifications_pkey,
+--                       stg_timer_daily_notifications_user_email_send_date_key
+--   indexes before:     the two above + idx_stg_timer_daily_notifs_last_sent
+--   dependents (pg_depend via pg_rewrite): none
+--   functions referencing the table (data_staging/analytics/app_timer/pipeline): none
+--   (user_email, send_date) pairs with more than one row: 0
 -- ═══════════════════════════════════════════════════════════════════════════════
 BEGIN;
 
