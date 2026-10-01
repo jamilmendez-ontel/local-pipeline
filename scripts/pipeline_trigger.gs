@@ -146,17 +146,20 @@ function setupTimerTrigger() {
 }
 
 /**
- * Target time for the daily Timer EMAILS run: ~06:30 Asia/Manila, just
- * after the members' 06:00 PHT shift end. Since 2026-09-28 the email is
- * bucketed on a SHIFT DAY (06:00 PHT to 06:00 PHT) and sent as soon as
- * that window closes; before that it fired ~6:00 AM ET (18:00 PHT, the
- * next shift's start) and covered the ET calendar date.
+ * Timer EMAILS run, twice a day on the EASTERN clock (since 2026-10-01):
+ *   ~18:30 ET  triggerTimerEmails()        -> window (today, first):  12 AM to 6 PM ET
+ *   ~09:00 ET  triggerTimerEmailsSecond()  -> window (yesterday, second): 6 PM to 12 AM ET
+ * Both fire the same 'pipeline-timer-emails' dispatch; the Python side picks
+ * the last CLOSED window by the clock, so the trigger only has to land after
+ * the window closes. Pinned to America/New_York on purpose: the windows are
+ * Eastern wall-clock, so a Manila-pinned trigger would fire BEFORE 6 PM ET
+ * in winter and the run would pick the wrong window. (2026-09-28 to
+ * 2026-09-30 this was one 06:30 Asia/Manila send on a 06:00 PHT shift day;
+ * before that ~6:00 AM ET on the ET calendar date.)
  *
- * Minute 30, not 0: Apps Script jitter is +/-15 min and the window MUST be
- * closed before the run, so 06:15-06:45 PHT rather than 05:45-06:15. The
- * trigger is pinned to Asia/Manila (see setupTimerEmailsTrigger) so it does
- * not drift an hour at US DST changes. Late stops that reach Swift after
- * the send are picked up in-thread by the next morning's --resend.
+ * Minute 30 / minute 0 with +/-15 min jitter keeps both runs after their
+ * window close (18:15-18:45, 08:45-09:15). Late stops that reach Swift after
+ * a send are picked up in-thread by a later run's --resend.
  *
  * This is run 2 of 2 for timer data: it re-extracts, applies corrections,
  * rebuilds the clean table, then sends the member-facing emails
@@ -166,27 +169,34 @@ function setupTimerTrigger() {
  * DIFFERENT dispatch type from 'pipeline-timer' on purpose: the two runs must
  * never be fired by the same trigger.
  */
-var TIMER_EMAILS_HOUR = 6;     // Asia/Manila
-var TIMER_EMAILS_MINUTE = 30;
+var TIMER_EMAILS_FIRST_HOUR = 18;    // America/New_York
+var TIMER_EMAILS_FIRST_MINUTE = 30;
+var TIMER_EMAILS_SECOND_HOUR = 9;    // America/New_York
+var TIMER_EMAILS_SECOND_MINUTE = 0;
 
 function triggerTimerEmails() {
   fireDispatch_('pipeline-timer-emails');
 }
 
+function triggerTimerEmailsSecond() {
+  fireDispatch_('pipeline-timer-emails');
+}
+
 /**
- * Idempotently (re)create the daily time-driven trigger for
- * triggerTimerEmails() at ~06:30 Asia/Manila. RUN THIS ONCE from the Apps
- * Script editor after deploying this file (and again after editing
- * TIMER_EMAILS_HOUR/MINUTE); it deletes any existing trigger on the same
- * handler first, so re-running is safe.
+ * Idempotently (re)create BOTH daily time-driven triggers. RUN THIS ONCE from
+ * the Apps Script editor after deploying this file (and again after editing
+ * the constants); it deletes any existing trigger on either handler first,
+ * so re-running is safe.
  *
- * CUTOVER (2026-09-28): run this only BETWEEN an old 18:00 PHT send and the
- * next 06:15 PHT, after the daily_notifications snapshot reset (spec 3.5).
+ * CUTOVER (2026-10-01): run after migration 275 + the two-window PR are live
+ * and BEFORE 18:15 ET on 2026-10-01, so the first Eastern-clock send covers
+ * (2026-10-01, first).
  */
 function setupTimerEmailsTrigger() {
+  var handlers = ['triggerTimerEmails', 'triggerTimerEmailsSecond'];
   var existing = ScriptApp.getProjectTriggers();
   for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerTimerEmails') {
+    if (handlers.indexOf(existing[i].getHandlerFunction()) !== -1) {
       ScriptApp.deleteTrigger(existing[i]);
     }
   }
@@ -194,14 +204,20 @@ function setupTimerEmailsTrigger() {
   ScriptApp.newTrigger('triggerTimerEmails')
     .timeBased()
     .everyDays(1)
-    .atHour(TIMER_EMAILS_HOUR)
-    .nearMinute(TIMER_EMAILS_MINUTE)
-    .inTimezone('Asia/Manila')
+    .atHour(TIMER_EMAILS_FIRST_HOUR)
+    .nearMinute(TIMER_EMAILS_FIRST_MINUTE)
+    .inTimezone('America/New_York')
+    .create();
+  ScriptApp.newTrigger('triggerTimerEmailsSecond')
+    .timeBased()
+    .everyDays(1)
+    .atHour(TIMER_EMAILS_SECOND_HOUR)
+    .nearMinute(TIMER_EMAILS_SECOND_MINUTE)
+    .inTimezone('America/New_York')
     .create();
 
-  Logger.log('Created triggerTimerEmails trigger at ~' +
-             TIMER_EMAILS_HOUR + ':' + (TIMER_EMAILS_MINUTE < 10 ? '0' : '') + TIMER_EMAILS_MINUTE +
-             ' Asia/Manila daily (+/-15 min).');
+  Logger.log('Created triggerTimerEmails at ~18:30 America/New_York and ' +
+             'triggerTimerEmailsSecond at ~09:00 America/New_York (daily, +/-15 min).');
 }
 
 /**
