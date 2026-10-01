@@ -320,3 +320,65 @@ def test_cli_passes_date_and_window_to_run_send(monkeypatch):
         test_mode=test_mode, target_date=target_date, part=part))
     tcr.main()
     assert seen == {"test_mode": False, "target_date": date(2026, 9, 30), "part": "second"}
+
+
+# ---- downstream wiring ------------------------------------------------------
+
+def test_resolve_stale_response_uses_form_lookup_bounds():
+    db = _RecordingDB()
+    resp = {"entry_id": "deadbeef", "respondent": "a@ontel.co",
+            "details": "Proj | Site A | 6. Final COP | Sep 30, 2026 | 1h 30m"}
+    tcr._resolve_stale_response(db, resp)
+    lo, hi = form_lookup_bounds(date(2026, 9, 30))
+    assert db.params[0] == lo and db.params[1] == hi
+    assert "start_time >= $1 AND start_time < $2" in db.sql
+
+
+def test_fetch_classified_day_entries_uses_window_bounds():
+    db = _RecordingDB()
+    tcr._fetch_classified_day_entries(db, "a@ontel.co", date(2026, 9, 30), "second")
+    assert db.sql.count("start_time >= $2 AND") == 2
+    assert db.sql.count("start_time < $3") == 2
+    lo, hi = window_bounds(date(2026, 9, 30), "second")
+    assert db.params == ("a@ontel.co", lo, hi)
+
+
+def test_fetch_current_day_entries_window_and_legacy():
+    db = _RecordingDB()
+    tcr._fetch_current_day_entries(db, "a@ontel.co", date(2026, 9, 30), "first")
+    assert db.params == ("a@ontel.co",) + window_bounds(date(2026, 9, 30), "first")
+    tcr._fetch_current_day_entries(db, "a@ontel.co", date(2026, 9, 30), "full")
+    assert db.params == ("a@ontel.co",) + legacy_full_bounds(date(2026, 9, 30))
+
+
+def test_find_days_needing_resend_uses_row_window(monkeypatch):
+    class _DB(_RecordingDB):
+        def fetch(self, sql, *params):
+            super().fetch(sql, *params)
+            if "FROM" in sql and "daily_notifications" in sql:
+                return [
+                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "window": "full",
+                     "thread_id": "t1", "message_id": "m1", "last_sent_at": None, "last_sent_entry_ids": None},
+                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "window": "second",
+                     "thread_id": "t2", "message_id": "m2", "last_sent_at": None, "last_sent_entry_ids": None},
+                ]
+            return []
+    seen = []
+    monkeypatch.setattr(tcr, "_fetch_current_day_entries",
+                        lambda db, ue, sd, w: seen.append((sd, w)) or [])
+    db = _DB()
+    tcr.find_days_needing_resend(db, lookback_days=7)
+    assert seen == [(date(2026, 9, 30), "full"), (date(2026, 9, 30), "second")]
+    select_sql = [c for c in db.calls if "daily_notifications" in c[0]][0][0]
+    assert "SELECT user_email, send_date, window, thread_id, message_id," in select_sql
+    cutoff = window_of(datetime.now(timezone.utc))[0] - timedelta(days=7)
+    assert db.calls[0][1] == (cutoff,)
+
+
+def test_applied_change_records_carry_entry_window():
+    lo, _ = window_bounds(date(2026, 9, 30), "second")
+    rec = tcr._change_record("eid1", "correct", {"user_email": "a@ontel.co", "start_time": lo + timedelta(minutes=1),
+                                                 "duration_min": 30}, corrected_duration_min=45)
+    assert rec["entry_date"] == date(2026, 9, 30)
+    assert rec["entry_window"] == "second"
+    assert rec["original_duration_min"] == 30 and rec["corrected_duration_min"] == 45
