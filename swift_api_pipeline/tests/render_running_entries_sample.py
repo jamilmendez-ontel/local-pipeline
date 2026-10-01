@@ -98,7 +98,7 @@ def _html_of(raw):
     raise RuntimeError("no html part")
 
 
-tcr.send_daily_emails(_FakeDb(), entries, test_mode=True, target_date=date(2026, 8, 23))
+tcr.send_daily_emails(_FakeDb(), entries, test_mode=True, target_date=date(2026, 8, 23), part="first")
 open(os.path.join(OUT, "sample_daily_running.html"), "w", encoding="utf-8").write(_html_of(SENT[-1]))
 
 # Resend: the IVORY timer completed (NEW), the admin one still running.
@@ -118,6 +118,6 @@ open(os.path.join(OUT, "sample_resend_running.html"), "w", encoding="utf-8").wri
 
 # Only-running day.
 SENT.clear()
-tcr.send_daily_emails(_FakeDb(), [entries[3]], test_mode=True, target_date=date(2026, 8, 23))
+tcr.send_daily_emails(_FakeDb(), [entries[3]], test_mode=True, target_date=date(2026, 8, 23), part="first")
 open(os.path.join(OUT, "sample_daily_only_running.html"), "w", encoding="utf-8").write(_html_of(SENT[-1]))
 print("wrote", OUT)

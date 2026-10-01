@@ -52,22 +52,28 @@ A window is the pair `(day: date, part: 'first' | 'second')`, `day` being the Ea
 `window` (both optional, both or neither) passed to `--send`. The two Apps Script triggers keep
 dispatching the bare `pipeline-timer-emails` event; the code picks the window by the clock.
 
-## 4. Data: migration 275
+## 4. Data: migrations 275 and 276
 
-`app_timer.daily_notifications`:
+`app_timer.daily_notifications`. The column is `send_window`, not `window`: `window` is a fully
+reserved word in Postgres and the standard forbids quoted identifiers (found by the DB preflight
+lane on 2026-10-01).
 
-- add `window text not null default 'full' check (window in ('full','first','second'))`;
-- drop the unique constraint on `(user_email, send_date)`; add unique `(user_email, send_date,
-  window)`;
+- 275 (additive, apply BEFORE the merge): add `send_window text not null default 'full' check
+  (send_window in ('full','first','second'))`; add unique `(user_email, send_date, send_window)`;
+  keep the old `(user_email, send_date)` key so the old code keeps working until the merge.
+- 276 (apply right AFTER the merge, before the first `second` send): drop the old
+  `(user_email, send_date)` key.
 - existing rows stay `full` (every send before this change covered a whole day: ET day before
   2026-09-28, shift day after). No backfill.
-- Rollback file: drop the new unique, restore the old one (only valid while at most one row per
-  user and date exists), drop the column.
-- Preflight: pg_depend shows no view or function other than the pipeline's own SQL referencing the
-  table (migration 117 states none); confirm on the live DB before applying.
+- Rollback files for both; valid while at most one row per user and date exists.
+- Preflight (live, 2026-10-01): 10,547 rows, no pg_depend dependents, no functions referencing
+  the table, 0 duplicate (user_email, send_date) pairs, old key name
+  `stg_timer_daily_notifications_user_email_send_date_key`.
 
-Send writes `window = part`. The insert's `ON CONFLICT` targets the new three-column key, so a
-re-run of the same window re-sends and overwrites the thread ids, as today.
+Send writes `send_window = part`. The insert's `ON CONFLICT` targets the new three-column key, so a
+re-run of the same window re-sends and overwrites the thread ids, as today. Confirmation and
+reminder thread lookups prefer the row for the exact window and fall back to a `full` row for the
+same label date, so replies to pre-change emails keep threading during the transition.
 
 ## 5. Email content
 
@@ -119,9 +125,9 @@ re-run of the same window re-sends and overwrites the thread ids, as today.
 
 ## 8. Cutover on 2026-10-01
 
-1. Build on `feat/timer-email-two-windows` with tests first; premerge-review; squash-merge.
-2. Apply migration 275 to OntelDB immediately after the merge (the merged code's `ON CONFLICT`
-   needs the new key; the old code's needs the old one, so the two must not be mixed).
+1. Build on `feat/timer-email-two-windows` with tests first; premerge-review.
+2. Apply migration 275 (additive) to OntelDB, then squash-merge, then apply 276 (drop the old
+   key). The old code tolerates 275; the new code needs 276 before any `second` send.
 3. Backfill: `gh workflow run pipeline-timer-emails.yml -f date=2026-09-30 -f window=second`,
    covering Sep 30 6 PM ET to Oct 1 12 AM ET. The 06:30 PHT catch-up already sent earlier today
    (row `window = full`, send_date 2026-09-30) covered Sep 29 6 PM ET to Sep 30 6 PM ET.

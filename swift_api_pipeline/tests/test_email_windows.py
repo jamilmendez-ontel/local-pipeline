@@ -192,6 +192,19 @@ def test_coverage_note_second_summer():
 def test_coverage_note_winter_pht_readings_shift_one_hour():
     html = coverage_note_html(date(2026, 12, 10), "first")
     assert "1:00 PM Dec 10 to 7:00 AM Dec 11 Philippine time" in html
+    # The 9 AM ET second send is 10 PM PHT in winter, 9 PM in summer.
+    assert "sent at 9 AM Eastern / 10 PM Philippine time" in html
+    assert "sent at 9 AM Eastern / 9 PM Philippine time" in coverage_note_html(date(2026, 10, 2), "first")
+
+
+# ---- legacy thread lookup -----------------------------------------------------
+
+def test_notification_thread_prefers_window_row_then_legacy_full():
+    db = _RecordingDB()
+    tcr._notification_thread(db, "a@ontel.co", date(2026, 9, 30), "first")
+    assert "send_window IN ($3, 'full')" in db.sql
+    assert "ORDER BY (send_window = $3) DESC" in db.sql and "LIMIT 1" in db.sql
+    assert db.params == ("a@ontel.co", date(2026, 9, 30), "first")
 
 
 # ---- send path wiring -------------------------------------------------------
@@ -298,8 +311,9 @@ def test_send_daily_emails_subject_callout_and_window_key(monkeypatch):
     inserts = [c for c in db.calls if "INSERT INTO" in c[0] and "daily_notifications" in c[0]]
     assert len(inserts) == 1
     sql, params = inserts[0]
-    assert "(user_email, send_date, window, thread_id, message_id," in sql
-    assert "ON CONFLICT (user_email, send_date, window)" in sql
+    assert " window" not in sql.replace("send_window", "")   # the bare reserved word never appears in SQL
+    assert "(user_email, send_date, send_window, thread_id, message_id," in sql
+    assert "ON CONFLICT (user_email, send_date, send_window)" in sql
     assert params[0] == "a@ontel.co" and params[1] == date(2026, 9, 30) and params[2] == "second"
 
 
@@ -357,9 +371,9 @@ def test_find_days_needing_resend_uses_row_window(monkeypatch):
             super().fetch(sql, *params)
             if "FROM" in sql and "daily_notifications" in sql:
                 return [
-                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "window": "full",
+                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "send_window": "full",
                      "thread_id": "t1", "message_id": "m1", "last_sent_at": None, "last_sent_entry_ids": None},
-                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "window": "second",
+                    {"user_email": "a@ontel.co", "send_date": date(2026, 9, 30), "send_window": "second",
                      "thread_id": "t2", "message_id": "m2", "last_sent_at": None, "last_sent_entry_ids": None},
                 ]
             return []
@@ -370,7 +384,7 @@ def test_find_days_needing_resend_uses_row_window(monkeypatch):
     tcr.find_days_needing_resend(db, lookback_days=7)
     assert seen == [(date(2026, 9, 30), "full"), (date(2026, 9, 30), "second")]
     select_sql = [c for c in db.calls if "daily_notifications" in c[0]][0][0]
-    assert "SELECT user_email, send_date, window, thread_id, message_id," in select_sql
+    assert "SELECT user_email, send_date, send_window, thread_id, message_id," in select_sql
     cutoff = window_of(datetime.now(timezone.utc))[0] - timedelta(days=7)
     assert db.calls[0][1] == (cutoff,)
 

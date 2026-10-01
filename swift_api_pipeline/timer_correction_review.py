@@ -67,7 +67,8 @@ TZ_MANILA = ZoneInfo("Asia/Manila")
 # exports) does.
 WINDOW_SPLIT_HOUR_ET = 18
 WINDOW_PARTS = ("first", "second")
-LEGACY_WINDOW = "full"          # daily_notifications rows written before this change
+LEGACY_WINDOW = "full"          # daily_notifications.send_window for rows written before this change
+SECOND_SEND_HOUR_ET = 9         # the second window's email goes out ~09:00 ET the next day
 _LEGACY_SHIFT_START_HOUR_PHT = 6
 
 
@@ -158,6 +159,11 @@ def _clock_only(dt: datetime) -> str:
     return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p')}"
 
 
+def _hour_only(dt: datetime) -> str:
+    """'10 PM' (no minutes)."""
+    return f"{dt.strftime('%I').lstrip('0')} {dt.strftime('%p')}"
+
+
 def coverage_note_html(day: date, part: str) -> str:
     """The 'What this email covers' callout. States the window in both
     zones, derived from the bounds so DST is automatic, and names the
@@ -167,8 +173,9 @@ def coverage_note_html(day: date, part: str) -> str:
     lo_pht, hi_pht = lo.astimezone(TZ_MANILA), hi.astimezone(TZ_MANILA)
     label = f"{day.strftime('%A, %B')} {day.day}"
     if part == "first":
+        second_send_pht = _et_wall(day + timedelta(days=1), SECOND_SEND_HOUR_ET).astimezone(TZ_MANILA)
         tail = ("Entries started after 6:00 PM Eastern will be in the evening email, "
-                "sent at 9 AM Eastern / 9 PM Philippine time.")
+                f"sent at 9 AM Eastern / {_hour_only(second_send_pht)} Philippine time.")
     else:
         tail = "Your entries from 12 AM to 6 PM Eastern were in the earlier email."
     return f"""
@@ -1279,10 +1286,10 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                     lambda ue=user_email, sd=yesterday, w=part, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
                         f"""INSERT INTO {SCHEMA_TIMER}.daily_notifications
-                            (user_email, send_date, window, thread_id, message_id,
+                            (user_email, send_date, send_window, thread_id, message_id,
                              last_sent_at, last_sent_entry_ids)
                             VALUES ($1, $2, $3, $4, $5, NOW(), $6::jsonb)
-                            ON CONFLICT (user_email, send_date, window) DO UPDATE SET
+                            ON CONFLICT (user_email, send_date, send_window) DO UPDATE SET
                                 thread_id = EXCLUDED.thread_id,
                                 message_id = EXCLUDED.message_id,
                                 last_sent_at = EXCLUDED.last_sent_at,
@@ -2885,6 +2892,27 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
     """
 
 
+def _notification_thread(db, user_email: str, day, part: str):
+    """The daily_notifications row to thread a follow-up under.
+
+    Prefers the row for this exact window; falls back to a legacy
+    whole-day row ('full', sent before 2026-10-01) for the same label date,
+    so replies to pre-change emails keep threading during the transition.
+    """
+    return retry_db(
+        lambda: db.fetchrow(
+            f"""SELECT thread_id, message_id, send_date, send_window
+                FROM {SCHEMA_TIMER}.daily_notifications
+                WHERE user_email = $1 AND send_date = $2
+                  AND send_window IN ($3, 'full')
+                ORDER BY (send_window = $3) DESC
+                LIMIT 1
+            """, user_email, day, part,
+        ),
+        description=f"lookup notification thread for {user_email} on {day} {part}",
+    )
+
+
 def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bool = False):
     """Send a reply-in-thread confirmation email per (user, entry_date) for
     changes applied this run. Threads under the original daily entries email
@@ -2912,15 +2940,7 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
         removal_count = sum(1 for c in changes if c["action"] == "remove")
         added_count = sum(1 for c in changes if c["action"] == "add")
 
-        notif = retry_db(
-            lambda ue=user_email, sd=entry_date, w=part: db.fetchrow(
-                f"""SELECT thread_id, message_id
-                    FROM {SCHEMA_TIMER}.daily_notifications
-                    WHERE user_email = $1 AND send_date = $2 AND window = $3
-                """, ue, sd, w,
-            ),
-            description=f"lookup notification thread for {user_email} on {entry_date}",
-        )
+        notif = _notification_thread(db, user_email, entry_date, part)
 
         classified = _fetch_classified_day_entries(db, user_email, entry_date, part)
         if not classified:
@@ -3050,12 +3070,12 @@ def run_remind(test_mode: bool = False):
         dates_with_notifs = set()
         notif_dates = retry_db(
             lambda: db.fetch(
-                f"SELECT DISTINCT send_date, window FROM {SCHEMA_TIMER}.daily_notifications"
+                f"SELECT DISTINCT send_date, send_window FROM {SCHEMA_TIMER}.daily_notifications"
             ),
             description="get dates with notification records",
         )
         if notif_dates:
-            dates_with_notifs = {(r["send_date"], r["window"]) for r in notif_dates}
+            dates_with_notifs = {(r["send_date"], r["send_window"]) for r in notif_dates}
         original_count = len(by_user_date)
         by_user_date = {k: v for k, v in by_user_date.items() if k[1:] in dates_with_notifs}
         skipped = original_count - len(by_user_date)
@@ -3072,15 +3092,7 @@ def run_remind(test_mode: bool = False):
         days_left = max(0, AUTO_RESOLVE_DAYS - max_days)
 
         # Look up notification thread for this specific (user, date)
-        notif = retry_db(
-            lambda ue=user_email, sd=entry_date, w=part: db.fetchrow(
-                f"""SELECT thread_id, message_id, send_date
-                    FROM {SCHEMA_TIMER}.daily_notifications
-                    WHERE user_email = $1 AND send_date = $2 AND window = $3
-                """, ue, sd, w,
-            ),
-            description=f"lookup notification thread for {user_email} on {entry_date}",
-        )
+        notif = _notification_thread(db, user_email, entry_date, part)
 
         date_str = entry_date.strftime("%B %d, %Y")
 
@@ -3293,7 +3305,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     LARGE_BATCH_THRESHOLD = 30
     rows = retry_db(
         lambda: db.fetch(f"""
-            SELECT user_email, send_date, window, thread_id, message_id,
+            SELECT user_email, send_date, send_window, thread_id, message_id,
                    last_sent_at, last_sent_entry_ids
             FROM {SCHEMA_TIMER}.daily_notifications
             WHERE send_date >= $1
@@ -3309,7 +3321,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     for r in rows:
         user_email = r["user_email"]
         send_date = r["send_date"]
-        window = r["window"]
+        window = r["send_window"]
         current_all = _fetch_current_day_entries(db, user_email, send_date, window)
         # Running timers never count toward the trigger or the snapshot: a
         # NULL-end row has no stable key in a settled-only snapshot and
@@ -3344,7 +3356,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
                 lambda ue=user_email, sd=send_date, w=window, ids=bootstrap_ids: db.execute(
                     f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_entry_ids = $1::jsonb
-                        WHERE user_email = $2 AND send_date = $3 AND window = $4
+                        WHERE user_email = $2 AND send_date = $3 AND send_window = $4
                     """,
                     ids, ue, sd, w,
                 ),
@@ -3612,7 +3624,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
                     f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_at = NOW(),
                             last_sent_entry_ids = $1::jsonb
-                        WHERE user_email = $2 AND send_date = $3 AND window = $4
+                        WHERE user_email = $2 AND send_date = $3 AND send_window = $4
                     """,
                     ids, ue, sd, w,
                 ),

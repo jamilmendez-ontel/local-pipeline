@@ -159,7 +159,7 @@ def test_resend_trigger_ignores_running_timer_and_fires_on_completion(monkeypatc
         x["is_edited"] = False
 
     rows = [{
-        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "window": "first",
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "send_window": "first",
         "thread_id": "thread-1", "message_id": "<m@x>", "last_sent_at": None,
         "last_sent_entry_ids": _collect_entry_ids([settled_a]),  # settled-only snapshot
     }]
@@ -193,7 +193,7 @@ def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
     settled_a = _e(); settled_a["is_edited"] = False
     running_b = _e(start=T0 + timedelta(hours=3), end=None); running_b["is_edited"] = False
     rows = [{
-        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "window": "first",
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "send_window": "first",
         "thread_id": "thread-1", "message_id": None, "last_sent_at": None,
         "last_sent_entry_ids": None,  # never snapshotted -> bootstrap path
     }]

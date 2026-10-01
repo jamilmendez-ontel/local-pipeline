@@ -122,8 +122,8 @@ Only members with entries in the window are emailed. Boundaries follow US
 DST on purpose. `--send` picks the last closed window by the clock; a
 backfill names it with `--date YYYY-MM-DD --window first|second` (workflow
 inputs `date` + `window`). One `app_timer.daily_notifications` row per
-(member, Eastern date, window); rows from before 2026-10-01 are `window =
-'full'` (migration 275). Late stops arrive in-thread via a later run's
+(member, Eastern date, `send_window`); rows from before 2026-10-01 are
+`send_window = 'full'` (migrations 275 + 276). Late stops arrive in-thread via a later run's
 `--resend`. Its pull runs with `--through-today` (ends at today ET, not
 yesterday) so the 18:30 ET run sees the whole first window. On the 1st of
 the month ET that pull is two month buckets (previous month, then the 1st
