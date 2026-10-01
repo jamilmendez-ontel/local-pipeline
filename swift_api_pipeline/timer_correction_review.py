@@ -54,16 +54,21 @@ logger = get_logger("timer_correction")
 TZ_EASTERN = ZoneInfo("America/New_York")
 TZ_MANILA = ZoneInfo("Asia/Manila")
 
-# The member-facing Timer Entries email is bucketed on a SHIFT DAY: the 24
-# hours from 06:00 Asia/Manila on date D to 06:00 Asia/Manila on D+1,
-# labelled D (the date the 18:00 PHT shift starts). Before 2026-09-28 it was
-# bucketed on the ET calendar date (noon PHT to noon PHT), which disagreed
-# with the members' 06:00 PHT shift end on ~10% of entries (the 06:00-12:00
-# PHT overtime band). Asia/Manila has no DST, so the boundary never moves.
-# Everything the emails run touches (--send, --remind, --resend, the change
-# records --apply writes) uses these helpers; nothing downstream (DRMC,
-# variance, exports) does, they stay on ET calendar dates.
-SHIFT_DAY_START_HOUR = 6
+# The member-facing Timer Entries email is bucketed on an EASTERN DAY split
+# into two WINDOWS (decided 2026-10-01, replacing the 06:00 PHT shift day of
+# 2026-09-28):
+#   first  = [00:00 ET D, 18:00 ET D)   sent ~18:30 ET on D
+#   second = [18:00 ET D, 00:00 ET D+1) sent ~09:00 ET on D+1
+# Both are labelled with the Eastern date D, the same day Swift and DRMC
+# use. Boundaries follow US DST on purpose (Jamil's call), so in PHT terms
+# the split sits at 06:00 in summer and 07:00 in winter. Everything the
+# emails run touches (--send, --remind, --resend, the change records
+# --apply writes) uses these helpers; nothing downstream (DRMC, variance,
+# exports) does.
+WINDOW_SPLIT_HOUR_ET = 18
+WINDOW_PARTS = ("first", "second")
+LEGACY_WINDOW = "full"          # daily_notifications rows written before this change
+_LEGACY_SHIFT_START_HOUR_PHT = 6
 
 
 def _as_aware_utc(dt) -> datetime:
@@ -75,19 +80,49 @@ def _as_aware_utc(dt) -> datetime:
     return dt
 
 
-def shift_day(dt) -> date:
-    """Shift day an instant belongs to: the Asia/Manila date of (dt - 6h)."""
-    local = _as_aware_utc(dt).astimezone(TZ_MANILA)
-    return (local - timedelta(hours=SHIFT_DAY_START_HOUR)).date()
+def _et_wall(day: date, hour: int) -> datetime:
+    """`hour` o'clock Eastern on `day` (hour 24 = the midnight ending the day), as UTC."""
+    if hour == 24:
+        nxt = day + timedelta(days=1)
+        return datetime(nxt.year, nxt.month, nxt.day, tzinfo=TZ_EASTERN).astimezone(timezone.utc)
+    return datetime(day.year, day.month, day.day, hour, tzinfo=TZ_EASTERN).astimezone(timezone.utc)
 
 
-def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
-    """[06:00 PHT day, 06:00 PHT day+1) as tz-aware UTC datetimes.
+def window_bounds(day: date, part: str) -> tuple[datetime, datetime]:
+    """[lo, hi) in UTC for the window (`day`, `part`). Use as
+    `start_time >= $lo AND start_time < $hi` (sargable on the index)."""
+    if part == "first":
+        return _et_wall(day, 0), _et_wall(day, WINDOW_SPLIT_HOUR_ET)
+    if part == "second":
+        return _et_wall(day, WINDOW_SPLIT_HOUR_ET), _et_wall(day, 24)
+    raise ValueError(f"unknown window part {part!r}; expected one of {WINDOW_PARTS}")
 
-    Use as `start_time >= $lo AND start_time < $hi`: sargable on the
-    start_time index, unlike the DATE(... AT TIME ZONE ...) = $1 form.
+
+def window_of(dt) -> tuple[date, str]:
+    """(Eastern date, part) the instant belongs to."""
+    local = _as_aware_utc(dt).astimezone(TZ_EASTERN)
+    part = "first" if local.hour < WINDOW_SPLIT_HOUR_ET else "second"
+    return local.date(), part
+
+
+def last_closed_window(now: datetime | None = None) -> tuple[date, str]:
+    """The most recent window whose end is at or before `now`.
+
+    ~18:30 ET on D -> (D, first); ~09:00 ET on D+1 -> (D, second). A run
+    that fires before 18:00 ET correctly returns the previous day's second
+    window rather than emailing a still-open one.
     """
-    lo = datetime(day.year, day.month, day.day, SHIFT_DAY_START_HOUR,
+    now = _as_aware_utc(now or datetime.now(timezone.utc))
+    day, part = window_of(now)
+    if part == "second":
+        return day, "first"
+    return day - timedelta(days=1), "second"
+
+
+def legacy_full_bounds(day: date) -> tuple[datetime, datetime]:
+    """The pre-2026-10-01 shift day: [06:00 PHT day, 06:00 PHT day+1) in UTC.
+    Only for daily_notifications rows with window = 'full'."""
+    lo = datetime(day.year, day.month, day.day, _LEGACY_SHIFT_START_HOUR_PHT,
                   tzinfo=TZ_MANILA).astimezone(timezone.utc)
     return lo, lo + timedelta(days=1)
 
@@ -95,28 +130,55 @@ def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
 def form_lookup_bounds(day: date) -> tuple[datetime, datetime]:
     """Window for resolving a member's form reply that names `day`.
 
-    The union of the OLD ET-calendar-day window and the NEW shift-day
-    window: opens at 06:00 PHT `day`, closes at 00:00 ET `day`+1 (30 h).
-    Replies to emails sent before the 2026-09-28 cutover carry ET-day
-    dates; replies after it carry shift-day dates. The group lookup also
-    matches on site/task/start, so the extra hours cannot make it
-    ambiguous. Safe to keep forever.
+    Union of both new windows of `day` and the legacy shift day labelled
+    `day`, so replies to emails sent under either definition resolve. The
+    group lookup also matches on site/task/start, so the extra hours cannot
+    make it ambiguous. Safe to keep forever.
     """
-    lo, _ = shift_day_bounds(day)
-    et_end = (datetime(day.year, day.month, day.day, tzinfo=TZ_EASTERN)
-              + timedelta(days=1)).astimezone(timezone.utc)
-    return lo, et_end
+    lo_first, _ = window_bounds(day, "first")
+    _, hi_second = window_bounds(day, "second")
+    lo_legacy, hi_legacy = legacy_full_bounds(day)
+    return min(lo_first, lo_legacy), max(hi_second, hi_legacy)
 
 
-def last_closed_shift_day(now: datetime | None = None) -> date:
-    """The most recent shift day whose window has fully closed.
+def window_label(part: str) -> str:
+    return "12 AM to 6 PM ET" if part == "first" else "6 PM to 12 AM ET"
 
-    At the ~06:30 PHT send this is yesterday's shift day. If a run ever
-    fired before 06:00 PHT it would (correctly) target the day before that
-    rather than email a still-open window.
+
+def email_subject(day: date, part: str) -> str:
+    return f"Timer Activity Entries - {day.strftime('%B %d, %Y')} ({window_label(part)})"
+
+
+def _clock(dt: datetime) -> str:
+    """'6:00 AM Sep 28' (no leading zero on the hour, portable)."""
+    return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p %b %d')}"
+
+
+def _clock_only(dt: datetime) -> str:
+    return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p')}"
+
+
+def coverage_note_html(day: date, part: str) -> str:
+    """The 'What this email covers' callout. States the window in both
+    zones, derived from the bounds so DST is automatic, and names the
+    other email of the same Eastern day."""
+    lo, hi = window_bounds(day, part)
+    lo_et, hi_et = lo.astimezone(TZ_EASTERN), hi.astimezone(TZ_EASTERN)
+    lo_pht, hi_pht = lo.astimezone(TZ_MANILA), hi.astimezone(TZ_MANILA)
+    label = f"{day.strftime('%A, %B')} {day.day}"
+    if part == "first":
+        tail = ("Entries started after 6:00 PM Eastern will be in the evening email, "
+                "sent at 9 AM Eastern / 9 PM Philippine time.")
+    else:
+        tail = "Your entries from 12 AM to 6 PM Eastern were in the earlier email."
+    return f"""
+                <div style="background:#fff8e1;border-left:4px solid #f9a825;border-radius:4px;padding:10px 14px;margin:0 0 16px;font-size:13px;color:#5d4037;">
+                    <strong>What this email covers:</strong> <strong>{label}</strong> (Eastern date),
+                    <strong>{_clock_only(lo_et)} to {_clock_only(hi_et)} Eastern</strong>,
+                    which is {_clock(lo_pht)} to {_clock(hi_pht)} Philippine time.
+                    {tail}
+                </div>
     """
-    now = _as_aware_utc(now or datetime.now(timezone.utc))
-    return shift_day(now) - timedelta(days=1)
 
 
 def _entries_to_jsonb(entries):
