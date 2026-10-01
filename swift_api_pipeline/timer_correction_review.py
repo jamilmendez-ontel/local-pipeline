@@ -771,15 +771,18 @@ def _parse_duration_response(value: str) -> float | None:
 # --send: Email each tech with previous day's entries
 # --------------------------------------------------------------------------
 
-def get_previous_day_entries(db, target_date=None) -> list[dict]:
-    """Timer entries for one shift day (06:00 PHT to 06:00 PHT).
+def get_previous_day_entries(db, target_date=None, part=None) -> list[dict]:
+    """Timer entries for one email window (Eastern date + part).
 
-    Defaults to the last CLOSED shift day, which at the ~06:30 PHT send is
-    yesterday's. Range predicate on start_time so the index is used.
+    Defaults to the last CLOSED window: at the ~18:30 ET send that is
+    (today, first); at the ~09:00 ET send it is (yesterday, second). Range
+    predicate on start_time so the index is used.
     """
+    if (target_date is None) != (part is None):
+        raise ValueError("target_date and part must be given together")
     if target_date is None:
-        target_date = last_closed_shift_day()
-    lo, hi = shift_day_bounds(target_date)
+        target_date, part = last_closed_window()
+    lo, hi = window_bounds(target_date, part)
 
     rows = retry_db(
         lambda: db.fetch(f"""
@@ -789,7 +792,7 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
             WHERE start_time >= $1 AND start_time < $2
             ORDER BY user_email, site_name, task, start_time
         """, lo, hi),
-        description=f"fetch timer entries for shift day {target_date}",
+        description=f"fetch timer entries for window {target_date} {part}",
     )
 
     return [dict(r) for r in rows] if rows else []
@@ -1110,7 +1113,7 @@ def _build_running_notice_html(running: list[dict], now=None,
 
 
 def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
-                      target_date=None):
+                      target_date=None, part=None):
     """Send one email per tech with their entries for `target_date`.
 
     target_date defaults to yesterday (the normal nightly flow). For
@@ -1139,9 +1142,11 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
     for e in entries:
         by_user.setdefault(e["user_email"], []).append(e)
 
+    if (target_date is None) != (part is None):
+        raise ValueError("target_date and part must be given together")
     if target_date is None:
-        target_date = last_closed_shift_day()
-    yesterday = target_date  # variable name preserved; it is the shift day (spec 3.1)
+        target_date, part = last_closed_window()
+    yesterday = target_date  # variable name preserved; it is the Eastern date of the window
     date_str = yesterday.strftime("%B %d, %Y")
 
     service = authenticate()
@@ -1228,6 +1233,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
+                {coverage_note_html(yesterday, part)}
                 {running_notice}
                 <p>{intro}</p>
                 {entries_section}
@@ -1240,7 +1246,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         msg = MIMEMultipart()
         msg["To"] = recipient
         msg["From"] = masked_sender(service, "Ontel Timer Review")
-        msg["Subject"] = f"Timer Activity Entries - {date_str}"
+        msg["Subject"] = email_subject(yesterday, part)
         msg.attach(MIMEText(html_body, "html"))
 
         try:
@@ -1270,19 +1276,19 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                 # and its completion must read as NEW at resend time.
                 entry_ids_snapshot = _collect_entry_ids(settled)
                 retry_db(
-                    lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
+                    lambda ue=user_email, sd=yesterday, w=part, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
                         f"""INSERT INTO {SCHEMA_TIMER}.daily_notifications
-                            (user_email, send_date, thread_id, message_id,
+                            (user_email, send_date, window, thread_id, message_id,
                              last_sent_at, last_sent_entry_ids)
-                            VALUES ($1, $2, $3, $4, NOW(), $5::jsonb)
-                            ON CONFLICT (user_email, send_date) DO UPDATE SET
+                            VALUES ($1, $2, $3, $4, $5, NOW(), $6::jsonb)
+                            ON CONFLICT (user_email, send_date, window) DO UPDATE SET
                                 thread_id = EXCLUDED.thread_id,
                                 message_id = EXCLUDED.message_id,
                                 last_sent_at = EXCLUDED.last_sent_at,
                                 last_sent_entry_ids = EXCLUDED.last_sent_entry_ids
                         """,
-                        ue, sd, tid, mid, eids,
+                        ue, sd, w, tid, mid, eids,
                     ),
                     description=f"store notification thread for {user_email}",
                 )
@@ -1411,25 +1417,27 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     logger.info(f"Tracked {len(new_groups)} new duplicate groups from daily entries")
 
 
-def run_send(test_mode: bool = False, target_date=None):
-    """Send daily timer entry emails and track duplicates."""
+def run_send(test_mode: bool = False, target_date=None, part=None):
+    """Send the timer entry emails for one window and track duplicates."""
     if "PLACEHOLDER" in CORRECT_FORM_ID or "PLACEHOLDER" in REMOVE_FORM_ID:
         logger.warning("Google Form ID is still a placeholder — emails will have broken links.")
 
     db = get_db()
 
-    date_label = target_date or f"shift day {last_closed_shift_day()}"
-    logger.info(f"Fetching timer entries for {date_label}...")
-    entries = get_previous_day_entries(db, target_date=target_date)
+    if target_date is None:
+        target_date, part = last_closed_window()
+    logger.info(f"Fetching timer entries for window {target_date} {part} "
+                f"({window_label(part)})...")
+    entries = get_previous_day_entries(db, target_date=target_date, part=part)
 
     if not entries:
-        logger.info(f"No timer entries found for {date_label}")
+        logger.info(f"No timer entries found for window {target_date} {part}")
         return
 
     n_techs = len(set(e['user_email'] for e in entries))
     logger.info(f"Found {len(entries)} entries for {n_techs} techs")
 
-    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date)
+    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date, part=part)
     detect_and_track_duplicates(db, entries)
 
 
@@ -3636,17 +3644,20 @@ def main():
                         help="How many days back to check for resend candidates (default 7)")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
     parser.add_argument("--date", type=str,
-                        help="Target SHIFT DAY YYYY-MM-DD, i.e. the date the 18:00 PHT shift "
-                             "started (default: the last closed shift day). For backfill sends.")
+                        help="Backfill: Eastern date YYYY-MM-DD of the window to send. "
+                             "Requires --window. Default: the last closed window.")
+    parser.add_argument("--window", choices=list(WINDOW_PARTS),
+                        help="Backfill: which window of --date to send "
+                             "(first = 12 AM to 6 PM ET, second = 6 PM to 12 AM ET).")
     args = parser.parse_args()
 
     if not any([args.send, args.apply, args.remind, args.resend]):
         parser.error("At least one of --send, --apply, --remind, --resend is required")
+    if (args.date is None) != (args.window is None):
+        parser.error("--date and --window must be given together")
 
-    target_date = None
-    if args.date:
-        from datetime import date as date_type
-        target_date = date_type.fromisoformat(args.date)
+    target_date = date.fromisoformat(args.date) if args.date else None
+    part = args.window
 
     # Check OAuth token health before doing anything
     check_token_health()
@@ -3658,7 +3669,7 @@ def main():
 
         if args.send:
             logger.info("=== Running --send ===")
-            run_send(test_mode=args.test, target_date=target_date)
+            run_send(test_mode=args.test, target_date=target_date, part=part)
 
         if args.remind:
             logger.info("=== Running --remind ===")

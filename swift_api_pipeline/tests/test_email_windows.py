@@ -192,3 +192,131 @@ def test_coverage_note_second_summer():
 def test_coverage_note_winter_pht_readings_shift_one_hour():
     html = coverage_note_html(date(2026, 12, 10), "first")
     assert "1:00 PM Dec 10 to 7:00 AM Dec 11 Philippine time" in html
+
+
+# ---- send path wiring -------------------------------------------------------
+
+class _RecordingDB:
+    def __init__(self):
+        self.calls = []          # (sql, params)
+
+    def fetch(self, sql, *params):
+        self.calls.append((" ".join(sql.split()), params))
+        return []
+
+    def fetchrow(self, sql, *params):
+        self.calls.append((" ".join(sql.split()), params))
+        return None
+
+    def execute(self, sql, *params):
+        self.calls.append((" ".join(sql.split()), params))
+        return "OK"
+
+    @property
+    def sql(self):
+        return self.calls[-1][0]
+
+    @property
+    def params(self):
+        return self.calls[-1][1]
+
+
+def test_get_previous_day_entries_uses_window_bounds():
+    db = _RecordingDB()
+    tcr.get_previous_day_entries(db, target_date=date(2026, 9, 30), part="second")
+    assert "start_time >= $1 AND start_time < $2" in db.sql
+    assert db.params == window_bounds(date(2026, 9, 30), "second")
+
+
+def test_get_previous_day_entries_default_is_last_closed_window():
+    db = _RecordingDB()
+    tcr.get_previous_day_entries(db)
+    day, part = last_closed_window()
+    assert db.params == window_bounds(day, part)
+
+
+def test_get_previous_day_entries_requires_both_or_neither():
+    db = _RecordingDB()
+    with pytest.raises(ValueError):
+        tcr.get_previous_day_entries(db, target_date=date(2026, 9, 30))
+    with pytest.raises(ValueError):
+        tcr.get_previous_day_entries(db, part="first")
+
+
+class _Executable:
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self):
+        return self._result
+
+
+class _FakeGmail:
+    """Just enough of the Gmail API surface for send_daily_emails."""
+    def __init__(self):
+        self.sent = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def send(self, userId, body):
+        self.sent.append(body)
+        return _Executable({"threadId": "thr1", "id": "msg1"})
+
+    def get(self, userId, id, format, metadataHeaders):
+        return _Executable({"payload": {"headers": [{"name": "Message-ID", "value": "<m1@x>"}]}})
+
+
+def _decode_subject(raw_body):
+    import base64
+    import email
+    msg = email.message_from_bytes(base64.urlsafe_b64decode(raw_body["raw"]))
+    return msg["Subject"], msg.get_payload()[0].get_payload(decode=True).decode()
+
+
+def test_send_daily_emails_subject_callout_and_window_key(monkeypatch):
+    import gmail_client
+    fake = _FakeGmail()
+    monkeypatch.setattr(gmail_client, "authenticate", lambda: fake)
+    monkeypatch.setattr(gmail_client, "masked_sender", lambda service, name: f"{name} <x@ontel.co>")
+    db = _RecordingDB()
+    lo, _ = window_bounds(date(2026, 9, 30), "second")
+    entries = [{
+        "project_did": "p1", "project": "Proj", "user_email": "a@ontel.co",
+        "start_time": lo + timedelta(minutes=5), "end_time": lo + timedelta(minutes=65),
+        "duration_min": 60, "site_name": "Site A", "site_id": "S1",
+        "task": "6. Final COP", "task_clean": "Final COP", "asset_did": "ad1",
+    }]
+    tcr.send_daily_emails(db, entries, test_mode=True, target_date=date(2026, 9, 30), part="second")
+    assert len(fake.sent) == 1
+    subject, html = _decode_subject(fake.sent[0])
+    assert subject == "Timer Activity Entries - September 30, 2026 (6 PM to 12 AM ET)"
+    assert "What this email covers" in html and "6:00 PM to 12:00 AM Eastern" in html
+    inserts = [c for c in db.calls if "INSERT INTO" in c[0] and "daily_notifications" in c[0]]
+    assert len(inserts) == 1
+    sql, params = inserts[0]
+    assert "(user_email, send_date, window, thread_id, message_id," in sql
+    assert "ON CONFLICT (user_email, send_date, window)" in sql
+    assert params[0] == "a@ontel.co" and params[1] == date(2026, 9, 30) and params[2] == "second"
+
+
+def test_cli_rejects_date_without_window(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["x", "--send", "--date", "2026-09-30"])
+    monkeypatch.setattr(tcr, "check_token_health", lambda: None)
+    with pytest.raises(SystemExit) as ex:
+        tcr.main()
+    assert ex.value.code == 2
+
+
+def test_cli_passes_date_and_window_to_run_send(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sys, "argv", ["x", "--send", "--date", "2026-09-30", "--window", "second"])
+    monkeypatch.setattr(tcr, "check_token_health", lambda: None)
+    monkeypatch.setattr(tcr, "close_db", lambda: None)
+    monkeypatch.setattr(tcr, "run_send", lambda test_mode, target_date, part: seen.update(
+        test_mode=test_mode, target_date=target_date, part=part))
+    tcr.main()
+    assert seen == {"test_mode": False, "target_date": date(2026, 9, 30), "part": "second"}
