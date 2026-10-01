@@ -54,16 +54,22 @@ logger = get_logger("timer_correction")
 TZ_EASTERN = ZoneInfo("America/New_York")
 TZ_MANILA = ZoneInfo("Asia/Manila")
 
-# The member-facing Timer Entries email is bucketed on a SHIFT DAY: the 24
-# hours from 06:00 Asia/Manila on date D to 06:00 Asia/Manila on D+1,
-# labelled D (the date the 18:00 PHT shift starts). Before 2026-09-28 it was
-# bucketed on the ET calendar date (noon PHT to noon PHT), which disagreed
-# with the members' 06:00 PHT shift end on ~10% of entries (the 06:00-12:00
-# PHT overtime band). Asia/Manila has no DST, so the boundary never moves.
-# Everything the emails run touches (--send, --remind, --resend, the change
-# records --apply writes) uses these helpers; nothing downstream (DRMC,
-# variance, exports) does, they stay on ET calendar dates.
-SHIFT_DAY_START_HOUR = 6
+# The member-facing Timer Entries email is bucketed on an EASTERN DAY split
+# into two WINDOWS (decided 2026-10-01, replacing the 06:00 PHT shift day of
+# 2026-09-28):
+#   first  = [00:00 ET D, 18:00 ET D)   sent ~18:30 ET on D
+#   second = [18:00 ET D, 00:00 ET D+1) sent ~09:00 ET on D+1
+# Both are labelled with the Eastern date D, the same day Swift and DRMC
+# use. Boundaries follow US DST on purpose (Jamil's call), so in PHT terms
+# the split sits at 06:00 in summer and 07:00 in winter. Everything the
+# emails run touches (--send, --remind, --resend, the change records
+# --apply writes) uses these helpers; nothing downstream (DRMC, variance,
+# exports) does.
+WINDOW_SPLIT_HOUR_ET = 18
+WINDOW_PARTS = ("first", "second")
+LEGACY_WINDOW = "full"          # daily_notifications.send_window for rows written before this change
+SECOND_SEND_HOUR_ET = 9         # the second window's email goes out ~09:00 ET the next day
+_LEGACY_SHIFT_START_HOUR_PHT = 6
 
 
 def _as_aware_utc(dt) -> datetime:
@@ -75,19 +81,49 @@ def _as_aware_utc(dt) -> datetime:
     return dt
 
 
-def shift_day(dt) -> date:
-    """Shift day an instant belongs to: the Asia/Manila date of (dt - 6h)."""
-    local = _as_aware_utc(dt).astimezone(TZ_MANILA)
-    return (local - timedelta(hours=SHIFT_DAY_START_HOUR)).date()
+def _et_wall(day: date, hour: int) -> datetime:
+    """`hour` o'clock Eastern on `day` (hour 24 = the midnight ending the day), as UTC."""
+    if hour == 24:
+        nxt = day + timedelta(days=1)
+        return datetime(nxt.year, nxt.month, nxt.day, tzinfo=TZ_EASTERN).astimezone(timezone.utc)
+    return datetime(day.year, day.month, day.day, hour, tzinfo=TZ_EASTERN).astimezone(timezone.utc)
 
 
-def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
-    """[06:00 PHT day, 06:00 PHT day+1) as tz-aware UTC datetimes.
+def window_bounds(day: date, part: str) -> tuple[datetime, datetime]:
+    """[lo, hi) in UTC for the window (`day`, `part`). Use as
+    `start_time >= $lo AND start_time < $hi` (sargable on the index)."""
+    if part == "first":
+        return _et_wall(day, 0), _et_wall(day, WINDOW_SPLIT_HOUR_ET)
+    if part == "second":
+        return _et_wall(day, WINDOW_SPLIT_HOUR_ET), _et_wall(day, 24)
+    raise ValueError(f"unknown window part {part!r}; expected one of {WINDOW_PARTS}")
 
-    Use as `start_time >= $lo AND start_time < $hi`: sargable on the
-    start_time index, unlike the DATE(... AT TIME ZONE ...) = $1 form.
+
+def window_of(dt) -> tuple[date, str]:
+    """(Eastern date, part) the instant belongs to."""
+    local = _as_aware_utc(dt).astimezone(TZ_EASTERN)
+    part = "first" if local.hour < WINDOW_SPLIT_HOUR_ET else "second"
+    return local.date(), part
+
+
+def last_closed_window(now: datetime | None = None) -> tuple[date, str]:
+    """The most recent window whose end is at or before `now`.
+
+    ~18:30 ET on D -> (D, first); ~09:00 ET on D+1 -> (D, second). A run
+    that fires before 18:00 ET correctly returns the previous day's second
+    window rather than emailing a still-open one.
     """
-    lo = datetime(day.year, day.month, day.day, SHIFT_DAY_START_HOUR,
+    now = _as_aware_utc(now or datetime.now(timezone.utc))
+    day, part = window_of(now)
+    if part == "second":
+        return day, "first"
+    return day - timedelta(days=1), "second"
+
+
+def legacy_full_bounds(day: date) -> tuple[datetime, datetime]:
+    """The pre-2026-10-01 shift day: [06:00 PHT day, 06:00 PHT day+1) in UTC.
+    Only for daily_notifications rows with window = 'full'."""
+    lo = datetime(day.year, day.month, day.day, _LEGACY_SHIFT_START_HOUR_PHT,
                   tzinfo=TZ_MANILA).astimezone(timezone.utc)
     return lo, lo + timedelta(days=1)
 
@@ -95,28 +131,61 @@ def shift_day_bounds(day: date) -> tuple[datetime, datetime]:
 def form_lookup_bounds(day: date) -> tuple[datetime, datetime]:
     """Window for resolving a member's form reply that names `day`.
 
-    The union of the OLD ET-calendar-day window and the NEW shift-day
-    window: opens at 06:00 PHT `day`, closes at 00:00 ET `day`+1 (30 h).
-    Replies to emails sent before the 2026-09-28 cutover carry ET-day
-    dates; replies after it carry shift-day dates. The group lookup also
-    matches on site/task/start, so the extra hours cannot make it
-    ambiguous. Safe to keep forever.
+    Union of both new windows of `day` and the legacy shift day labelled
+    `day`, so replies to emails sent under either definition resolve. The
+    group lookup also matches on site/task/start, so the extra hours cannot
+    make it ambiguous. Safe to keep forever.
     """
-    lo, _ = shift_day_bounds(day)
-    et_end = (datetime(day.year, day.month, day.day, tzinfo=TZ_EASTERN)
-              + timedelta(days=1)).astimezone(timezone.utc)
-    return lo, et_end
+    lo_first, _ = window_bounds(day, "first")
+    _, hi_second = window_bounds(day, "second")
+    lo_legacy, hi_legacy = legacy_full_bounds(day)
+    return min(lo_first, lo_legacy), max(hi_second, hi_legacy)
 
 
-def last_closed_shift_day(now: datetime | None = None) -> date:
-    """The most recent shift day whose window has fully closed.
+def window_label(part: str) -> str:
+    return "12 AM to 6 PM ET" if part == "first" else "6 PM to 12 AM ET"
 
-    At the ~06:30 PHT send this is yesterday's shift day. If a run ever
-    fired before 06:00 PHT it would (correctly) target the day before that
-    rather than email a still-open window.
+
+def email_subject(day: date, part: str) -> str:
+    return f"Timer Activity Entries - {day.strftime('%B %d, %Y')} ({window_label(part)})"
+
+
+def _clock(dt: datetime) -> str:
+    """'6:00 AM Sep 28' (no leading zero on the hour, portable)."""
+    return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p %b %d')}"
+
+
+def _clock_only(dt: datetime) -> str:
+    return f"{dt.strftime('%I').lstrip('0')}:{dt.strftime('%M %p')}"
+
+
+def _hour_only(dt: datetime) -> str:
+    """'10 PM' (no minutes)."""
+    return f"{dt.strftime('%I').lstrip('0')} {dt.strftime('%p')}"
+
+
+def coverage_note_html(day: date, part: str) -> str:
+    """The 'What this email covers' callout. States the window in both
+    zones, derived from the bounds so DST is automatic, and names the
+    other email of the same Eastern day."""
+    lo, hi = window_bounds(day, part)
+    lo_et, hi_et = lo.astimezone(TZ_EASTERN), hi.astimezone(TZ_EASTERN)
+    lo_pht, hi_pht = lo.astimezone(TZ_MANILA), hi.astimezone(TZ_MANILA)
+    label = f"{day.strftime('%A, %B')} {day.day}"
+    if part == "first":
+        second_send_pht = _et_wall(day + timedelta(days=1), SECOND_SEND_HOUR_ET).astimezone(TZ_MANILA)
+        tail = ("Entries started after 6:00 PM Eastern will be in the evening email, "
+                f"sent at 9 AM Eastern / {_hour_only(second_send_pht)} Philippine time.")
+    else:
+        tail = "Your entries from 12 AM to 6 PM Eastern were in the earlier email."
+    return f"""
+                <div style="background:#fff8e1;border-left:4px solid #f9a825;border-radius:4px;padding:10px 14px;margin:0 0 16px;font-size:13px;color:#5d4037;">
+                    <strong>What this email covers:</strong> <strong>{label}</strong> (Eastern date),
+                    <strong>{_clock_only(lo_et)} to {_clock_only(hi_et)} Eastern</strong>,
+                    which is {_clock(lo_pht)} to {_clock(hi_pht)} Philippine time.
+                    {tail}
+                </div>
     """
-    now = _as_aware_utc(now or datetime.now(timezone.utc))
-    return shift_day(now) - timedelta(days=1)
 
 
 def _entries_to_jsonb(entries):
@@ -709,15 +778,18 @@ def _parse_duration_response(value: str) -> float | None:
 # --send: Email each tech with previous day's entries
 # --------------------------------------------------------------------------
 
-def get_previous_day_entries(db, target_date=None) -> list[dict]:
-    """Timer entries for one shift day (06:00 PHT to 06:00 PHT).
+def get_previous_day_entries(db, target_date=None, part=None) -> list[dict]:
+    """Timer entries for one email window (Eastern date + part).
 
-    Defaults to the last CLOSED shift day, which at the ~06:30 PHT send is
-    yesterday's. Range predicate on start_time so the index is used.
+    Defaults to the last CLOSED window: at the ~18:30 ET send that is
+    (today, first); at the ~09:00 ET send it is (yesterday, second). Range
+    predicate on start_time so the index is used.
     """
+    if (target_date is None) != (part is None):
+        raise ValueError("target_date and part must be given together")
     if target_date is None:
-        target_date = last_closed_shift_day()
-    lo, hi = shift_day_bounds(target_date)
+        target_date, part = last_closed_window()
+    lo, hi = window_bounds(target_date, part)
 
     rows = retry_db(
         lambda: db.fetch(f"""
@@ -727,7 +799,7 @@ def get_previous_day_entries(db, target_date=None) -> list[dict]:
             WHERE start_time >= $1 AND start_time < $2
             ORDER BY user_email, site_name, task, start_time
         """, lo, hi),
-        description=f"fetch timer entries for shift day {target_date}",
+        description=f"fetch timer entries for window {target_date} {part}",
     )
 
     return [dict(r) for r in rows] if rows else []
@@ -1048,7 +1120,7 @@ def _build_running_notice_html(running: list[dict], now=None,
 
 
 def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
-                      target_date=None):
+                      target_date=None, part=None):
     """Send one email per tech with their entries for `target_date`.
 
     target_date defaults to yesterday (the normal nightly flow). For
@@ -1077,9 +1149,11 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
     for e in entries:
         by_user.setdefault(e["user_email"], []).append(e)
 
+    if (target_date is None) != (part is None):
+        raise ValueError("target_date and part must be given together")
     if target_date is None:
-        target_date = last_closed_shift_day()
-    yesterday = target_date  # variable name preserved; it is the shift day (spec 3.1)
+        target_date, part = last_closed_window()
+    yesterday = target_date  # variable name preserved; it is the Eastern date of the window
     date_str = yesterday.strftime("%B %d, %Y")
 
     service = authenticate()
@@ -1166,6 +1240,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
+                {coverage_note_html(yesterday, part)}
                 {running_notice}
                 <p>{intro}</p>
                 {entries_section}
@@ -1178,7 +1253,7 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
         msg = MIMEMultipart()
         msg["To"] = recipient
         msg["From"] = masked_sender(service, "Ontel Timer Review")
-        msg["Subject"] = f"Timer Activity Entries - {date_str}"
+        msg["Subject"] = email_subject(yesterday, part)
         msg.attach(MIMEText(html_body, "html"))
 
         try:
@@ -1208,19 +1283,19 @@ def send_daily_emails(db, entries: list[dict], test_mode: bool = False,
                 # and its completion must read as NEW at resend time.
                 entry_ids_snapshot = _collect_entry_ids(settled)
                 retry_db(
-                    lambda ue=user_email, sd=yesterday, tid=thread_id, mid=message_id,
+                    lambda ue=user_email, sd=yesterday, w=part, tid=thread_id, mid=message_id,
                            eids=entry_ids_snapshot: db.execute(
                         f"""INSERT INTO {SCHEMA_TIMER}.daily_notifications
-                            (user_email, send_date, thread_id, message_id,
+                            (user_email, send_date, send_window, thread_id, message_id,
                              last_sent_at, last_sent_entry_ids)
-                            VALUES ($1, $2, $3, $4, NOW(), $5::jsonb)
-                            ON CONFLICT (user_email, send_date) DO UPDATE SET
+                            VALUES ($1, $2, $3, $4, $5, NOW(), $6::jsonb)
+                            ON CONFLICT (user_email, send_date, send_window) DO UPDATE SET
                                 thread_id = EXCLUDED.thread_id,
                                 message_id = EXCLUDED.message_id,
                                 last_sent_at = EXCLUDED.last_sent_at,
                                 last_sent_entry_ids = EXCLUDED.last_sent_entry_ids
                         """,
-                        ue, sd, tid, mid, eids,
+                        ue, sd, w, tid, mid, eids,
                     ),
                     description=f"store notification thread for {user_email}",
                 )
@@ -1349,25 +1424,27 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     logger.info(f"Tracked {len(new_groups)} new duplicate groups from daily entries")
 
 
-def run_send(test_mode: bool = False, target_date=None):
-    """Send daily timer entry emails and track duplicates."""
+def run_send(test_mode: bool = False, target_date=None, part=None):
+    """Send the timer entry emails for one window and track duplicates."""
     if "PLACEHOLDER" in CORRECT_FORM_ID or "PLACEHOLDER" in REMOVE_FORM_ID:
         logger.warning("Google Form ID is still a placeholder — emails will have broken links.")
 
     db = get_db()
 
-    date_label = target_date or f"shift day {last_closed_shift_day()}"
-    logger.info(f"Fetching timer entries for {date_label}...")
-    entries = get_previous_day_entries(db, target_date=target_date)
+    if target_date is None:
+        target_date, part = last_closed_window()
+    logger.info(f"Fetching timer entries for window {target_date} {part} "
+                f"({window_label(part)})...")
+    entries = get_previous_day_entries(db, target_date=target_date, part=part)
 
     if not entries:
-        logger.info(f"No timer entries found for {date_label}")
+        logger.info(f"No timer entries found for window {target_date} {part}")
         return
 
     n_techs = len(set(e['user_email'] for e in entries))
     logger.info(f"Found {len(entries)} entries for {n_techs} techs")
 
-    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date)
+    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date, part=part)
     detect_and_track_duplicates(db, entries)
 
 
@@ -1489,6 +1566,22 @@ def lookup_entries_by_hash(db, entry_ids: list[str]) -> dict[str, dict]:
         h = d.pop("_entry_id_hash")
         result.setdefault(h, d)
     return result
+
+
+def _change_record(entry_id: str, action: str, entry: dict,
+                   corrected_duration_min=None) -> dict:
+    """One applied-change record; the window is derived from the entry's start."""
+    day, part = window_of(entry["start_time"])
+    return {
+        "entry_id": entry_id,
+        "action": action,
+        "user_email": entry["user_email"],
+        "entry_date": day,
+        "entry_window": part,
+        "entry": entry,
+        "original_duration_min": entry.get("duration_min"),
+        "corrected_duration_min": corrected_duration_min,
+    }
 
 
 def _resolve_stale_response(db, resp: dict) -> list[dict] | None:
@@ -1928,7 +2021,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         f"{[_fmt_duration(r.get('duration_min')) for r in uncovered]}) "
                         f"for {group[0].get('user_email')} / "
                         f"{group[0].get('site_name') or '(no site)'} on "
-                        f"{shift_day(group[0]['start_time'])}; "
+                        f"{window_of(group[0]['start_time'])[0]}; "
                         f"entry drifted materially — skipping for manual review")
                     continue
                 # The FIRST row is stored under the response's own stale
@@ -1963,15 +2056,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                                 f"for {row.get('site_name') or '(no site)'} / "
                                 f"{row.get('task') or '(no task)'} "
                                 f"({_fmt_duration(row.get('duration_min'))})")
-                    applied_changes.append({
-                        "entry_id": row_eid,
-                        "action": "remove",
-                        "user_email": row["user_email"],
-                        "entry_date": shift_day(row["start_time"]),
-                        "entry": row,
-                        "original_duration_min": row.get("duration_min"),
-                        "corrected_duration_min": None,
-                    })
+                    applied_changes.append(_change_record(row_eid, "remove", row))
                     _resolve_duplicate_for_action(db, row, "remove", now)
                 applied += 1
                 continue
@@ -2033,15 +2118,8 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         f"{_fmt_duration(entry.get('duration_min'))} -> {_fmt_duration(corrected_duration)} "
                         f"(reason: {reason or 'none'})")
 
-            applied_changes.append({
-                "entry_id": entry_id,
-                "action": "correct",
-                "user_email": entry["user_email"],
-                "entry_date": shift_day(entry["start_time"]),
-                "entry": entry,
-                "original_duration_min": entry.get("duration_min"),
-                "corrected_duration_min": corrected_duration,
-            })
+            applied_changes.append(_change_record(
+                entry_id, "correct", entry, corrected_duration_min=corrected_duration))
 
         else:
             # Upsert into app_timer.entry_removals (entry_id is UNIQUE — last wins)
@@ -2068,15 +2146,7 @@ def apply_responses(db, responses: list[dict], rebuild: bool = True) -> list[dic
                         f"{entry.get('site_name') or '(no site)'} / {entry.get('task') or '(no task)'} "
                         f"(reason: {reason or 'none'})")
 
-            applied_changes.append({
-                "entry_id": entry_id,
-                "action": "remove",
-                "user_email": entry["user_email"],
-                "entry_date": shift_day(entry["start_time"]),
-                "entry": entry,
-                "original_duration_min": entry.get("duration_min"),
-                "corrected_duration_min": None,
-            })
+            applied_changes.append(_change_record(entry_id, "remove", entry))
 
         applied += 1
 
@@ -2351,7 +2421,7 @@ _STATUS_BADGE_HTML = {
 }
 
 
-def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]:
+def _fetch_classified_day_entries(db, user_email: str, entry_date, part: str) -> list[dict]:
     """Fetch all timer entries for (user_email, entry_date as a shift day) and
     classify each as UNCHANGED / EDITED / ADDED / REMOVED.
 
@@ -2367,7 +2437,7 @@ def _fetch_classified_day_entries(db, user_email: str, entry_date) -> list[dict]
     correction and drop the surviving edit from the email. Matching the
     clean table by its natural key avoids that entirely.
     """
-    lo, hi = shift_day_bounds(entry_date)
+    lo, hi = window_bounds(entry_date, part)
     rows = retry_db(
         lambda: db.fetch(f"""
             WITH surviving AS (
@@ -2713,6 +2783,7 @@ def _build_duplicate_group_note_html(set_aside_count: int, counted_count: int) -
 
 def _build_correction_confirmation_html(user_email: str, entry_date,
                                          classified_entries: list[dict],
+                                         part: str,
                                          change_count: int,
                                          edit_count: int,
                                          removal_count: int,
@@ -2773,13 +2844,14 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         <div style="background:#2e7d32;color:white;padding:16px 24px;">
             <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
             <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
-            <td valign="middle"><h2 style="margin:0;">Timer Entries Updated - {date_str}</h2></td>
+            <td valign="middle"><h2 style="margin:0;">Timer Entries Updated - {date_str} ({window_label(part)})</h2></td>
             </tr></table>
             <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{subheader}</p>
         </div>
         <div style="padding:24px;">
 
             <p>Hi {_first_name(user_email)},</p>
+            {coverage_note_html(entry_date, part)}
             <p>Your timer entries for <strong>{date_str}</strong> were updated based on the corrections you submitted. Below is the full updated view of your day &mdash; unchanged entries, edits, and removals are all shown for context.</p>
 
             <h3 style="margin-top:20px;margin-bottom:8px;font-size:15px;">Updated Daily Task Summary</h3>
@@ -2820,6 +2892,27 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
     """
 
 
+def _notification_thread(db, user_email: str, day, part: str):
+    """The daily_notifications row to thread a follow-up under.
+
+    Prefers the row for this exact window; falls back to a legacy
+    whole-day row ('full', sent before 2026-10-01) for the same label date,
+    so replies to pre-change emails keep threading during the transition.
+    """
+    return retry_db(
+        lambda: db.fetchrow(
+            f"""SELECT thread_id, message_id, send_date, send_window
+                FROM {SCHEMA_TIMER}.daily_notifications
+                WHERE user_email = $1 AND send_date = $2
+                  AND send_window IN ($3, 'full')
+                ORDER BY (send_window = $3) DESC
+                LIMIT 1
+            """, user_email, day, part,
+        ),
+        description=f"lookup notification thread for {user_email} on {day} {part}",
+    )
+
+
 def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bool = False):
     """Send a reply-in-thread confirmation email per (user, entry_date) for
     changes applied this run. Threads under the original daily entries email
@@ -2834,43 +2927,36 @@ def send_correction_confirmations(db, applied_changes: list[dict], test_mode: bo
 
     by_user_date: dict[tuple, list[dict]] = {}
     for change in applied_changes:
-        key = (change["user_email"], change["entry_date"])
+        key = (change["user_email"], change["entry_date"], change["entry_window"])
         by_user_date.setdefault(key, []).append(change)
 
     service = authenticate()
     sent = 0
 
-    for (user_email, entry_date), changes in by_user_date.items():
+    for (user_email, entry_date, part), changes in by_user_date.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         date_str = entry_date.strftime("%B %d, %Y")
         edit_count = sum(1 for c in changes if c["action"] == "correct")
         removal_count = sum(1 for c in changes if c["action"] == "remove")
         added_count = sum(1 for c in changes if c["action"] == "add")
 
-        notif = retry_db(
-            lambda ue=user_email, sd=entry_date: db.fetchrow(
-                f"""SELECT thread_id, message_id
-                    FROM {SCHEMA_TIMER}.daily_notifications
-                    WHERE user_email = $1 AND send_date = $2
-                """, ue, sd,
-            ),
-            description=f"lookup notification thread for {user_email} on {entry_date}",
-        )
+        notif = _notification_thread(db, user_email, entry_date, part)
 
-        classified = _fetch_classified_day_entries(db, user_email, entry_date)
+        classified = _fetch_classified_day_entries(db, user_email, entry_date, part)
         if not classified:
             logger.warning(f"No entries found for {user_email} on {entry_date} — skipping confirmation")
             continue
 
         html_body = _build_correction_confirmation_html(
             user_email, entry_date, classified,
+            part=part,
             change_count=len(changes),
             edit_count=edit_count,
             removal_count=removal_count,
             added_count=added_count,
         )
 
-        subject = f"Re: Timer Activity Entries - {date_str}"
+        subject = f"Re: {email_subject(entry_date, part)}"
         msg = MIMEMultipart()
         msg["To"] = recipient
         msg["From"] = masked_sender(service, "Ontel Timer Review")
@@ -2966,8 +3052,8 @@ def run_remind(test_mode: bool = False):
     for r in unresolved:
         entries = r["entries"] if isinstance(r["entries"], list) else json.loads(r["entries"])
         days_pending = (now - r["notified_at"]).days
-        entry_date = shift_day(r["start_time"])
-        key = (r["user_email"], entry_date)
+        entry_date, part = window_of(r["start_time"])
+        key = (r["user_email"], entry_date, part)
         by_user_date.setdefault(key, []).append({
             "group_id": r["group_id"],
             "project": r["project"],
@@ -2984,14 +3070,14 @@ def run_remind(test_mode: bool = False):
         dates_with_notifs = set()
         notif_dates = retry_db(
             lambda: db.fetch(
-                f"SELECT DISTINCT send_date FROM {SCHEMA_TIMER}.daily_notifications"
+                f"SELECT DISTINCT send_date, send_window FROM {SCHEMA_TIMER}.daily_notifications"
             ),
             description="get dates with notification records",
         )
         if notif_dates:
-            dates_with_notifs = {r["send_date"] for r in notif_dates}
+            dates_with_notifs = {(r["send_date"], r["send_window"]) for r in notif_dates}
         original_count = len(by_user_date)
-        by_user_date = {k: v for k, v in by_user_date.items() if k[1] in dates_with_notifs}
+        by_user_date = {k: v for k, v in by_user_date.items() if k[1:] in dates_with_notifs}
         skipped = original_count - len(by_user_date)
         if skipped:
             logger.info(f"Test mode: skipped {skipped} reminders for dates without notification records")
@@ -2999,22 +3085,14 @@ def run_remind(test_mode: bool = False):
     service = authenticate()
     all_group_ids = []
 
-    for (user_email, entry_date), groups in by_user_date.items():
+    for (user_email, entry_date, part), groups in by_user_date.items():
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(groups)
         max_days = max(g["days_pending"] for g in groups)
         days_left = max(0, AUTO_RESOLVE_DAYS - max_days)
 
         # Look up notification thread for this specific (user, date)
-        notif = retry_db(
-            lambda ue=user_email, sd=entry_date: db.fetchrow(
-                f"""SELECT thread_id, message_id, send_date
-                    FROM {SCHEMA_TIMER}.daily_notifications
-                    WHERE user_email = $1 AND send_date = $2
-                """, ue, sd,
-            ),
-            description=f"lookup notification thread for {user_email} on {entry_date}",
-        )
+        notif = _notification_thread(db, user_email, entry_date, part)
 
         date_str = entry_date.strftime("%B %d, %Y")
 
@@ -3046,7 +3124,7 @@ def run_remind(test_mode: bool = False):
             <div style="background:#e65100;color:white;padding:16px 24px;">
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
                 <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
-                <td valign="middle"><h2 style="margin:0;">Duplicate Reminder - {date_str}</h2></td>
+                <td valign="middle"><h2 style="margin:0;">Duplicate Reminder - {date_str} ({window_label(part)})</h2></td>
                 </tr></table>
                 <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">{max_days} day{'s' if max_days != 1 else ''} pending</p>
             </div>
@@ -3072,7 +3150,7 @@ def run_remind(test_mode: bool = False):
         """
 
         # Subject matches original daily email for Gmail threading
-        subject = f"Re: Timer Activity Entries - {date_str}"
+        subject = f"Re: {email_subject(entry_date, part)}"
 
         msg = MIMEMultipart()
         msg["To"] = recipient
@@ -3165,7 +3243,7 @@ def _collect_entry_ids(entries: list[dict]) -> list[str]:
     ]
 
 
-def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
+def _fetch_current_day_entries(db, user_email: str, entry_date, window: str) -> list[dict]:
     """Fetch the canonical view of (user, date) entries for re-send from
     stg_timer_activities_clean. Each row carries an `is_edited` flag set
     to True when a correction's corrected natural key matches the row —
@@ -3181,7 +3259,8 @@ def _fetch_current_day_entries(db, user_email: str, entry_date) -> list[dict]:
     the resend shows the full corrected day with current Edit / Remove
     buttons. Two emails serve different purposes.
     """
-    lo, hi = shift_day_bounds(entry_date)
+    lo, hi = (legacy_full_bounds(entry_date) if window == LEGACY_WINDOW
+              else window_bounds(entry_date, window))
     rows = retry_db(
         lambda: db.fetch(f"""
             SELECT
@@ -3218,7 +3297,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     with the current set silently and NOT returned as resend candidates,
     so we don't blast a re-send to every tech the day after this migration.
     """
-    cutoff = shift_day(datetime.now(timezone.utc)) - timedelta(days=lookback_days)
+    cutoff = window_of(datetime.now(timezone.utc))[0] - timedelta(days=lookback_days)
     # Surface unexpectedly large batches — a clean steady state is a
     # handful of candidates per day. A spike usually means an upstream
     # extractor reloaded a big window or the lookback was widened by
@@ -3226,7 +3305,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     LARGE_BATCH_THRESHOLD = 30
     rows = retry_db(
         lambda: db.fetch(f"""
-            SELECT user_email, send_date, thread_id, message_id,
+            SELECT user_email, send_date, send_window, thread_id, message_id,
                    last_sent_at, last_sent_entry_ids
             FROM {SCHEMA_TIMER}.daily_notifications
             WHERE send_date >= $1
@@ -3242,7 +3321,8 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
     for r in rows:
         user_email = r["user_email"]
         send_date = r["send_date"]
-        current_all = _fetch_current_day_entries(db, user_email, send_date)
+        window = r["send_window"]
+        current_all = _fetch_current_day_entries(db, user_email, send_date, window)
         # Running timers never count toward the trigger or the snapshot: a
         # NULL-end row has no stable key in a settled-only snapshot and
         # would otherwise re-send the day every night until it stops.
@@ -3273,12 +3353,12 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
             # deleted would falsely re-appear as NEW in a future resend.
             bootstrap_ids = sorted(_collect_entry_ids(current))
             retry_db(
-                lambda ue=user_email, sd=send_date, ids=bootstrap_ids: db.execute(
+                lambda ue=user_email, sd=send_date, w=window, ids=bootstrap_ids: db.execute(
                     f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_entry_ids = $1::jsonb
-                        WHERE user_email = $2 AND send_date = $3
+                        WHERE user_email = $2 AND send_date = $3 AND send_window = $4
                     """,
-                    ids, ue, sd,
+                    ids, ue, sd, w,
                 ),
                 description=f"bootstrap snapshot for {user_email} on {send_date}",
             )
@@ -3293,6 +3373,7 @@ def find_days_needing_resend(db, lookback_days: int = 7) -> list[dict]:
             candidates.append({
                 "user_email": user_email,
                 "send_date": send_date,
+                "window": window,
                 "thread_id": r["thread_id"],
                 "message_id": r["message_id"],
                 "snapshot_ids": snapshot_ids,
@@ -3430,6 +3511,7 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
     for c in candidates:
         user_email = c["user_email"]
         send_date = c["send_date"]
+        window = c["window"]
         thread_id = c["thread_id"]
         message_id = c["message_id"]
         entries, running = _split_running_entries(c["current_entries"])
@@ -3437,6 +3519,9 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         recipient = "jamil.mendez@ontel.co" if test_mode else user_email
         n = len(entries)
         date_str = send_date.strftime("%B %d, %Y")
+        is_window = window != LEGACY_WINDOW
+        header_suffix = f" ({window_label(window)})" if is_window else ""
+        coverage_html = coverage_note_html(send_date, window) if is_window else ""
         running_notice = _build_running_notice_html(
             running, task_dids=_safe_task_dids(db, running))
 
@@ -3456,12 +3541,13 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             <div style="background:#1565c0;color:white;padding:16px 24px;">
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
                 <td width="50" valign="middle" style="padding-right:12px;"><img src="https://drmc.ontel.co/ontel-mark.png" width="36" height="36" alt="Ontel" style="display:block;width:36px;height:36px;border:0;"></td>
-                <td valign="middle"><h2 style="margin:0;">Timer Activity Entries - {date_str}{_RESEND_UPDATED_BADGE}</h2></td>
+                <td valign="middle"><h2 style="margin:0;">Timer Activity Entries - {date_str}{header_suffix}{_RESEND_UPDATED_BADGE}</h2></td>
                 </tr></table>
                 <p style="margin:4px 0 0;font-size:13px;opacity:0.9;">Your day was updated since the original email. Latest view below.</p>
             </div>
             <div style="padding:24px;">
                 <p>Hi {_first_name(user_email)},</p>
+                {coverage_html}
                 {callout_html}
                 {running_notice}
                 <p>Here are your <strong>{n}</strong> timer {'entry' if n == 1 else 'entries'}
@@ -3511,7 +3597,8 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
         </html>
         """
 
-        subject = f"Re: Timer Activity Entries - {date_str}"
+        subject = (f"Re: {email_subject(send_date, window)}" if is_window
+                   else f"Re: Timer Activity Entries - {date_str}")
         msg = MIMEMultipart()
         msg["To"] = recipient
         msg["From"] = masked_sender(service, "Ontel Timer Review")
@@ -3533,13 +3620,13 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
             # a proper JSONB array, not a JSONB string containing JSON.
             current_ids = sorted(_collect_entry_ids(entries))
             retry_db(
-                lambda ue=user_email, sd=send_date, ids=current_ids: db.execute(
+                lambda ue=user_email, sd=send_date, w=window, ids=current_ids: db.execute(
                     f"""UPDATE {SCHEMA_TIMER}.daily_notifications
                         SET last_sent_at = NOW(),
                             last_sent_entry_ids = $1::jsonb
-                        WHERE user_email = $2 AND send_date = $3
+                        WHERE user_email = $2 AND send_date = $3 AND send_window = $4
                     """,
-                    ids, ue, sd,
+                    ids, ue, sd, w,
                 ),
                 description=f"update last_sent for {user_email} on {send_date}",
             )
@@ -3574,17 +3661,20 @@ def main():
                         help="How many days back to check for resend candidates (default 7)")
     parser.add_argument("--test", action="store_true", help="Test mode: send all emails to jamil only")
     parser.add_argument("--date", type=str,
-                        help="Target SHIFT DAY YYYY-MM-DD, i.e. the date the 18:00 PHT shift "
-                             "started (default: the last closed shift day). For backfill sends.")
+                        help="Backfill: Eastern date YYYY-MM-DD of the window to send. "
+                             "Requires --window. Default: the last closed window.")
+    parser.add_argument("--window", choices=list(WINDOW_PARTS),
+                        help="Backfill: which window of --date to send "
+                             "(first = 12 AM to 6 PM ET, second = 6 PM to 12 AM ET).")
     args = parser.parse_args()
 
     if not any([args.send, args.apply, args.remind, args.resend]):
         parser.error("At least one of --send, --apply, --remind, --resend is required")
+    if (args.date is None) != (args.window is None):
+        parser.error("--date and --window must be given together")
 
-    target_date = None
-    if args.date:
-        from datetime import date as date_type
-        target_date = date_type.fromisoformat(args.date)
+    target_date = date.fromisoformat(args.date) if args.date else None
+    part = args.window
 
     # Check OAuth token health before doing anything
     check_token_health()
@@ -3596,7 +3686,7 @@ def main():
 
         if args.send:
             logger.info("=== Running --send ===")
-            run_send(test_mode=args.test, target_date=target_date)
+            run_send(test_mode=args.test, target_date=target_date, part=part)
 
         if args.remind:
             logger.info("=== Running --remind ===")

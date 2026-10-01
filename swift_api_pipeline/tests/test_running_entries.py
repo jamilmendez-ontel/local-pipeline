@@ -159,7 +159,7 @@ def test_resend_trigger_ignores_running_timer_and_fires_on_completion(monkeypatc
         x["is_edited"] = False
 
     rows = [{
-        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23),
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "send_window": "first",
         "thread_id": "thread-1", "message_id": "<m@x>", "last_sent_at": None,
         "last_sent_entry_ids": _collect_entry_ids([settled_a]),  # settled-only snapshot
     }]
@@ -174,7 +174,7 @@ def test_resend_trigger_ignores_running_timer_and_fires_on_completion(monkeypatc
     monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
 
     current = [settled_a, running_b]
-    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: list(current))
+    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d, w: list(current))
     assert tcr.find_days_needing_resend(None) == [], "a still-running timer must not trigger a resend"
     assert writes == [], "no bootstrap write when a snapshot already exists"
 
@@ -193,7 +193,7 @@ def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
     settled_a = _e(); settled_a["is_edited"] = False
     running_b = _e(start=T0 + timedelta(hours=3), end=None); running_b["is_edited"] = False
     rows = [{
-        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23),
+        "user_email": settled_a["user_email"], "send_date": date(2026, 8, 23), "send_window": "first",
         "thread_id": "thread-1", "message_id": None, "last_sent_at": None,
         "last_sent_entry_ids": None,  # never snapshotted -> bootstrap path
     }]
@@ -206,7 +206,7 @@ def test_resend_bootstrap_snapshot_is_settled_only(monkeypatch):
         return None
 
     monkeypatch.setattr(tcr, "retry_db", fake_retry_db)
-    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d: [settled_a, running_b])
+    monkeypatch.setattr(tcr, "_fetch_current_day_entries", lambda db, u, d, w: [settled_a, running_b])
     assert tcr.find_days_needing_resend(None) == []
     assert "bootstrap" in captured.get("description", "")
 
@@ -302,5 +302,5 @@ def test_daily_send_survives_task_lookup_failure(monkeypatch):
     from datetime import date
     entries = [_e(), _e(start=T0 + timedelta(hours=3), end=None),
                _e(user="other@ontel.co"), _e(user="other@ontel.co", start=T0 + timedelta(hours=1), end=None)]
-    tcr.send_daily_emails(None, entries, test_mode=True, target_date=date(2026, 8, 23))
+    tcr.send_daily_emails(None, entries, test_mode=True, target_date=date(2026, 8, 23), part="first")
     assert len(sent) == 2, "both techs' emails still go out when the deep-link lookup fails"

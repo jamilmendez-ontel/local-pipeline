@@ -1,5 +1,7 @@
 # Timer Entries email on a 06:00 PHT shift day
 
+> Superseded 2026-10-01 by `2026-10-01-timer-email-two-windows-design.md` (two windows per Eastern day). Kept for the history of the 2026-09-28 cutover.
+
 **Date:** 2026-09-23
 **Status:** approved by Jamil 2026-09-23 (design in chat), implementation targeted for Monday 2026-09-28
 **Scope:** `pipeline-timer-emails.yml` run only (the member-facing Timer Entries email and its `--remind` / `--resend` companions). The 13:15 PHT data + Excel exports run (`pipeline-timer.yml`) is untouched. DRMC, variance, exports and MVs are untouched.

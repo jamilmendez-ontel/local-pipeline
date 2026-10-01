@@ -1,32 +1,45 @@
 name: "Pipeline: Timer Emails"
 
-# Run 2 of 2 for timer data (~06:30 PHT, just after the members' 06:00 PHT
-# shift end). Since 2026-09-28 the Timer Entries email is bucketed on a SHIFT
-# DAY, 06:00 PHT to 06:00 PHT, labelled with the date the shift started, and
-# is sent as soon as that window closes. (Before that it ran ~6:00 AM ET /
-# 18:00 PHT and covered the ET calendar date, which is noon PHT to noon PHT
-# and disagreed with the shift on the 06:00-12:00 PHT overtime band, ~10% of
-# entries.) It re-extracts the month-to-date THROUGH TODAY ET first, then runs the
-# member-facing steps: duplicate reminders, the daily Timer Entries email and
-# the threaded re-sends. Stops that reach Swift after the send are delivered
-# in-thread by the next morning's --resend. No Excel exports here: those stay
-# on pipeline-timer.yml (~1:15 AM ET / 13:15 PHT) because Sheena's report is
-# built from the 13:15 PHT clean export.
+# Run 2 of 2 for timer data. Fired TWICE a day by Apps Script on the Eastern
+# clock since 2026-10-01: ~18:30 ET (first window, 12 AM to 6 PM ET of today)
+# and ~09:00 ET (second window, 6 PM to 12 AM ET of the previous Eastern
+# date). The Timer Entries email is bucketed on those two windows and
+# labelled with the Eastern date, the same day Swift and DRMC use; `--send`
+# picks the last CLOSED window by the clock. (2026-09-28 to 2026-09-30 it was
+# one 06:00 PHT shift-day email at 06:30 PHT; before that the ET calendar
+# date at ~6 AM ET.) It re-extracts the month-to-date THROUGH TODAY ET first,
+# then runs the member-facing steps: duplicate reminders, the Timer Entries
+# email and the threaded re-sends. Stops that reach Swift after the send are
+# delivered in-thread by a later run's --resend. No Excel exports here: those
+# stay on pipeline-timer.yml (~1:15 AM ET / 13:15 PHT) because Sheena's
+# report is built from the 13:15 PHT clean export.
 #
-# Dispatched by scripts/pipeline_trigger.gs -> triggerTimerEmails() via the
-# `pipeline-timer-emails` repository_dispatch type. Deliberately a DIFFERENT
-# event type from `pipeline-timer` so the two runs can never be fired by the
-# same trigger.
+# Dispatched by scripts/pipeline_trigger.gs -> triggerTimerEmails() and
+# triggerTimerEmailsSecond(), both via the `pipeline-timer-emails`
+# repository_dispatch type. Deliberately a DIFFERENT event type from
+# `pipeline-timer` so the two runs can never be fired by the same trigger.
 #
 # NOTE: `--send` upserts app_timer.daily_notifications ON CONFLICT DO UPDATE
-# and will re-send the day if run twice. Do not add a retry loop around the
-# email steps, and do not workflow_dispatch this after a successful run on
-# the same day unless a second send is intended.
+# and will re-send the window if run twice. Do not add a retry loop around
+# the email steps, and do not workflow_dispatch this after a successful run
+# for the same window unless a second send is intended. Backfills name the
+# window explicitly through the `date` + `window` inputs.
 
 on:
   repository_dispatch:
     types: [pipeline-timer-emails]
   workflow_dispatch:
+    inputs:
+      date:
+        description: "Backfill only: Eastern date (YYYY-MM-DD) of the window to send. Leave empty for the last closed window."
+        required: false
+        default: ""
+      window:
+        description: "Backfill only: which window of that date (first = 12 AM to 6 PM ET, second = 6 PM to 12 AM ET). Required when date is set."
+        required: false
+        type: choice
+        options: ["", "first", "second"]
+        default: ""
 
 concurrency:
   # Same group as pipeline-timer.yml and timer-correction-apply.yml: this run
@@ -140,9 +153,18 @@ jobs:
       - name: Timer corrections - send daily entries
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
-        # Target = the shift day that just closed at 06:00 PHT (the shift
-        # that started 18:00 PHT yesterday).
-        run: python -u timer_correction_review.py --send
+        # Target = the last closed window: (today, first) at the 18:30 ET run,
+        # (yesterday, second) at the 09:00 ET run. A manual run may name a
+        # window explicitly for backfills.
+        env:
+          BF_DATE: ${{ github.event.inputs.date }}
+          BF_WINDOW: ${{ github.event.inputs.window }}
+        run: |
+          if [ -n "$BF_DATE" ]; then
+            python -u timer_correction_review.py --send --date "$BF_DATE" --window "$BF_WINDOW"
+          else
+            python -u timer_correction_review.py --send
+          fi
 
       - name: Timer corrections - resend changed days
         working-directory: ${{ env.PIPELINE_DIR }}
