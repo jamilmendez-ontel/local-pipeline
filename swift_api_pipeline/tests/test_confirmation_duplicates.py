@@ -51,7 +51,7 @@ def _row(**over):
 
 
 def _classify(rows):
-    return _fetch_classified_day_entries(FakeDB(rows), "member@x.co", START.date())
+    return _fetch_classified_day_entries(FakeDB(rows), "member@x.co", START.date(), "first")
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +137,9 @@ def test_group_note_appears_only_when_set_asides_exist():
     ])
     without = _classify([_row()])
     body_with = _build_correction_confirmation_html(
-        "member@x.co", START.date(), with_dup, 1, 0, 1)
+        "member@x.co", START.date(), with_dup, "first", 1, 0, 1)
     body_without = _build_correction_confirmation_html(
-        "member@x.co", START.date(), without, 1, 0, 1)
+        "member@x.co", START.date(), without, "first", 1, 0, 1)
     assert "duplicate group" in body_with
     assert "duplicate group" not in body_without
 
@@ -154,6 +154,6 @@ def test_note_for_a_fully_cleared_group_never_mentions_a_counted_copy():
              end_time=END_C, duration_min=664.20),
     ])
     body = _build_correction_confirmation_html(
-        "member@x.co", START.date(), classified, 1, 0, 1)
+        "member@x.co", START.date(), classified, "first", 1, 0, 1)
     assert "cleared" in body
     assert "adds to your hours" not in body
