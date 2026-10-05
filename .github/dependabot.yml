@@ -7,6 +7,9 @@ updates:
     directories:
       - "/"
       - "/swift_api_pipeline"
+    # The root file only sets minimums (>=). Without this, Dependabot opens a PR
+    # per package just to raise a minimum that production already exceeds.
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: "weekly"
       day: "monday"
