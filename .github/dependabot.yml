@@ -1,0 +1,35 @@
+# Keeps dependency security fixes arriving as small PRs instead of piling up
+# as alerts. Security updates open as soon as an advisory lands; the weekly
+# run groups routine patch/minor bumps into one PR per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directories:
+      - "/"
+      - "/swift_api_pipeline"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Manila"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Major upgrades are planned work, not automatic PRs.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Manila"
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]
