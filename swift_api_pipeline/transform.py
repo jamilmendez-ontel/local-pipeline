@@ -286,6 +286,9 @@ USER_PRIORITY_COLUMNS = [
     ("project", "r.data->>'Project'"),
     ("asset_id", "r.data->>'Asset Id'"),
     ("asset_name", "r.data->>'Asset Name'"),
+    # Swift web link to the task; the report has no link field, so derive it
+    # from task_did (same URL the DRMC / Timer emails build). Migration 277.
+    ("link_path", "'https://swiftprojects.io/#/app/assets/tasks/' || (r.data->>'Task DID') || '/requirements'"),
 ]
 _PRIO_DEDUPE_KEY = "COALESCE(r.data->>'Task DID', r.id::text)"
 

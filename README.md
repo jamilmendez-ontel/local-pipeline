@@ -425,6 +425,11 @@ The confirmation email still renders legacy `auto_resolved_sibling` rows as
 and unchanged: `auto_resolve_stale` (7-day-old open groups keep the longest copy) and
 `_reconcile_resolved_group_stragglers` (late snapshots on a group resolved by Edit).
 
+`stg_user_priorities.link_path` (migration 277, 2026-10-08) is the Swift web link to the
+task, `https://swiftprojects.io/#/app/assets/tasks/<task_did>/requirements`, derived from
+`task_did` by `transform.py` on every merge (the report itself has no link field). Exposed as
+the last column of `analytics.v_user_priorities` and `analytics.v_user_priorities_effective`.
+
 See `migrations/` for the full history. Run `git log --oneline
 migrations/` for recent changes. Latest: 274 approved-by Swift name
 (`analytics.v_daily_report_approvals.approved_by` shows the approver's own report name,
