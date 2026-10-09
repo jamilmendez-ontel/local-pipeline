@@ -155,8 +155,33 @@ def transform_organizations(db, run_id: str):
         rows
     )
 
+    mark_missing(db, "stg_organizations", "org_did", run_id)
     print(f"[{datetime.now():%H:%M:%S}] Transformed {len(rows)} organizations")
     return len(rows)
+
+
+# The staging tables upsert and never delete, so a row Swift stopped returning
+# kept looking live (migration 278, 2026-10-09; the GC side had removed 12 orgs
+# and nobody could tell). missing_since: NULL while the pull returns the row,
+# the first run that did not otherwise. Called only after a non-empty upsert,
+# so an empty extract never marks the whole table missing. The '-MANUAL_'
+# placeholder orgs were never in Swift and are left alone.
+MANUAL_ORG_PREFIX = "-MANUAL_"
+
+
+def mark_missing(db, table: str, key: str, run_id: str) -> None:
+    exclude = f" AND {key} NOT LIKE $2" if key == "org_did" else ""
+    args = (run_id, MANUAL_ORG_PREFIX + "%") if key == "org_did" else (run_id,)
+    db.execute(
+        f'UPDATE {SCHEMA_STAGING}.{table} SET missing_since = now() '
+        f'WHERE run_id IS DISTINCT FROM $1 AND missing_since IS NULL{exclude}',
+        *args
+    )
+    db.execute(
+        f'UPDATE {SCHEMA_STAGING}.{table} SET missing_since = NULL '
+        f'WHERE run_id = $1 AND missing_since IS NOT NULL',
+        run_id
+    )
 
 
 def transform_projects(db, run_id: str):
@@ -238,6 +263,7 @@ def transform_projects(db, run_id: str):
         rows
     )
 
+    mark_missing(db, "stg_projects", "project_did", run_id)
     print(f"[{datetime.now():%H:%M:%S}] Total projects transformed: {len(rows):,}")
     return len(rows)
 

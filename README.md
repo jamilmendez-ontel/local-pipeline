@@ -430,6 +430,19 @@ task, `https://swiftprojects.io/#/app/assets/tasks/<task_did>/requirements`, der
 `task_did` by `transform.py` on every merge (the report itself has no link field). Exposed as
 the last column of `analytics.v_user_priorities` and `analytics.v_user_priorities_effective`.
 
+Gone from Swift (migration 278, 2026-10-09): `stg_organizations.missing_since` and
+`stg_projects.missing_since` are NULL while the nightly `orgs_projects_extract` pull returns the
+row and otherwise hold the start of the first successful pull that did not. The tables upsert and
+never delete, so until 278 a vanished org looked exactly like a quiet one (the GC side removed
+12 orgs and 9 projects on 2026-10-08 and nothing on our side could tell). `transform.py`
+`mark_missing` stamps and clears the column after every non-empty upsert (an empty extract
+never marks the whole table; `-MANUAL_` placeholder orgs are never marked). The GC tracker
+serving views `analytics.v_gc_tracker_tasks`, `v_gc_tracker_requirements` and
+`v_gc_tracker_task_requirements` gain `in_swift` + `missing_since` from the hourly job's
+dormant marker (`pipeline.content_watermarks` `gc_tracker_gone/<project>`, ontel-data-platform
+#28) and hide projects missing for more than 30 days; the `*_all` variants keep every row.
+Rows are never deleted (Jamil, 2026-10-09).
+
 See `migrations/` for the full history. Run `git log --oneline
 migrations/` for recent changes. Latest: 274 approved-by Swift name
 (`analytics.v_daily_report_approvals.approved_by` shows the approver's own report name,
