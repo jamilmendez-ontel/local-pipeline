@@ -29,6 +29,15 @@
 -- 3.7 s cold, parallel seq scan of stg_gc_tracker_tasks + hash on the allowlist;
 -- the added hash on the (tiny) marker set does not change the shape.
 --
+-- APPLIED + VERIFIED 2026-10-09 02:40 AM ET against voqfjfngdpcvevbkikud via the Supabase MCP
+-- (execute_sql; apply_migration's confirm step expired twice, and the first attempt was
+-- rolled back cleanly on a text[] cast error now fixed below). Post-apply: 13 orgs and 18
+-- projects carry missing_since (12 orgs from the 2026-10-08 pull, VZW/GA-AL - Ground Scope
+-- from 10-07; oldest project 2026-03-05), 3 *_all views, 5 schema_metadata rows,
+-- v_gc_tracker_tasks = v_gc_tracker_tasks_all = 805,188 rows (nothing older than 30 days),
+-- 1 dormant marker (Synergy project, 0 task rows, so no view row shows in_swift = false yet).
+-- Shape check before apply: the _all body with the marker hash = 3.4 s cold vs 3.7 s baseline.
+--
 -- ROLLBACK:
 --   DROP VIEW IF EXISTS analytics.v_gc_tracker_task_requirements;
 --   DROP VIEW IF EXISTS analytics.v_gc_tracker_requirements;
@@ -283,7 +292,8 @@ UPDATE agent.schema_metadata
    AND table_name IN ('v_gc_tracker_tasks', 'v_gc_tracker_requirements', 'v_gc_tracker_task_requirements');
 
 INSERT INTO agent.schema_metadata (schema_name, table_name, column_name, description, business_context, data_notes, related_tables)
-SELECT v.schema_name, v.table_name, v.column_name, v.description, v.business_context, v.data_notes, v.related_tables
+SELECT v.schema_name, v.table_name, v.column_name, v.description, v.business_context, v.data_notes,
+       string_to_array(v.related_tables, ', ')::text[]
 FROM (VALUES
     ('analytics', 'v_gc_tracker_tasks_all', NULL,
      'v_gc_tracker_tasks without the 30-day hide: every GC tracker task, including projects removed from Swift.',
