@@ -25,8 +25,13 @@
 -- 10,073 invoices (incremental feed, not a daily snapshot), so the GROUP BY is a
 -- single small hash aggregate. Coverage on the latest AR snapshot: 1,632 / 1,673
 -- open invoices match by num (identical count when also matching customer).
--- GRANTs mirror analytics.v_ar_dates (anon + authenticated SELECT), which the
--- dashboard already reads with the same key.
+-- GRANTs: service_role only. The dashboard reads with SUPABASE_SERVICE_KEY
+-- (Code.gs supabaseGet_), and anon/authenticated have no USAGE on the analytics
+-- schema (DATABASE_ARCHITECTURE.md), so these views carry no anon grant. (First
+-- apply copied v_ar_dates' anon + authenticated SELECT; the pre-merge review
+-- flagged it as per-customer AR data, REVOKEd 2026-10-12 before merge; inert
+-- while the schema USAGE revoke stands. 28 older analytics views still carry
+-- the same inert anon SELECT; not touched here.)
 --
 -- APPLIED + VERIFIED 2026-10-12 ET against voqfjfngdpcvevbkikud via the Supabase MCP
 -- (execute_sql, single transaction). Post-apply: 10,073 view rows; 1,632 of the
@@ -64,7 +69,7 @@ GROUP BY num;
 COMMENT ON VIEW analytics.v_ar_invoice_activity IS
   'One row per QuickBooks invoice number: its line memo(s) from stg_sales_detail joined with " | ". The Daily Finance dashboard attaches activity to stg_ar_aging invoice rows by num. Invoices older than the sales-detail feed (2025-09-23) have no row.';
 
-GRANT SELECT ON analytics.v_ar_invoice_activity TO anon, authenticated, service_role;
+GRANT SELECT ON analytics.v_ar_invoice_activity TO service_role;
 
 INSERT INTO agent.schema_metadata
     (schema_name, table_name, column_name, description, business_context, example_values, data_notes, related_tables)
@@ -99,7 +104,7 @@ LEFT JOIN analytics.v_ar_invoice_activity v ON v.num = a.num;
 COMMENT ON VIEW analytics.v_ar_aging_invoices IS
   'stg_ar_aging rows plus the invoice activity text (v_ar_invoice_activity, joined on num). Read by the Daily Finance dashboard for the AR Aging, Pending PO and drill-down invoice tables; filter by as_of_date + transaction_type exactly as on the base table.';
 
-GRANT SELECT ON analytics.v_ar_aging_invoices TO anon, authenticated, service_role;
+GRANT SELECT ON analytics.v_ar_aging_invoices TO service_role;
 
 INSERT INTO agent.schema_metadata
     (schema_name, table_name, column_name, description, business_context, example_values, data_notes, related_tables)
