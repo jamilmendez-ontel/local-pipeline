@@ -6,6 +6,7 @@ Each extractor inherits from BaseExtractor and only implements extraction-specif
 """
 
 import json
+import time
 import uuid
 import requests
 from threading import Lock
@@ -18,6 +19,10 @@ from config import (
 )
 
 logger = get_logger("base")
+
+AUTH_TIMEOUT_SECONDS = 60
+AUTH_BACKOFF_SECONDS = (15, 30, 60, 120)  # ~4 min total before giving up
+AUTH_MAX_ATTEMPTS = len(AUTH_BACKOFF_SECONDS) + 1
 
 
 class BaseExtractor:
@@ -48,15 +53,34 @@ class BaseExtractor:
                 "scope": "openid"
             }
 
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload
-            )
-            response.raise_for_status()
-            self.token = response.json()["idToken"]
-            logger.info("Authenticated successfully")
-            return self.token
+            # Swift's auth endpoint has brief 500 blips (2026-10-14: two 500s ten
+            # minutes apart killed Daily Reports and the nightly Asset Tasks run,
+            # every call around them succeeded). Retry 5xx / 429 / network errors
+            # with backoff; a 4xx (bad credentials) fails fast.
+            for attempt in range(1, AUTH_MAX_ATTEMPTS + 1):
+                try:
+                    response = requests.post(
+                        url,
+                        headers={"Content-Type": "application/json"},
+                        json=payload,
+                        timeout=AUTH_TIMEOUT_SECONDS,
+                    )
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    if attempt == AUTH_MAX_ATTEMPTS:
+                        raise
+                    reason = type(e).__name__
+                else:
+                    retryable = response.status_code >= 500 or response.status_code == 429
+                    if not retryable or attempt == AUTH_MAX_ATTEMPTS:
+                        response.raise_for_status()
+                        self.token = response.json()["idToken"]
+                        logger.info("Authenticated successfully")
+                        return self.token
+                    reason = f"HTTP {response.status_code}"
+                wait = AUTH_BACKOFF_SECONDS[attempt - 1]
+                logger.warning(f"Swift auth attempt {attempt}/{AUTH_MAX_ATTEMPTS} failed "
+                               f"({reason}); retrying in {wait}s")
+                time.sleep(wait)
 
     def reauthenticate(self) -> str:
         """Force re-authentication (e.g., after a 401)."""

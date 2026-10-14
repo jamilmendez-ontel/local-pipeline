@@ -196,7 +196,7 @@ import importlib
 def _patch_notify(monkeypatch):
     main = importlib.import_module("main")
     sent = {}
-    monkeypatch.setattr(main, "snapshot_row_counts", lambda tables=None: {})
+    monkeypatch.setattr(main, "snapshot_row_counts", lambda tables=None, **kwargs: {})
     def fake_send(**kwargs):
         sent["overall_status"] = kwargs.get("overall_status")
     monkeypatch.setattr(main, "send_pipeline_email", fake_send)
