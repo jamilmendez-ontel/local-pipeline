@@ -884,26 +884,13 @@ def _build_entries_html(entries: list[dict]) -> str:
 
     rows_html = []
     for i, entry in enumerate(entries):
-        entry_id = _make_entry_id(
-            entry["project_did"], entry["user_email"], entry["start_time"],
-            entry.get("site_name"), entry.get("site_id"), entry.get("task"),
-            entry.get("end_time"), entry.get("duration_min"),
-        )
-        project_raw = entry.get("project") or "(no project)"
-        site_raw = entry.get("site_name") or "(no site)"
-        task_raw = entry.get("task") or "(no task)"
-        project = _escape_html(project_raw)
-        site = _escape_html(site_raw)
-        task = _escape_html(task_raw)
+        project = _escape_html(entry.get("project") or "(no project)")
+        site = _escape_html(entry.get("site_name") or "(no site)")
+        task = _escape_html(entry.get("task") or "(no task)")
         date = _escape_html(_fmt_date(entry["start_time"]))
         start = _escape_html(_fmt_time_short(entry["start_time"]))
         end = _escape_html(_fmt_time_short(entry.get("end_time")))
         duration = _escape_html(_fmt_duration(entry.get("duration_min")))
-
-        # Form pre-fill uses raw values (URL-encoded inside the form helpers).
-        details = f"{project_raw} | {site_raw} | {task_raw} | {_fmt_date(entry['start_time'])} | {_fmt_duration(entry.get('duration_min'))}"
-        correct_link = _correct_form_url(entry_id, details)
-        remove_link = _remove_form_url(entry_id, details)
 
         bg = row_color.get(i, "")
         row_style = f"background:{bg};" if bg else ""
@@ -920,17 +907,38 @@ def _build_entries_html(entries: list[dict]) -> str:
                 <td style="padding:6px 10px;border:1px solid #ddd;">{start}</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;">{end}</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;font-weight:bold;">{duration}{dup_badge}</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:center;white-space:nowrap;">
+                {_action_cell_html(entry)}
+            </tr>""")
+
+    return "\n".join(rows_html)
+
+
+def _action_cell_html(entry: dict) -> str:
+    """Action <td> with the prefilled Edit / Remove form links for one entry.
+
+    Shared by the daily email and the correction confirmation so a row that
+    first appears in either one is always actionable from it.
+    """
+    entry_id = _make_entry_id(
+        entry["project_did"], entry["user_email"], entry["start_time"],
+        entry.get("site_name"), entry.get("site_id"), entry.get("task"),
+        entry.get("end_time"), entry.get("duration_min"),
+    )
+    # Form pre-fill uses raw values (URL-encoded inside the form helpers).
+    details = (f"{entry.get('project') or '(no project)'} | "
+               f"{entry.get('site_name') or '(no site)'} | "
+               f"{entry.get('task') or '(no task)'} | "
+               f"{_fmt_date(entry['start_time'])} | {_fmt_duration(entry.get('duration_min'))}")
+    correct_link = _correct_form_url(entry_id, details)
+    remove_link = _remove_form_url(entry_id, details)
+    return f"""<td style="padding:6px 10px;border:1px solid #ddd;text-align:center;white-space:nowrap;">
                     <a href="{correct_link}" style="display:inline-block;padding:5px 12px;
                        background:#1565c0;color:white;text-decoration:none;
                        border-radius:4px;font-size:11px;font-weight:bold;">Edit</a>
                     <a href="{remove_link}" style="display:inline-block;padding:5px 12px;
                        background:#c62828;color:white;text-decoration:none;
                        border-radius:4px;font-size:11px;font-weight:bold;margin-left:4px;">Remove</a>
-                </td>
-            </tr>""")
-
-    return "\n".join(rows_html)
+                </td>"""
 
 
 # --------------------------------------------------------------------------
@@ -2654,12 +2662,21 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
     Each row shows its status badge and duration. Edited rows show
     'before -> after' with strikethrough + green after. Removed rows are
     shown struck through with muted background.
+
+    Unchanged rows carry Edit / Remove buttons: an entry can reach
+    this email without ever having been actionable (a runaway twin that was
+    running at the daily send and only re-entered clean after the member
+    edited its real session, abbie 2026-10-12).
     """
     cell = "padding:6px 10px;border:1px solid #ddd;"
     rows_html = []
 
     for e in classified_entries:
         status = e["status"]
+        # Unchanged rows only: an edited or added row's current values match
+        # no source row, so --apply could not resolve a click on it.
+        actionable = status == "unchanged" and e.get("end_time") is not None
+        action = _action_cell_html(e) if actionable else f'<td style="{cell}"></td>'
         project = e.get("project") or "(no project)"
         site = e.get("site_name") or "(no site)"
         task = e.get("task") or "(no task)"
@@ -2681,7 +2698,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{cell}">{start}</td>'
                 f'<td style="{cell}">{end}</td>'
                 f'<td style="{cell}">{_fmt_duration(e.get("original_duration_min"))}</td>'
-                f'</tr>'
+                f'{action}</tr>'
             )
         elif status == "removed":
             row_style = "background:#fdecea;color:#999;"
@@ -2695,7 +2712,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{strike_cell}">{start}</td>'
                 f'<td style="{strike_cell}">{end}</td>'
                 f'<td style="{strike_cell}">{_fmt_duration(e.get("original_duration_min"))}</td>'
-                f'</tr>'
+                f'{action}</tr>'
             )
         elif status == "added":
             row_style = "background:#e8f5e9;"
@@ -2708,7 +2725,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{cell}">{start}</td>'
                 f'<td style="{cell}">{end}</td>'
                 f'<td style="{cell}font-weight:bold;color:#2e7d32;">{_fmt_duration(e.get("original_duration_min"))}</td>'
-                f'</tr>'
+                f'{action}</tr>'
             )
         elif status == "edited":
             row_style = "background:#e3f2fd;"
@@ -2730,7 +2747,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{cell}">{start}</td>'
                 f'<td style="{cell}">{end}</td>'
                 f'{duration_cell}'
-                f'</tr>'
+                f'{action}</tr>'
             )
         else:  # unchanged
             rows_html.append(
@@ -2742,7 +2759,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
                 f'<td style="{cell}">{start}</td>'
                 f'<td style="{cell}">{end}</td>'
                 f'<td style="{cell}font-weight:bold;">{_fmt_duration(e.get("original_duration_min"))}</td>'
-                '</tr>'
+                f'{action}</tr>'
             )
     return "\n".join(rows_html)
 
@@ -2835,7 +2852,7 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
         footer_items.append("<li><strong>Removed</strong> rows are shown for context but no longer count toward your daily totals.</li>")
     if has_additions:
         footer_items.append("<li><strong>Added</strong> rows were created manually for entries missing from the timer (e.g., the timer wasn't started). They count toward your daily totals.</li>")
-    footer_items.append("<li>You can still make further corrections from the <strong>original daily entries email</strong> &mdash; the Edit/Remove links remain valid.</li>")
+    footer_items.append("<li>To make further corrections, use the Edit and Remove buttons in <strong>this</strong> email; they match your entries as they are now.</li>")
     footer_html = "\n".join(footer_items)
 
     return f"""
@@ -2872,6 +2889,7 @@ def _build_correction_confirmation_html(user_email: str, entry_date,
                         <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Start</th>
                         <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">End</th>
                         <th style="padding:8px 10px;border:1px solid #ddd;text-align:left;">Duration</th>
+                        <th style="padding:8px 10px;border:1px solid #ddd;text-align:center;">Action</th>
                     </tr>
                 </thead>
                 <tbody>

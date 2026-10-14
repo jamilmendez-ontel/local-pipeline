@@ -421,7 +421,12 @@ into one group; the previous collapse-to-one-survivor rule (2026-08-31, shortest
 snapshot + `survivor_fallback`) then set aside a real session as a "duplicate" of one it
 never overlapped (nath 2026-09-15; migration 267 restored 4 such sessions, ~4.7h).
 The confirmation email still renders legacy `auto_resolved_sibling` rows as
-`DUPLICATE - NOT COUNTED`; no new rows of that kind are written. Still system-driven
+`DUPLICATE - NOT COUNTED`; no new rows of that kind are written. Since 2026-10-14 its
+UNCHANGED settled rows carry the same Edit / Remove buttons as the daily email (a
+runaway twin that was running at the daily send can first appear here, abbie
+2026-10-12); edited, added, removed, set-aside and running rows get none, because an
+edited or added row's values match no source row and `--apply` could not resolve the
+click. Still system-driven
 and unchanged: `auto_resolve_stale` (7-day-old open groups keep the longest copy) and
 `_reconcile_resolved_group_stragglers` (late snapshots on a group resolved by Edit).
 
