@@ -19,15 +19,13 @@ on:
     # busy times), but drift is harmless for pilot evidence-gathering and
     # cron needs no editor-managed trigger. Move to pipeline_trigger.gs
     # when the pilot exits.
-    #   - Hourly incremental at :20 (skipping hour 05, see below).
-    #   - 05:20 UTC = 1:20 AM EDT: the post-nightly STRICT gate run. The
-    #     12:01 AM ET full reload is done by ~12:45, churn is realigned,
-    #     so a mismatch here is a real bug and fails the run. Any
-    #     scheduled run landing in UTC hour 05 is treated as the gate.
-    #     NOTE: on EST (winter) 05:20 UTC becomes 12:20 AM ET, colliding
-    #     with the reload window — shift before November.
-    - cron: '20 0-4,6-23 * * *'
-    - cron: '20 5 * * *'
+    #   - Hourly incremental at :20. Scheduled runs never audit.
+    #   - The post-nightly STRICT gate moved to ontel-data-platform on
+    #     2026-10-14 (swift_sync.audit_job, Cloud Scheduler
+    #     swift-sync-audit-daily, 02:00 America/New_York). Here it only armed
+    #     when a delayed cron landed in UTC 05-06: one night in eight
+    #     (2026-10-03..10), so the cutover streak could not count.
+    - cron: '20 * * * *'
   repository_dispatch:
     types: [pipeline-asset-tasks-inc]
   workflow_dispatch:
@@ -80,16 +78,6 @@ jobs:
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             MODE="incremental"
             PROJECTS=""
-            # The post-nightly gate. GHA's hour-05 cron has never actually
-            # fired (zero hour-05 runs in the first 10 days of history):
-            # under queue pressure GHA coalesces it into the hourly cron's
-            # delayed ~06:2x-06:45 firing, which then resolved hour 06 and
-            # ran non-strict — so the strict gate never armed. Treat any
-            # scheduled run in UTC hour 05 OR 06 as the gate; both sit in
-            # the quiet window after the ~04:50-05:05 UTC reload burst,
-            # and a rare double-gate night is harmless.
-            H="$(date -u +%H)"
-            if [ "$H" = "05" ] || [ "$H" = "06" ]; then STRICT="true"; fi
           else
             MODE="${{ github.event.client_payload.mode }}"
             PROJECTS="${{ github.event.client_payload.projects }}"
@@ -152,12 +140,13 @@ jobs:
       # Budget (part of the 2026-07-20 depletion). Daytime audits also
       # only ever showed v1-lag timing skew (the shadow is FRESHER than
       # stg_asset_tasks between reloads) — noise, not evidence; the
-      # cutover PASS streak is judged on the gate run alone. Scheduled
-      # runs therefore audit ONLY on the strict gate run; manual and
-      # repository dispatches still audit every time.
+      # cutover PASS streak is judged on the nightly gate alone, which now
+      # runs in ontel-data-platform (see the schedule comment). Scheduled
+      # runs therefore never audit; manual and repository dispatches still
+      # audit every time.
       - name: Drift audit vs current pipeline
         id: audit
-        if: github.event_name != 'schedule' || steps.resolve.outputs.strict_audit == 'true'
+        if: github.event_name != 'schedule'
         continue-on-error: ${{ steps.resolve.outputs.strict_audit != 'true' }}
         working-directory: ${{ env.PIPELINE_DIR }}
         env:
