@@ -512,6 +512,14 @@ soft-delete via `is_deleted` + tombstone-on-cancel; reconcile sweeps drift)
 - Auto-reconnect on: `ConnectionDoesNotExistError`, `InterfaceError`, `OSError`
 - Pool recreation retries 3x with 5s/10s backoff on startup
 
+### Swift Auth Retry (`base_extractor.py`)
+
+- `/api/auth/token` retried on 5xx, 429, `ConnectionError`, `Timeout`: 15/30/60/120s backoff, 5 attempts (~4 min), 60s request timeout
+- 4xx (bad credentials) fails on the first attempt
+- Circuit breaker: once a login has failed (retries exhausted or 4xx), every later `authenticate`/`reauthenticate` in the run raises at once, so workers never wait out the backoff one after another
+- `reauthenticate` after a 401 reuses a token minted in the last 30s, so N workers hitting the same expired token log in once
+- Added 2026-10-14 (#104) after two isolated Swift auth 500s failed Daily Reports and the nightly Asset Tasks run
+
 ---
 
 ## 14. Scheduling & Automation

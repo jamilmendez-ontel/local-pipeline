@@ -23,6 +23,7 @@ logger = get_logger("base")
 AUTH_TIMEOUT_SECONDS = 60
 AUTH_BACKOFF_SECONDS = (15, 30, 60, 120)  # ~4 min total before giving up
 AUTH_MAX_ATTEMPTS = len(AUTH_BACKOFF_SECONDS) + 1
+REAUTH_DEDUPE_SECONDS = 30
 
 
 class BaseExtractor:
@@ -32,6 +33,8 @@ class BaseExtractor:
         self.base_url = SWIFT_BASE_URL
         self.token: Optional[str] = None
         self.token_lock = Lock()
+        self._token_obtained_at = 0.0
+        self._auth_failure: Optional[BaseException] = None
         self.db = get_db()
         self.run_id = uuid.uuid4()
         self.total_loaded = 0
@@ -43,49 +46,72 @@ class BaseExtractor:
         with self.token_lock:
             if self.token:
                 return self.token
+            # Circuit breaker: once the login has failed after every retry, the
+            # other workers (and callers with their own retry loops around
+            # reauthenticate) fail at once instead of each waiting out the
+            # backoff again in turn behind this lock.
+            if self._auth_failure is not None:
+                raise RuntimeError(
+                    "Swift authentication already failed in this run"
+                ) from self._auth_failure
+            try:
+                self.token = self._login()
+            except Exception as e:
+                self._auth_failure = e
+                raise
+            self._token_obtained_at = time.monotonic()
+            logger.info("Authenticated successfully")
+            return self.token
 
-            url = f"{self.base_url}/api/auth/token"
-            payload = {
-                "grantType": "password",
-                "include": ["profile", "firebaseToken"],
-                "username": SWIFT_USERNAME,
-                "password": SWIFT_PASSWORD,
-                "scope": "openid"
-            }
+    def _login(self) -> str:
+        """POST /api/auth/token. Caller holds token_lock.
 
-            # Swift's auth endpoint has brief 500 blips (2026-10-14: two 500s ten
-            # minutes apart killed Daily Reports and the nightly Asset Tasks run,
-            # every call around them succeeded). Retry 5xx / 429 / network errors
-            # with backoff; a 4xx (bad credentials) fails fast.
-            for attempt in range(1, AUTH_MAX_ATTEMPTS + 1):
-                try:
-                    response = requests.post(
-                        url,
-                        headers={"Content-Type": "application/json"},
-                        json=payload,
-                        timeout=AUTH_TIMEOUT_SECONDS,
-                    )
-                except (requests.ConnectionError, requests.Timeout) as e:
-                    if attempt == AUTH_MAX_ATTEMPTS:
-                        raise
-                    reason = type(e).__name__
-                else:
-                    retryable = response.status_code >= 500 or response.status_code == 429
-                    if not retryable or attempt == AUTH_MAX_ATTEMPTS:
-                        response.raise_for_status()
-                        self.token = response.json()["idToken"]
-                        logger.info("Authenticated successfully")
-                        return self.token
-                    reason = f"HTTP {response.status_code}"
-                wait = AUTH_BACKOFF_SECONDS[attempt - 1]
-                logger.warning(f"Swift auth attempt {attempt}/{AUTH_MAX_ATTEMPTS} failed "
-                               f"({reason}); retrying in {wait}s")
-                time.sleep(wait)
+        Swift's auth endpoint has brief 500 blips (2026-10-14: two 500s ten
+        minutes apart killed Daily Reports and the nightly Asset Tasks run,
+        every call around them succeeded). Retry 5xx / 429 / network errors
+        with backoff; a 4xx (bad credentials) fails fast."""
+        url = f"{self.base_url}/api/auth/token"
+        payload = {
+            "grantType": "password",
+            "include": ["profile", "firebaseToken"],
+            "username": SWIFT_USERNAME,
+            "password": SWIFT_PASSWORD,
+            "scope": "openid"
+        }
+        for attempt in range(1, AUTH_MAX_ATTEMPTS + 1):
+            try:
+                response = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                    timeout=AUTH_TIMEOUT_SECONDS,
+                )
+            except (requests.ConnectionError, requests.Timeout) as e:
+                if attempt == AUTH_MAX_ATTEMPTS:
+                    raise
+                reason = type(e).__name__
+            else:
+                retryable = response.status_code >= 500 or response.status_code == 429
+                if not retryable or attempt == AUTH_MAX_ATTEMPTS:
+                    response.raise_for_status()
+                    return response.json()["idToken"]
+                reason = f"HTTP {response.status_code}"
+            wait = AUTH_BACKOFF_SECONDS[attempt - 1]
+            logger.warning(f"Swift auth attempt {attempt}/{AUTH_MAX_ATTEMPTS} failed "
+                           f"({reason}); retrying in {wait}s")
+            time.sleep(wait)
 
     def reauthenticate(self) -> str:
-        """Force re-authentication (e.g., after a 401)."""
+        """Force re-authentication (e.g., after a 401).
+
+        When N workers hit a 401 on the same expired token, only the first
+        re-logs in: a token minted in the last REAUTH_DEDUPE_SECONDS is
+        handed back as-is (Swift throttles repeated logins)."""
         with self.token_lock:
-            self.token = None
+            fresh = (self.token is not None and
+                     time.monotonic() - self._token_obtained_at < REAUTH_DEDUPE_SECONDS)
+            if not fresh:
+                self.token = None
         return self.authenticate()
 
     def get_auth_headers(self) -> dict:
