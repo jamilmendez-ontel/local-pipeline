@@ -327,7 +327,7 @@ published).
 | `main.py` | CLI entry point; orchestrates all pipelines |
 | `config.py` | Configuration loader (Swift creds, DB, logging) |
 | `db.py` | asyncpg pool with sync bridge (background event loop thread). Retries 3× on transient DNS blips. |
-| `base_extractor.py` | Shared base for extractors (Swift auth, pipeline_runs tracking) |
+| `base_extractor.py` | Shared base for extractors (Swift auth, pipeline_runs tracking). Swift login retries 5xx/429/network errors with 15/30/60/120s backoff (5 attempts, 60s timeout); a 4xx fails fast; after a failed login the rest of the run fails at once (circuit breaker), and a 401 herd re-logs in once (since 2026-10-14, #104). |
 | `transform.py` | All transformation logic (raw → staging), server-side SQL. Timer transform (since 2026-09-15, #73): after the month-bucket reload, (project, member) pairs present in an earlier run of the bucket but absent from this run are carried forward from the latest earlier raw run that had them (Swift drops deactivated/resigned members from its report; the reload used to erase their month-to-date). Carried members are named in a WARNING in the pipeline email's log; a whole project missing from the run (extraction failure) is carried forward too and turns the nightly email red (ABNORMAL ROW COUNT). The 2026 losses (17 member-months) were restored from raw by a one-off local script on 2026-09-15 (see WORK_LOG). |
 | `pipeline_notifier.py` | Email notifications via Gmail API |
 | `pipeline.py` | Orgs/projects and user_priorities extraction |
