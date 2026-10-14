@@ -2663,7 +2663,7 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
     'before -> after' with strikethrough + green after. Removed rows are
     shown struck through with muted background.
 
-    Rows that still count carry Edit / Remove buttons: an entry can reach
+    Unchanged rows carry Edit / Remove buttons: an entry can reach
     this email without ever having been actionable (a runaway twin that was
     running at the daily send and only re-entered clean after the member
     edited its real session, abbie 2026-10-12).
@@ -2673,8 +2673,9 @@ def _build_confirmation_entries_html(classified_entries: list[dict]) -> str:
 
     for e in classified_entries:
         status = e["status"]
-        actionable = (status in ("unchanged", "edited", "added")
-                      and e.get("end_time") is not None)
+        # Unchanged rows only: an edited or added row's current values match
+        # no source row, so --apply could not resolve a click on it.
+        actionable = status == "unchanged" and e.get("end_time") is not None
         action = _action_cell_html(e) if actionable else f'<td style="{cell}"></td>'
         project = e.get("project") or "(no project)"
         site = e.get("site_name") or "(no site)"

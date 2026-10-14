@@ -8,9 +8,9 @@ member-touched, so the runaway came back into clean and showed up for the
 first time in the "Timer Entries Updated" confirmation, a table with no
 Action column. The member could see it but had no way to remove it.
 
-Rule: rows that still count (unchanged / edited / added, settled) get the same
-Edit / Remove buttons as the daily email; removed rows, system set-asides and
-running timers get none.
+Rule: settled UNCHANGED rows get the same Edit / Remove buttons as the daily
+email. Edited and added rows match no source row, so --apply could not resolve
+a click on them; they, removed rows, set-asides and running timers get none.
 
 Run: python -m pytest tests/test_confirmation_buttons.py
 """
@@ -75,11 +75,15 @@ def test_unchanged_runaway_gets_edit_and_remove_buttons():
     assert eid in html
 
 
-def test_edited_row_gets_buttons():
-    entries = _classify([_row(end_time=END_REAL, duration_min=605,
-                              is_edited=True, corr_orig=566.12)])
+def test_edited_and_added_rows_get_no_buttons():
+    # Their current values match no source row, so --apply could not resolve
+    # a click on them (it would silently do nothing).
+    entries = _classify([
+        _row(end_time=END_REAL, duration_min=605, is_edited=True, corr_orig=566.12),
+        _row(end_time=END_REAL, duration_min=60, is_added=True),
+    ])
     html = _build_confirmation_entries_html(entries)
-    assert ">Edit</a>" in html and ">Remove</a>" in html
+    assert ">Edit</a>" not in html and ">Remove</a>" not in html
 
 
 def test_removed_and_set_aside_rows_get_no_buttons():
