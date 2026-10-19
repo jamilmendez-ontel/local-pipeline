@@ -4028,3 +4028,11 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
 **Gates**: 21 tests; premerge Lane A approved both PRs (fixes taken: one-pass timer count, NULL start_time guard); Dependabot 0; rendered in headless Edge at 900 px. Apps Script trigger installed by Jamil 10-19.
 
 **Open**: cleanup in Swift (delete the DELETE copies; merge the 2) goes through Jamil.
+
+## 2026-10-19 (5:55 AM - 6:25 AM ET) - Duplicate asset watcher: one workbook per CG (#111); mig 272 record merged (#81)
+
+**Per CG (PR #111, `659b0ea`)**: the list is shared with each team, so every alert now attaches one workbook for all CGs plus one per CG. `stg_assets.carrier_group` maps 1:1 to the teams (Verizon = CG1, AT&T/DISH = CG2, TMO/USCC = CG3, as in `reference.ref_approver_group`; unmapped = "No CG"). CG column on every sheet, a By CG table in the all-CG Summary, CG chips in the email masthead and the CG under each project. `--out-dir` replaces `--xlsx-out`. 24 tests; premerge Lane A approved (docstring nits fixed).
+
+**Live (10-19)**: CG1 Verizon 54 sites, 8 hiding 58 timers (28.5 h), 2 merges; CG2 AT&T/DISH 2 sites, 28 timers (16.4 h; KSL05814 alone 22 timers / 11.9 h); CG3 TMO/USCC 2 sites, 1 timer (0.2 h). Files: `out/duplicate-swift-assets-2026-10-19-CG*.xlsx` (git-ignored). Email sent (run 39234776159).
+
+**Open PR sweep (Jamil's go)**: #81 merged (`dffbdc1`): file record of `272_gc_tracker_task_requirements_view.sql`, applied 2026-09-25 and since rebuilt by mig 278; nothing re-applied. ontel-data-platform #17 (GC tracker handout docs) merged. #105 stays a draft until the asset-tasks cutover (Jamil's 2026-10-14 rule: v1 and its GHA shadow walker keep running).
