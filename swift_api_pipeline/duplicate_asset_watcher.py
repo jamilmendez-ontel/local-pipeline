@@ -29,7 +29,7 @@ failure notification covers watcher self-death).
 
 The email is HTML in the Ontel report style (masthead, KPI cards, sections in
 priority order: hides timer hours, needs a merge, clutter only) with a plain
-text fallback and the full workbook attached (Summary, Groups, Copies, Blank
+text fallback and workbooks attached: all CGs + one per CG (Summary, Groups, Copies, Blank
 timers). The watcher never writes anything. Recipient: Jamil only (his call,
 2026-10-19).
 
@@ -37,7 +37,7 @@ Usage:
     python duplicate_asset_watcher.py                       # check + email
     python duplicate_asset_watcher.py --dry-run             # check + print; no email
     python duplicate_asset_watcher.py --full                # full list regardless of the day
-    python duplicate_asset_watcher.py --dry-run --full --xlsx-out ../out/x.xlsx --html-out ../out/x.html
+    python duplicate_asset_watcher.py --dry-run --full --out-dir ../out --html-out ../out/x.html
 """
 
 import argparse
