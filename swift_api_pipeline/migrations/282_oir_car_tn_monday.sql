@@ -8,6 +8,9 @@
 -- report-automation main, or main's Monday run posts CAR-TN into the AT&T/TMO
 -- space.
 --
+-- APPLIED + VERIFIED 2026-10-19 05:25 UTC: friday = 4 VZW groups; monday = ATT 6,
+-- TMO 6, VZW 1 (CAR/TN).
+--
 -- Rollback: UPDATE ... SET cadence = 'friday' for the same row.
 
 BEGIN;
