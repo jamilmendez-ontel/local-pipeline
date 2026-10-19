@@ -194,3 +194,9 @@ def test_totals_round_once_from_raw_minutes_not_from_rounded_groups():
     assert [g["blank_hours"] for g in groups] == [2.0, 2.0, 2.0]
     assert summarize(groups)["hours"] == 6.1
     assert by_project(groups)["TECH-OPS: TS20"]["hours"] == 6.1
+
+
+def test_a_blank_timer_without_a_start_time_does_not_crash_the_last_start():
+    g = classify_group([_row(KEEP, touched=1), _row(DUP)])
+    attach_blank_timers([g], [_blank(), dict(_blank(), start_time=None)])
+    assert g["blank_count"] == 2 and g["last_blank"] == datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)

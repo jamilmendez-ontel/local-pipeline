@@ -161,7 +161,7 @@ def attach_blank_timers(groups, blank_rows):
         g["blank_count"] = len(g["blank_timers"])
         g["blank_minutes"] = sum(float(t["duration_min"] or 0) for t in g["blank_timers"])
         g["blank_hours"] = round(g["blank_minutes"] / 60.0, 1)
-        g["last_blank"] = max((t["start_time"] for t in g["blank_timers"]), default=None)
+        g["last_blank"] = max((t["start_time"] for t in g["blank_timers"] if t["start_time"]), default=None)
     return groups
 
 
