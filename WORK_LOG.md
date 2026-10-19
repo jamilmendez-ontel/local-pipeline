@@ -4012,3 +4012,19 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
       Mikaela Patolot and Roy's double-space name match neither key.
   (c) during the window before the pull, Roy's overlay name ("Roy Riotoc") and
       his Swift name ("Roy  Riotoc") are two keys in the approver lists.
+
+## 2026-10-19 (4:05 AM - 5:45 AM ET) - Duplicate Swift asset watcher (#108, #109)
+
+**Trigger**: GCP alert "timer: pipeline error" (06:46 UTC). The timer v2 nightly audit failed on TS20 `diff_asset_did=2` (also 10-18). Swift holds "WINCHESTER - 5G L-SUB6 - CARRIER ADD" twice (same path + name, created 39 s apart): `-P3sPO9nXQmaGuy_lLm8` has the approved tasks and both timers, `-P3sPXeBfpUeNzcPFNhW` is empty. `data_staging.backfill_asset_did()` matches by name + path and leaves `asset_did` NULL when two assets share both. Audit side fixed in ontel-data-platform #31 (`asset_null_v1` informational).
+
+**Built**:
+- `swift_api_pipeline/duplicate_asset_watcher.py` + `.github/workflows/duplicate-asset-watch.yml` + `scripts/pipeline_trigger.gs` `triggerDuplicateAssetWatch()` / `setupDuplicateAssetWatchTrigger()` (daily 9 AM ET via repository_dispatch; no cron backstop, the watcher is stateless). PR #108 `b375a01`.
+- Groups `stg_assets` by project + path + trimmed name with more than one asset id; per copy: tasks touched, v2 timers (one grouped pass over `stg_timer_activities_inc`, it has no asset_did index), creation time decoded from the Swift push id. Verdicts: delete_empty / all_empty (keep the oldest) / merge_needed. Unknown task counts never flagged DELETE.
+- Impact: v1 timers on the same project + path + name with NULL asset (count, hours, last start). HTML email in the Ontel report style (KPI cards, sections fix-first / merge / clutter, KEEP/DELETE/HAS WORK chips) with plain-text fallback and an xlsx attached (Summary, Groups, Copies, Blank timers). PR #109 `fbec4a9`.
+- Daily: groups created in the last 26 h; Mondays ET: full list. Recipient: Jamil only (his decision). Read-only.
+
+**Live (10-19)**: 58 groups (126 assets, TS13-TS20): 10 delete_empty, 46 all_empty, 2 merge_needed (TS18 STOVALL FARMS RCC ALTA, TS19 Vicksburg). 11 groups hide 87 v1 timers / 45.0 h (TS19 53 / 26.1 h); 66 copies to delete. Workbook: `out/duplicate-swift-assets-2026-10-19.xlsx` (local, git-ignored).
+
+**Gates**: 21 tests; premerge Lane A approved both PRs (fixes taken: one-pass timer count, NULL start_time guard); Dependabot 0; rendered in headless Edge at 900 px. Apps Script trigger installed by Jamil 10-19.
+
+**Open**: cleanup in Swift (delete the DELETE copies; merge the 2) goes through Jamil.
