@@ -88,3 +88,16 @@ def test_email_body_for_a_merge_case_says_so():
     g = classify_group([_row(KEEP, touched=5), _row(DUP, timers=1)])
     body = build_email_body([g], datetime(2026, 10, 19, 13, 0, tzinfo=timezone.utc), full=False, total=1)
     assert "MERGE" in body
+
+
+def test_a_copy_with_unknown_task_state_is_never_flagged_for_deletion():
+    g = classify_group([_row(KEEP, touched=13, timers=2), _row(DUP, touched=None)])
+    assert g["verdict"] == "merge_needed" and g["remove"] == []
+    body = build_email_body([g], datetime(2026, 10, 19, 13, 0, tzinfo=timezone.utc), full=True, total=1)
+    assert "task state unknown" in body and "None" not in body
+
+
+def test_timer_counts_are_aggregated_once_not_per_asset():
+    from duplicate_asset_watcher import DUPLICATES_SQL
+    assert "tc AS (" in DUPLICATES_SQL and "LEFT JOIN tc ON tc.asset_did = s.asset_did" in DUPLICATES_SQL
+    assert "(SELECT count(*)" not in DUPLICATES_SQL

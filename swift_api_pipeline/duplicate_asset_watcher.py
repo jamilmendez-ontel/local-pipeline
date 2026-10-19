@@ -57,15 +57,21 @@ WITH g AS (
     WHERE asset_name IS NOT NULL AND asset_did IS NOT NULL
     GROUP BY 1, 2, 3
     HAVING count(DISTINCT asset_did) > 1
+),
+tc AS (   -- one pass over the timers: stg_timer_activities_inc has no asset_did index
+    SELECT asset_did, count(*) AS timers
+    FROM data_staging.stg_timer_activities_inc
+    WHERE vanished_at IS NULL AND asset_did IS NOT NULL
+    GROUP BY 1
 )
 SELECT p.project_name, s.project_did, s.asset_id, g.aname AS asset_name, s.asset_did,
        s.task_count, s.task_count - s.tasks_pending AS touched,
-       (SELECT count(*) FROM data_staging.stg_timer_activities_inc t
-         WHERE t.asset_did = s.asset_did AND t.vanished_at IS NULL) AS timers
+       COALESCE(tc.timers, 0) AS timers
 FROM data_staging.stg_assets s
 JOIN g ON g.project_did = s.project_did
       AND g.asset_id IS NOT DISTINCT FROM s.asset_id
       AND g.aname = trim(s.asset_name)
+LEFT JOIN tc ON tc.asset_did = s.asset_did
 LEFT JOIN data_staging.stg_projects p ON p.project_did = s.project_did
 ORDER BY p.project_name, g.aname, s.asset_did
 """
@@ -98,7 +104,8 @@ def classify_group(assets):
     """assets: one group's rows. Returns the group dict with verdict/keep/remove."""
     assets = sorted(assets, key=_created_key)
     for a in assets:
-        a["active"] = (a["touched"] or 0) > 0 or (a["timers"] or 0) > 0
+        # unknown task state (NULL counts) counts as active: never flag it for deletion
+        a["active"] = a["touched"] is None or a["touched"] > 0 or (a["timers"] or 0) > 0
         a["created_at"] = push_created_at(a["asset_did"])
     active = [a for a in assets if a["active"]]
     if len(active) > 1:
@@ -158,8 +165,9 @@ def build_email_body(groups, now, full, total):
                 tag = "DELETE"
             created = (a["created_at"].astimezone(ET).strftime("%b %d %Y %I:%M:%S %p ET")
                        if a["created_at"] else "unknown")
-            lines.append(f"    {tag:<8} {a['asset_did']}  created {created}, "
-                         f"{a['touched']} tasks touched of {a['task_count']}, {a['timers']} timers")
+            tasks = (f"{a['touched']} tasks touched of {a['task_count']}" if a["touched"] is not None
+                     else "task state unknown")
+            lines.append(f"    {tag:<8} {a['asset_did']}  created {created}, {tasks}, {a['timers']} timers")
         lines.append("")
     lines.append("Sent by duplicate_asset_watcher.py (local-pipeline). It never changes Swift or the database.")
     return "\n".join(lines)
