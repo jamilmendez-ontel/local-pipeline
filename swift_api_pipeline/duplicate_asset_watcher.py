@@ -61,6 +61,25 @@ NEW_HOURS = 26          # daily trigger + up to 2 h lag, with no gap between run
 ET = ZoneInfo("America/New_York")
 PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
 
+# stg_assets.carrier_group -> the team (CG) that owns the site; same names as
+# reference.ref_approver_group / ref_employees.carrier_group
+CG_LABELS = {"Verizon": "CG1 - Verizon", "AT&T/DISH": "CG2 - AT&T/DISH", "TMO/USCC": "CG3 - TMO/USCC"}
+NO_CG = "No CG"
+
+
+def cg_label(carrier_group):
+    return CG_LABELS.get(carrier_group or "", NO_CG)
+
+
+def cg_short(label):
+    return label.split(" - ")[0] if label != NO_CG else NO_CG
+
+
+def cg_file_tag(label):
+    """'CG2 - AT&T/DISH' -> 'CG2-ATT-DISH' (safe in a file name)."""
+    return "-".join(w for w in label.replace("&", "").replace("/", " ").replace("-", " ").split())
+
+
 _GROUPS_CTE = """
 WITH g AS (
     SELECT project_did, asset_id, trim(asset_name) AS aname
@@ -78,7 +97,7 @@ tc AS (   -- one pass over the timers: stg_timer_activities_inc has no asset_did
     GROUP BY 1
 )
 SELECT p.project_name, s.project_did, s.asset_id, g.aname AS asset_name, s.asset_did,
-       s.task_count, s.task_count - s.tasks_pending AS touched,
+       s.carrier_group, s.task_count, s.task_count - s.tasks_pending AS touched,
        COALESCE(tc.timers, 0) AS timers
 FROM data_staging.stg_assets s
 JOIN g ON g.project_did = s.project_did
@@ -144,7 +163,8 @@ def classify_group(assets):
         verdict, keep = "all_empty", assets[0]["asset_did"]
     remove = [] if keep is None else [a["asset_did"] for a in assets if a["asset_did"] != keep]
     first = assets[0]
-    return {"project_name": first["project_name"], "project_did": first["project_did"],
+    cg = next((a.get("carrier_group") for a in assets if a.get("carrier_group")), None)
+    return {"project_name": first["project_name"], "project_did": first["project_did"], "cg": cg_label(cg),
             "asset_id": first["asset_id"], "asset_name": first["asset_name"], "assets": assets,
             "verdict": verdict, "keep": keep, "remove": remove,
             "blank_timers": [], "blank_count": 0, "blank_minutes": 0.0, "blank_hours": 0.0, "last_blank": None}
@@ -198,10 +218,19 @@ def summarize(groups):
             "copies_to_delete": sum(len(g["remove"]) for g in groups)}
 
 
+def split_by_cg(groups):
+    """{cg label: groups}, CG1..CG3 order, 'No CG' last; only CGs that have groups."""
+    out = {}
+    for g in groups:
+        out.setdefault(g["cg"], []).append(g)
+    order = list(CG_LABELS.values()) + [NO_CG]
+    return {k: out[k] for k in sorted(out, key=lambda k: (order.index(k) if k in order else len(order), k))}
+
+
 def by_project(groups):
     out = {}
     for g in groups:
-        p = out.setdefault(g["project_name"] or "(unknown project)",
+        p = out.setdefault((g["cg"], g["project_name"] or "(unknown project)"),
                            {"groups": 0, "affected": 0, "timers": 0, "minutes": 0.0, "merge": 0, "delete": 0})
         p["groups"] += 1
         p["affected"] += 1 if g["blank_count"] else 0
@@ -257,7 +286,8 @@ def build_email_body(groups, now, full, total):
         f"Duplicate Swift assets: {head}, {len(groups)} group(s) ({total} in Swift today). "
         f"Checked {et:%a %b %d, %Y %I:%M %p} ET.",
         f"{s['affected']} group(s) hide {s['timers']} timer(s), {s['hours']} h; {s['merge']} need a merge.",
-        "Full detail in the attached workbook.",
+        "By CG: " + "; ".join(f"{k} {len(v)}" for k, v in split_by_cg(groups).items()) + ".",
+        "Full detail in the attached workbooks (all CGs + one per CG).",
         "",
     ]
     for sec in (1, 2, 3):
@@ -331,6 +361,17 @@ def _copies_html(g):
     return "".join(parts)
 
 
+def _cg_chips(groups):
+    chips = []
+    for label, gs in split_by_cg(groups).items():
+        c = summarize(gs)
+        extra = f" &middot; {c['timers']} blank timers" if c["timers"] else ""
+        chips.append(f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:3px 10px;border-radius:999px;'
+                     f'border:1px solid #334155;font:600 11px {SANS};color:#e2e8f0">{_e(label)}: '
+                     f'{c["groups"]} site(s){extra}</span>')
+    return "".join(chips)
+
+
 def build_email_html(groups, now, full, total):
     et = now.astimezone(ET)
     s = summarize(groups)
@@ -346,6 +387,7 @@ def build_email_html(groups, now, full, total):
         f'<div style="font:700 24px {SANS};color:#fff;margin-top:6px">Duplicate Swift assets</div>'
         f'<div style="font:400 13px {SANS};color:#cbd5e1;margin-top:4px">{_e(mode)} &middot; checked '
         f'{_e(et.strftime("%a %b %d, %Y %I:%M %p"))} ET &middot; {total} group(s) in Swift today</div>'
+        f'<div style="margin-top:10px">{_cg_chips(groups)}</div>'
         f'</td></tr>')
     # KPIs
     out.append(f'<tr><td style="background:#fff;padding:14px 20px 4px">'
@@ -363,7 +405,7 @@ def build_email_html(groups, now, full, total):
         f'<b>What to do:</b> in Swift, delete each copy marked <b style="color:{BAD}">DELETE</b>. '
         f'The next timer load then fills the asset back in. Start with section 01. '
         f'Sites marked <b style="color:{WARN}">HAS WORK</b> need their work moved onto one copy first. '
-        f'Every timer, copy and id is in the attached workbook.</div></td></tr>')
+        f'Every timer, copy and id is in the attached workbooks: one for all CGs and one per CG to share with each team.</div></td></tr>')
     # sections
     for n, sec in enumerate((1, 2, 3), start=1):
         rows = [g for g in groups if section_of(g) == sec]
@@ -385,7 +427,9 @@ def build_email_html(groups, now, full, total):
                     f'<div style="font:400 10px {MONO};color:{MUTED};margin-top:2px;word-break:break-all">{_e(g["asset_id"])}</div>'
                     f'<div style="font:600 11px {SANS};color:{CYAN_DK};margin-top:3px">{_e(VERDICT_TEXT[g["verdict"]])}</div>')
             out.append('<tr>'
-                       + _td(f'<span style="white-space:nowrap">{_e(_short_project(g["project_name"]))}</span>', mono=True, bold=True, bg=bg)
+                       + _td(f'<span style="white-space:nowrap">{_e(_short_project(g["project_name"]))}</span>'
+                             f'<div style="font:700 10px {MONO};color:{CYAN_DK};margin-top:3px;white-space:nowrap">'
+                             f'{_e(cg_short(g["cg"]))}</div>', mono=True, bold=True, bg=bg)
                        + _td(site, bg=bg)
                        + _td(g["blank_count"] or "-", "right", True, BAD if g["blank_count"] else MUTED, bool(g["blank_count"]), bg)
                        + _td(f'{g["blank_hours"]:.1f}' if g["blank_count"] else "-", "right", True,
@@ -409,10 +453,11 @@ def build_email_html(groups, now, full, total):
 # Workbook
 # ---------------------------------------------------------------------------
 
-def build_workbook(groups, now, full, total):
+def build_workbook(groups, now, full, total, scope=None):
     """Snapshot workbook: Summary, Groups, Copies, Blank timers. Values, not
     formulas: it is generated in a headless job with no recalculation step,
-    and Gmail's preview shows formula cells empty."""
+    and Gmail's preview shows formula cells empty. scope = a CG label for a
+    per-team workbook (title says so, no By CG table); None = all CGs."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -452,7 +497,7 @@ def build_workbook(groups, now, full, total):
     wb = Workbook()
     ws = wb.active
     ws.title = "Summary"
-    ws["A1"] = "Duplicate Swift assets"
+    ws["A1"] = "Duplicate Swift assets" + (f" · {scope}" if scope else "")
     ws["A1"].font = Font(name=F, size=16, bold=True, color="0F172A")
     ws["A2"] = (f"{'Weekly full list' if full else f'New in the last {NEW_HOURS} hours'} · checked "
                 f"{et:%a %b %d, %Y %I:%M %p} ET · {total} group(s) in Swift today")
@@ -465,14 +510,25 @@ def build_workbook(groups, now, full, total):
         ws.cell(i, 2, v).font = red if k.startswith("Blank") and v else body
         if k == "Blank hours":
             ws.cell(i, 2).number_format = "0.0"
-    proj = by_project(groups)
+    heads = ["CG", "Project", "Duplicate groups", "Groups hiding timers", "Blank timers", "Blank hours",
+             "Need a merge", "Copies to delete"]
+    widths = [20, 18, 16, 20, 14, 13, 14, 16]
     start = 4 + len(kpis) + 2
+    if scope is None:
+        ws.cell(start - 1, 1, "By CG").font = Font(name=F, size=12, bold=True)
+        cg_rows = []
+        for label, gs in split_by_cg(groups).items():
+            c = summarize(gs)
+            cg_rows.append([label, "", c["groups"], c["affected"], c["timers"], c["hours"], c["merge"],
+                            c["copies_to_delete"]])
+        table(ws, start, heads, cg_rows, widths, {6: "0.0"})
+        start += len(cg_rows) + 3
+    proj = by_project(groups)
     ws.cell(start - 1, 1, "By project").font = Font(name=F, size=12, bold=True)
-    table(ws, start, ["Project", "Duplicate groups", "Groups hiding timers", "Blank timers", "Blank hours",
-                      "Need a merge", "Copies to delete"],
-          [[p, v["groups"], v["affected"], v["timers"], v["hours"], v["merge"], v["delete"]]
-           for p, v in proj.items()],
-          [26, 16, 20, 14, 13, 14, 16], {5: "0.0"})
+    table(ws, start, heads,
+          [[cg, p, v["groups"], v["affected"], v["timers"], v["hours"], v["merge"], v["delete"]]
+           for (cg, p), v in proj.items()],
+          widths, {6: "0.0"})
     ws.freeze_panes = None
     note = start + len(proj) + 2
     ws.cell(note, 1, "How to read this").font = bold
@@ -487,42 +543,42 @@ def build_workbook(groups, now, full, total):
 
     sec_name = {1: "1 Fix first (hides timers)", 2: "2 Needs a merge", 3: "3 Clutter only"}
     ws = wb.create_sheet("Groups")
-    table(ws, 1, ["Priority", "Project", "Site name", "Path", "Action", "Blank timers", "Blank hours",
+    table(ws, 1, ["Priority", "CG", "Project", "Site name", "Path", "Action", "Blank timers", "Blank hours",
                   "Last blank timer (ET)", "Keep asset id", "Delete asset id(s)", "Copies"],
-          [[sec_name[section_of(g)], g["project_name"], g["asset_name"], g["asset_id"],
+          [[sec_name[section_of(g)], g["cg"], g["project_name"], g["asset_name"], g["asset_id"],
             VERDICT_TEXT[g["verdict"]], g["blank_count"], g["blank_hours"],
             g["last_blank"].astimezone(ET).replace(tzinfo=None) if g["last_blank"] else None,
             g["keep"] or "", ", ".join(g["remove"]), len(g["assets"])] for g in groups],
-          [24, 16, 40, 56, 34, 13, 12, 20, 24, 48, 8], {7: "0.0", 8: "yyyy-mm-dd hh:mm"})
+          [24, 18, 16, 40, 56, 34, 13, 12, 20, 24, 48, 8], {8: "0.0", 9: "yyyy-mm-dd hh:mm"})
     for r in range(2, len(groups) + 2):
-        if ws.cell(r, 6).value:
-            ws.cell(r, 6).font = red
+        if ws.cell(r, 7).value:
             ws.cell(r, 7).font = red
+            ws.cell(r, 8).font = red
 
     ws = wb.create_sheet("Copies")
     rows = []
     for g in groups:
         for a in g["assets"]:
-            rows.append([g["project_name"], g["asset_name"], _tag(g, a), a["asset_did"],
+            rows.append([g["cg"], g["project_name"], g["asset_name"], _tag(g, a), a["asset_did"],
                          a["created_at"].astimezone(ET).replace(tzinfo=None) if a["created_at"] else None,
                          a["touched"], a["task_count"], a["timers"], g["asset_id"]])
-    table(ws, 1, ["Project", "Site name", "Tag", "Asset id", "Created (ET)", "Tasks touched", "Task count",
+    table(ws, 1, ["CG", "Project", "Site name", "Tag", "Asset id", "Created (ET)", "Tasks touched", "Task count",
                   "Timers (new pipeline)", "Path"],
-          rows, [16, 40, 11, 24, 20, 13, 11, 20, 56], {5: "yyyy-mm-dd hh:mm:ss"})
+          rows, [18, 16, 40, 11, 24, 20, 13, 11, 20, 56], {6: "yyyy-mm-dd hh:mm:ss"})
     for r in range(2, len(rows) + 2):
-        ws.cell(r, 3).font = tag_font[ws.cell(r, 3).value]
+        ws.cell(r, 4).font = tag_font[ws.cell(r, 4).value]
 
     ws = wb.create_sheet("Blank timers")
     rows = []
     for g in groups:
         for t in g["blank_timers"]:
-            rows.append([g["project_name"], g["asset_name"], t["user_email"],
+            rows.append([g["cg"], g["project_name"], g["asset_name"], t["user_email"],
                          t["start_time"].astimezone(ET).replace(tzinfo=None) if t["start_time"] else None,
                          t["end_time"].astimezone(ET).replace(tzinfo=None) if t["end_time"] else None,
                          round(float(t["duration_min"] or 0) / 60.0, 2), t["task"], g["asset_id"]])
-    table(ws, 1, ["Project", "Site name", "Member", "Start (ET)", "End (ET)", "Hours", "Task", "Path"],
-          rows, [16, 40, 30, 18, 18, 8, 40, 56],
-          {4: "yyyy-mm-dd hh:mm", 5: "yyyy-mm-dd hh:mm", 6: "0.00"})
+    table(ws, 1, ["CG", "Project", "Site name", "Member", "Start (ET)", "End (ET)", "Hours", "Task", "Path"],
+          rows, [18, 16, 40, 30, 18, 18, 8, 40, 56],
+          {5: "yyyy-mm-dd hh:mm", 6: "yyyy-mm-dd hh:mm", 7: "0.00"})
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -533,7 +589,17 @@ def build_workbook(groups, now, full, total):
 # Send
 # ---------------------------------------------------------------------------
 
-def build_message(subject, text, html_body, xlsx_bytes, xlsx_name):
+def build_workbooks(groups, now, full, total):
+    """[(file name, bytes)]: the all-CG workbook first, then one per CG (to share with each team)."""
+    day = now.astimezone(ET).strftime("%Y-%m-%d")
+    files = [(f"duplicate-swift-assets-{day}.xlsx", build_workbook(groups, now, full, total))]
+    for label, gs in split_by_cg(groups).items():
+        files.append((f"duplicate-swift-assets-{day}-{cg_file_tag(label)}.xlsx",
+                      build_workbook(gs, now, full, total, scope=label)))
+    return files
+
+
+def build_message(subject, text, html_body, attachments):
     msg = MIMEMultipart("mixed")
     msg["To"] = ", ".join(RECIPIENTS)
     msg["Subject"] = subject
@@ -541,9 +607,10 @@ def build_message(subject, text, html_body, xlsx_bytes, xlsx_name):
     alt.attach(MIMEText(text, "plain", "utf-8"))
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alt)
-    part = MIMEApplication(xlsx_bytes, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    part.add_header("Content-Disposition", "attachment", filename=xlsx_name)
-    msg.attach(part)
+    for name, data in attachments:
+        part = MIMEApplication(data, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        part.add_header("Content-Disposition", "attachment", filename=name)
+        msg.attach(part)
     return msg
 
 
@@ -564,7 +631,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="print; no email")
     parser.add_argument("--full", action="store_true", help="full list regardless of the day")
-    parser.add_argument("--xlsx-out", help="also write the workbook to this path")
+    parser.add_argument("--out-dir", help="also write every workbook (all CGs + one per CG) into this folder")
     parser.add_argument("--html-out", help="also write the HTML email body to this path")
     args = parser.parse_args()
 
@@ -587,12 +654,14 @@ def main():
         s = summarize(picked)
         text = build_email_body(picked, now, full, len(groups))
         html_body = build_email_html(picked, now, full, len(groups))
-        xlsx = build_workbook(picked, now, full, len(groups))
-        xlsx_name = f"duplicate-swift-assets-{now.astimezone(ET):%Y-%m-%d}.xlsx"
-        if args.xlsx_out:
-            with open(args.xlsx_out, "wb") as f:
-                f.write(xlsx)
-            logger.info(f"Workbook written to {args.xlsx_out}")
+        files = build_workbooks(picked, now, full, len(groups))
+        if args.out_dir:
+            import os
+            os.makedirs(args.out_dir, exist_ok=True)
+            for name, data in files:
+                with open(os.path.join(args.out_dir, name), "wb") as f:
+                    f.write(data)
+                logger.info(f"Workbook written to {os.path.join(args.out_dir, name)}")
         if args.html_out:
             with open(args.html_out, "w", encoding="utf-8") as f:
                 f.write("<!doctype html><meta charset='utf-8'>" + html_body)
@@ -604,7 +673,7 @@ def main():
         if args.dry_run:
             logger.info(f"Dry run: email suppressed.\nSubject: {subject}\n{text}")
         else:
-            send_email(build_message(subject, text, html_body, xlsx, xlsx_name))
+            send_email(build_message(subject, text, html_body, files))
         return 0
     except Exception:
         logger.exception("duplicate asset watcher crashed")
