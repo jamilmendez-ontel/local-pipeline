@@ -24,7 +24,10 @@
  *      - triggerHolidayFeedWatch() → Mondays 6 PM EST (PH holiday proclamation
  *                                    watch vs reference.ref_holidays; create via
  *                                    setupHolidayFeedWatchTrigger())
- *      - triggerPackageScrape()    → Daily 6:00 PM Asia/Manila (Gmail Package
+ *      - triggerDuplicateAssetWatch() → Daily 9 AM EST (Swift assets created
+ *                                    twice; Mondays = full list; create via
+ *                                    setupDuplicateAssetWatchTrigger())
+ *      - triggerPackageScrape()   → Daily 6:00 PM Asia/Manila (Gmail Package
  *                                    Scraper, gmail-scraper repo; create via
  *                                    setupPackageScrapeTrigger(). Moved here
  *                                    2026-09-08 from the retired
@@ -515,6 +518,39 @@ function setupHolidayFeedWatchTrigger() {
     .create();
 
   Logger.log('Created triggerHolidayFeedWatch trigger: Mondays 6 PM.');
+}
+
+/**
+ * Daily duplicate-asset watch (duplicate-asset-watch.yml): Swift assets created
+ * twice (same project, path and name). Emails the groups created in the last
+ * 26 h; Mondays ET the full list. No GHA cron backstop on purpose: the watcher
+ * keeps no state, so a second run the same day would send a second email; the
+ * Monday full list catches anything a missed day skipped.
+ */
+function triggerDuplicateAssetWatch() {
+  fireDispatch_('duplicate-asset-watch');
+}
+
+/**
+ * Idempotently (re)create the daily trigger for triggerDuplicateAssetWatch():
+ * 9 AM script time (EST/EDT). RUN THIS ONCE from the Apps Script editor after
+ * deploying this file. Deletes existing triggers bound to the handler first.
+ */
+function setupDuplicateAssetWatchTrigger() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'triggerDuplicateAssetWatch') {
+      ScriptApp.deleteTrigger(existing[i]);
+    }
+  }
+
+  ScriptApp.newTrigger('triggerDuplicateAssetWatch')
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .create();
+
+  Logger.log('Created triggerDuplicateAssetWatch trigger: daily 9 AM.');
 }
 
 /**
