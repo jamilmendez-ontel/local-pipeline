@@ -1,0 +1,81 @@
+name: "Watch: Duplicate Swift Assets"
+
+# Daily check for Swift assets created twice (same project, path and name).
+# v1 matches timers and QA forms to assets by name + path, so a duplicate
+# leaves their asset_did empty. Emails Jamil which copy to keep and which to
+# delete: groups created in the last 26 h every day, the full list on Mondays
+# (ET). Never writes anything. Apps Script triggerDuplicateAssetWatch() fires
+# the repository_dispatch daily at 9 AM ET. No cron backstop on purpose: the
+# watcher is stateless, so a second run the same day would email twice.
+
+on:
+  repository_dispatch:
+    types: [duplicate-asset-watch]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print the email, do not send)"
+        required: false
+        default: "false"
+      full:
+        description: "Full list regardless of the day"
+        required: false
+        default: "false"
+
+concurrency:
+  group: duplicate-asset-watch
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SWIFT_EMAIL=mgmt@ontel.co
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SWIFT_PASSWORD=${{ secrets.SWIFT_PASSWORD }}
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Watch duplicate assets
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ github.event.inputs.full }}" = "true" ]; then
+            ARGS="$ARGS --full"
+          fi
+          python -u duplicate_asset_watcher.py $ARGS
