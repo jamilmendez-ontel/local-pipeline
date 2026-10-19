@@ -15,10 +15,11 @@ DUP = "-P3sPXeBfpUeNzcPFNhW"     # created 39 s later, all 76 tasks pending, no 
 
 
 def _row(did, touched=0, timers=0, name="WINCHESTER - 5G L-SUB6 - CARRIER ADD",
-         project="TECH-OPS: TS20", path="MRC Towers/VZW/Mountain Plains-KS/Embedded/17433804/Oct 2026"):
+         project="TECH-OPS: TS20", path="MRC Towers/VZW/Mountain Plains-KS/Embedded/17433804/Oct 2026",
+         cg="Verizon"):
     return {"project_name": project, "project_did": "-Ozh7xx_YHk8yXEmVmFR", "asset_id": path,
             "asset_name": name, "asset_did": did, "task_count": 76, "touched": touched,
-            "timers": timers}
+            "timers": timers, "carrier_group": cg}
 
 
 def test_push_created_at_decodes_the_swift_id_timestamp():
@@ -170,16 +171,18 @@ def test_workbook_has_four_sheets_with_one_row_per_group_copy_and_blank_timer():
     assert wb["Copies"].max_row == 1 + 6
     assert wb["Blank timers"].max_row == 1 + 2
     g = wb["Groups"]
-    assert g["A2"].value.startswith("1") and g["F2"].value == 2 and g["I2"].value == KEEP and g["J2"].value == DUP
+    assert g["A2"].value.startswith("1") and g["B2"].value == "CG1 - Verizon"
+    assert g["G2"].value == 2 and g["J2"].value == KEEP and g["K2"].value == DUP
     assert g["A2"].font.name == "Arial"
 
 
 def test_message_is_html_with_text_fallback_and_the_workbook_attached():
-    msg = build_message("subj", "plain", "<b>x</b>", b"PK", "dup.xlsx")
+    msg = build_message("subj", "plain", "<b>x</b>", [("all.xlsx", b"PK"), ("cg1.xlsx", b"PK")])
     types = [p.get_content_type() for p in msg.walk()]
     assert types[:4] == ["multipart/mixed", "multipart/alternative", "text/plain", "text/html"]
-    att = list(msg.walk())[-1]
-    assert att.get_filename() == "dup.xlsx" and att.get_content_type().endswith("spreadsheetml.sheet")
+    names = [p.get_filename() for p in msg.walk() if p.get_filename()]
+    assert names == ["all.xlsx", "cg1.xlsx"]
+    assert list(msg.walk())[-1].get_content_type().endswith("spreadsheetml.sheet")
 
 
 def test_totals_round_once_from_raw_minutes_not_from_rounded_groups():
@@ -193,10 +196,52 @@ def test_totals_round_once_from_raw_minutes_not_from_rounded_groups():
     attach_blank_timers(groups, blanks)
     assert [g["blank_hours"] for g in groups] == [2.0, 2.0, 2.0]
     assert summarize(groups)["hours"] == 6.1
-    assert by_project(groups)["TECH-OPS: TS20"]["hours"] == 6.1
+    assert by_project(groups)[("CG1 - Verizon", "TECH-OPS: TS20")]["hours"] == 6.1
 
 
 def test_a_blank_timer_without_a_start_time_does_not_crash_the_last_start():
     g = classify_group([_row(KEEP, touched=1), _row(DUP)])
     attach_blank_timers([g], [_blank(), dict(_blank(), start_time=None)])
     assert g["blank_count"] == 2 and g["last_blank"] == datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)
+
+
+
+def test_cg_labels_follow_the_team_names_and_unknown_is_no_cg():
+    from duplicate_asset_watcher import cg_label, cg_file_tag
+    assert cg_label("Verizon") == "CG1 - Verizon"
+    assert cg_label("AT&T/DISH") == "CG2 - AT&T/DISH"
+    assert cg_label("TMO/USCC") == "CG3 - TMO/USCC"
+    assert cg_label(None) == "No CG" and cg_label("Other") == "No CG"
+    assert cg_file_tag("CG2 - AT&T/DISH") == "CG2-ATT-DISH"
+    assert cg_file_tag("CG3 - TMO/USCC") == "CG3-TMO-USCC"
+
+
+def test_one_workbook_for_all_cgs_then_one_per_cg_in_team_order():
+    import io
+    from openpyxl import load_workbook
+    from duplicate_asset_watcher import build_workbooks
+    vz = classify_group([_row(KEEP, touched=1), _row(DUP)])
+    tmo = classify_group([_row("-Pt1", touched=1, name="T", cg="TMO/USCC"), _row("-Pt2", name="T", cg="TMO/USCC")])
+    att = classify_group([_row("-Pa1", touched=1, name="A", cg="AT&T/DISH"), _row("-Pa2", name="A", cg="AT&T/DISH")])
+    groups = attach_blank_timers([tmo, att, vz], [_blank()])
+    files = build_workbooks(groups, NOW, True, 3)
+    assert [n for n, _ in files] == ["duplicate-swift-assets-2026-10-19.xlsx",
+                                     "duplicate-swift-assets-2026-10-19-CG1-Verizon.xlsx",
+                                     "duplicate-swift-assets-2026-10-19-CG2-ATT-DISH.xlsx",
+                                     "duplicate-swift-assets-2026-10-19-CG3-TMO-USCC.xlsx"]
+    cg3 = load_workbook(io.BytesIO(files[3][1]))
+    assert cg3["Summary"]["A1"].value == "Duplicate Swift assets · CG3 - TMO/USCC"
+    assert cg3["Groups"].max_row == 2 and cg3["Groups"]["B2"].value == "CG3 - TMO/USCC"
+    assert cg3["Blank timers"].max_row == 1
+    allwb = load_workbook(io.BytesIO(files[0][1]))
+    assert allwb["Groups"].max_row == 4
+    summary_text = [c.value for row in allwb["Summary"].iter_rows() for c in row if c.value]
+    assert "By CG" in summary_text and "CG2 - AT&T/DISH" in summary_text
+
+
+def test_html_shows_the_cg_per_site_and_a_chip_per_cg():
+    vz = classify_group([_row(KEEP, touched=1), _row(DUP)])
+    tmo = classify_group([_row("-Pt1", touched=1, name="T", cg="TMO/USCC"), _row("-Pt2", name="T", cg="TMO/USCC")])
+    body = build_email_html(sort_groups(attach_blank_timers([vz, tmo], [])), NOW, True, 2)
+    assert "CG1 - Verizon: 1 site(s)" in body and "CG3 - TMO/USCC: 1 site(s)" in body
+    assert ">CG1<" in body and ">CG3<" in body
