@@ -4,10 +4,12 @@
 -- the old timer system's six tables so the app can show members their entries from
 -- 2025-01-01 and carry the old corrections, removals, runaway drops and additions.
 --
--- STATUS: NOT APPLIED. Apply only after PR #68 is merged and Jamil gives the release go.
---   Order: this file (via MCP apply_migration) -> migrate-production (word `release`) ->
---   workflow legacy-import mode dry-run -> apply -> second dry run next day -> repo variable
---   LEGACY_IMPORT_NIGHTLY=on. (ontel-my-timers README, "Releasing the old history".)
+-- STATUS: APPLIED 2026-10-20 ~12:35 AM ET via MCP apply_migration (283_app_my_timers_legacy_grant),
+--   after ontel-my-timers PR #68 merged (cb648a9) on Jamil's go. Before: RLS on all six, no
+--   select, no policy. VERIFIED after: usage on app_timer = true, select on all six = true,
+--   my_timers_owner_read policies = 6.
+--   Next in the release: migrate-production (word `release`) -> legacy-import dry run ->
+--   apply -> second dry run next day -> LEGACY_IMPORT_NIGHTLY=on.
 --
 -- WHY EACH TABLE
 --   app_timer.corrections, entry_removals, entry_additions   the old changes to carry
