@@ -1,5 +1,6 @@
 """Pure normalization functions for calendar events. No DB, no network: all
 lookups are passed in, so these are unit-testable in isolation."""
+import re
 
 
 def normalize_leave_type(code: str | None, code_map: dict) -> tuple[str | None, str | None]:
@@ -59,3 +60,128 @@ def match_person_deterministic(person_raw: str | None, team_raw: str | None, emp
             if c.get("carrier_group") == canon or c.get("cluster") == canon:
                 return c, "exact"
     return None, "ambiguous"
+
+
+# --- person_note (Phase 2 Wave 2) -------------------------------------------
+# Deterministic regex, no AI. The raw `person_note` is kept; this fills
+# `person_note_normalized`. Canonical forms:
+#   start time  -> "2:00 PM onwards"   (also "After 4 PM", "In by 12PM", "Working 12 PM")
+#   end time    -> "Until 12:00 PM"    (also "Out 2PM", "only until 1pm")
+#   window      -> "9:00 AM - 2:00 PM" (also "9am to 2pm", "2-6PM", "9-1 PM")
+#   bare time   -> "2:00 PM"
+#   time zone   -> kept after the time: "10:00 AM - 3:00 PM EST", "11:00 AM PHT onwards"
+# Notes that are an employee-id suffix ("VL - CG1 - Ana - 200601" parses the id
+# into person_note) are identifiers, not notes, and normalize to NULL. Anything
+# else passes through with whitespace and casing standardized only.
+_T = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|nn|noon)?"
+_TZ_RE = re.compile(r"\s*\b(est|edt|et|pht)\b\s*", re.I)
+_EMP_ID_RE = re.compile(r"-?\d{6,7}")
+_NOISE_RE = re.compile(r"\(\d+\)")
+_RANGE_RE = re.compile(rf"(?:working\s+)?{_T}\s*(?:-|to)\s*{_T}", re.I)
+# A start time needs a lead-in word or a trailing "onwards" ("2 pm" alone is a bare time).
+_START_RE = re.compile(
+    rf"(?:(?:t?w[oe]rking)|work|will\s+work\s+at|reports\s+at|in\s+by|in|"
+    rf"available\s+by|available|after)\s+{_T}(?:\s+onwards)?"
+    rf"|(?:(?:t?w[oe]rking)\s+)?{_T}\s+onwards", re.I)
+_UNTIL_RE = re.compile(
+    rf"(?:working\s+|only\s+)?(?:until|out)\s+{_T}(?:\s+only)?", re.I)
+_BARE_RE = re.compile(_T, re.I)
+_HALF_DAY_RE = re.compile(r"half\s*day", re.I)
+
+
+def _bare_meridiem(h: int) -> str:
+    """Workday rule for an hour written without AM/PM (Ontel shift is ~9-6):
+    7-11 are morning, 12 and 1-6 are afternoon."""
+    return "AM" if 7 <= h <= 11 else "PM"
+
+
+def _clock(h: str, m: str | None, mer: str | None, default_mer: str | None = None) -> str | None:
+    """Format one time token as 'H:MM AM'. Returns None if it is not a clock time."""
+    hour, minute = int(h), int(m) if m else 0
+    if minute > 59:
+        return None
+    mer = (mer or "").lower()
+    if mer in ("nn", "noon"):
+        if hour != 12:
+            return None
+        mer = "pm"
+    if not mer:
+        if 13 <= hour <= 23:              # 24-hour clock
+            hour, mer = hour - 12, "pm"
+        elif 1 <= hour <= 12:
+            mer = (default_mer or _bare_meridiem(hour)).lower()
+        else:
+            return None
+    if not 1 <= hour <= 12:
+        return None
+    return f"{hour}:{minute:02d} {mer.upper()}"
+
+
+def _range_start_meridiem(h1: int, h2: int, mer2: str) -> str:
+    """A range start with no AM/PM takes the end's meridiem when it is earlier
+    on the same half of the clock ('2-6PM', '7-9AM'), else the other one ('9-1 PM')."""
+    mer2 = "pm" if mer2.lower() in ("nn", "noon") else mer2.lower()
+    a, b = h1 % 12, h2 % 12
+    if a <= b:
+        return mer2
+    return "am" if mer2 == "pm" else "pm"
+
+
+def _sentence_case(text: str) -> str:
+    """Lowercase every word except all-caps acronyms (AM, LAC, PHT), then
+    capitalize the first letter."""
+    words = []
+    for w in text.split(" "):
+        if len(w) >= 2 and w.isalpha() and w.isupper():
+            words.append(w)
+        else:
+            words.append(w.lower())
+    out = " ".join(words)
+    return out[:1].upper() + out[1:]
+
+
+def normalize_person_note(note: str | None) -> str | None:
+    """Clean a calendar person_note. See the module comment above for forms."""
+    if note is None:
+        return None
+    s = " ".join(note.split())
+    if not s or _EMP_ID_RE.fullmatch(s) or _NOISE_RE.fullmatch(s):
+        return None
+
+    tz_match = _TZ_RE.search(s)
+    tz = tz_match.group(1).upper() if tz_match else None
+    core = _TZ_RE.sub(" ", s).strip() if tz else s
+    tz_sfx = f" {tz}" if tz else ""
+
+    m = _RANGE_RE.fullmatch(core)
+    if m:
+        h1, m1, mer1, h2, m2, mer2 = m.groups()
+        if mer2 and not mer1:
+            mer1 = _range_start_meridiem(int(h1), int(h2), mer2)
+        start = _clock(h1, m1, mer1)
+        end = _clock(h2, m2, mer2)
+        if start and end:
+            return f"{start} - {end}{tz_sfx}"
+
+    m = _UNTIL_RE.fullmatch(core)
+    if m:
+        t = _clock(*m.groups())
+        if t:
+            return f"Until {t}{tz_sfx}"
+
+    m = _START_RE.fullmatch(core)
+    if m:
+        g = m.groups()
+        t = _clock(*(g[:3] if g[0] else g[3:]))
+        if t:
+            return f"{t}{tz_sfx} onwards"
+
+    m = _BARE_RE.fullmatch(core)
+    if m and m.group(3):                  # a bare time needs AM/PM to be a time
+        t = _clock(*m.groups())
+        if t:
+            return f"{t}{tz_sfx}"
+
+    if _HALF_DAY_RE.fullmatch(s):
+        return "Half day"
+    return _sentence_case(s)

@@ -56,12 +56,13 @@ def renormalize(db):
     avoid a per-row loop against the remote DB (which times out at scale)."""
     from calendar_lookups import load_lookups
     from calendar_normalize import (normalize_leave_type, normalize_team,
-                                     match_person_deterministic)
+                                     match_person_deterministic, normalize_person_note)
     from calendar_person_cache import extract_person_with_ai
 
     lookups = load_lookups(db)
     rows = db.fetch(
-        "SELECT event_id, leave_type, team, person FROM data_staging.stg_calendar_events")
+        "SELECT event_id, leave_type, team, person, person_note "
+        "FROM data_staging.stg_calendar_events")
     logger.info(f"Renormalizing {len(rows)} rows")
     if not rows:
         logger.warning("No rows in stg_calendar_events; nothing to renormalize")
@@ -108,7 +109,7 @@ def renormalize(db):
         new_entries[key] = res
         return res
 
-    event_ids, ltns, tns, tls, pns, eids, pmss = [], [], [], [], [], [], []
+    event_ids, ltns, tns, tls, pns, eids, pmss, pnns = [], [], [], [], [], [], [], []
     for r in rows:
         lt_norm, _cat = normalize_leave_type(r["leave_type"], lookups["code_map"])
         pm = _resolve(r["person"], r["team"])
@@ -117,6 +118,7 @@ def renormalize(db):
         event_ids.append(r["event_id"]); ltns.append(lt_norm); tns.append(team_norm)
         tls.append(team_level); pns.append(pm["person_normalized"])
         eids.append(pm["emp_id"]); pmss.append(pm["match_source"])
+        pnns.append(normalize_person_note(r["person_note"]))
 
     if new_entries:
         cache_sql = (
@@ -135,12 +137,13 @@ def renormalize(db):
     update_sql = (
         "UPDATE data_staging.stg_calendar_events AS s SET "
         "  leave_type_normalized = d.ltn, team_normalized = d.tn, team_level = d.tl, "
-        "  person_normalized = d.pn, emp_id = d.eid, person_match_source = d.pms "
+        "  person_normalized = d.pn, emp_id = d.eid, person_match_source = d.pms, "
+        "  person_note_normalized = d.pnn "
         "FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], "
-        "            $6::text[], $7::text[]) "
-        "  AS d(event_id, ltn, tn, tl, pn, eid, pms) "
+        "            $6::text[], $7::text[], $8::text[]) "
+        "  AS d(event_id, ltn, tn, tl, pn, eid, pms, pnn) "
         "WHERE s.event_id = d.event_id")
-    retry_db(lambda: db.execute(update_sql, event_ids, ltns, tns, tls, pns, eids, pmss),
+    retry_db(lambda: db.execute(update_sql, event_ids, ltns, tns, tls, pns, eids, pmss, pnns),
              description=f"bulk renormalize {len(event_ids)} rows")
     logger.info(f"Renormalized {len(event_ids)} rows "
                 f"({len(new_entries)} new person-match entries)")
