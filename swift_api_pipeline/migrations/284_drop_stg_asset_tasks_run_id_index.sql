@@ -3,10 +3,12 @@
 -- WAL diet follow-up (OnPoint INIT-387, from migration 258 / local-pipeline #68):
 -- drop idx_stg_asset_tasks_run_id, an 83 MB btree that nothing filters by.
 --
--- STATUS: NOT APPLIED. Needs Jamil's go. Apply OUTSIDE the reload windows
---   (not 12:01-1:15 AM ET nightly, not 6:05-6:45 AM ET chain), with the statement below
---   run on its own (DROP INDEX CONCURRENTLY cannot run inside a transaction block, so use
---   MCP execute_sql or psql, not apply_migration).
+-- STATUS: APPLIED 2026-10-26 ~2:37 AM ET on Jamil's go (outside the 12:01-1:15 AM and
+--   6:05-6:45 AM ET reload windows). MCP execute_sql refused the statement twice
+--   ("Invalid or expired requestState"), so it ran as a single autocommit statement over
+--   the session pooler (asyncpg, port 5432, lock_timeout 30s): 0.1 s.
+--   VERIFIED: to_regclass('data_staging.idx_stg_asset_tasks_run_id') IS NULL.
+--   DROP INDEX CONCURRENTLY cannot run inside a transaction block (not apply_migration).
 --
 -- WHY IT IS DEAD (preflight 2026-10-26 ~2:25 AM ET, live OntelDB)
 --   * Since 258 the asset-tasks transform is a change-only merge on task_did: unchanged
