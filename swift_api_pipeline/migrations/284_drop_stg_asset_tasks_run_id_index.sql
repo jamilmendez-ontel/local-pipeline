@@ -1,0 +1,35 @@
+-- =============================================================================
+-- 284_drop_stg_asset_tasks_run_id_index.sql
+-- WAL diet follow-up (OnPoint INIT-387, from migration 258 / local-pipeline #68):
+-- drop idx_stg_asset_tasks_run_id, an 83 MB btree that nothing filters by.
+--
+-- STATUS: NOT APPLIED. Needs Jamil's go. Apply OUTSIDE the reload windows
+--   (not 12:01-1:15 AM ET nightly, not 6:05-6:45 AM ET chain), with the statement below
+--   run on its own (DROP INDEX CONCURRENTLY cannot run inside a transaction block, so use
+--   MCP execute_sql or psql, not apply_migration).
+--
+-- WHY IT IS DEAD (preflight 2026-10-26 ~2:25 AM ET, live OntelDB)
+--   * Since 258 the asset-tasks transform is a change-only merge on task_did: unchanged
+--     rows keep their old run_id, so "rows of run X" is no longer a meaningful filter, and
+--     validate_transform_counts counts stg_asset_tasks whole (transform.py:86), raw by run_id.
+--   * pg_stat_user_indexes: idx_scan = 3 since the last stats reset (Postgres restart),
+--     against millions of index maintenance writes from the nightly merge.
+--   * Every function/view/MV in our schemas that names both stg_asset_tasks and run_id was
+--     read (app_my_timers.legacy_import_changes, analytics.v_pmi_sites,
+--     data_staging.v_asset_tasks_cleaned; gap_report.mv_asset_tasks_recent and
+--     mv_timer_base, read only): they SELECT the column or filter OTHER tables by run_id;
+--     none has WHERE stg_asset_tasks.run_id = ... . Code grep (local-pipeline main): only
+--     the INSERT column list writes it.
+--   * A column is not dropped, only its index. Worst case for an ad hoc query by run_id:
+--     a sequential scan. Nothing depends on the index object (pg_depend: no constraint).
+--
+-- ROLLBACK
+--   CREATE INDEX CONCURRENTLY idx_stg_asset_tasks_run_id
+--     ON data_staging.stg_asset_tasks USING btree (run_id);
+--
+-- VERIFY AFTER
+--   SELECT to_regclass('data_staging.idx_stg_asset_tasks_run_id');   -- NULL
+--   Next nightly asset-tasks run (12:01 AM ET) green; validation line [OK].
+-- =============================================================================
+
+DROP INDEX CONCURRENTLY IF EXISTS data_staging.idx_stg_asset_tasks_run_id;
