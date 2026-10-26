@@ -47,3 +47,11 @@ for (const [iso, ev, pl] of fired) {
 }
 for (const [k, v] of Object.entries(byEv)) console.log(`\n${k}  (${v.length}x)\n   ` + v.join('\n   '));
 console.log('\nretry log:', logs.filter(l => /failed; retrying/.test(l)));
+
+// Spring-forward check: on 2027-03-14 ET jumps 01:59 -> 03:00; open_items_data (02:00) must still fire.
+{
+  const before = fired.length;
+  for (let t = Date.parse('2027-03-14T05:00:00Z'); t < Date.parse('2027-03-14T09:00:00Z'); t += 300000) { NOW = new Date(t + 20000); ctx.runScheduler(); }
+  const oi = fired.slice(before).filter(f => f[1] === 'pipeline-open-items-data').map(f => f[0]);
+  console.log('\nspring-forward 2027-03-14 open-items fired at:', oi.length ? oi : 'NOT FIRED (FAIL)');
+}

@@ -3,8 +3,8 @@ name: "Sync: Schedule Changes"
 # Daily sync of the HR schedule-changes Google Sheet (all template tabs) into
 # data_raw.raw_schedule_changes -> data_staging.stg_schedule_change_history ->
 # analytics.v_employee_schedule_history (DRMC directory "Schedule history").
-# Apps Script triggerScheduleChangesSync() fires the repository_dispatch at
-# 8 PM PHT every day (DST-locked: the handler checks the Manila hour). The cron
+# Apps Script runScheduler() fires the repository_dispatch at 8 PM PHT every
+# day (SCHEDULE row schedule_changes, Asia/Manila clock, since 2026-10-26). The cron
 # below is the backstop 12 h later (8 AM PHT) so a missed dispatch is at most a
 # half day stale; the sync is idempotent (upsert-on-PK then prune), so a second
 # daily run is harmless.

@@ -768,7 +768,7 @@ var SCHEDULE = [
   { id: 'priorities_daily',          tz: SCHED_TZ_ET, at: '00:13', fn: triggerPrioritiesDaily },
   { id: 'forms',                     tz: SCHED_TZ_ET, at: '00:17', fn: triggerForms },
   { id: 'timer',                     tz: SCHED_TZ_ET, at: '01:15', fn: triggerLightPipelines },
-  { id: 'open_items_data',           tz: SCHED_TZ_ET, at: '02:00', fn: triggerOpenItemsData },
+  { id: 'open_items_data',           tz: SCHED_TZ_ET, at: '02:00', graceMin: 90, fn: triggerOpenItemsData },  // 90: the US spring-forward day has no 02:xx
   { id: 'calendar_am',               tz: SCHED_TZ_ET, at: '05:00', fn: triggerCalendarEvents },
   { id: 'duplicate_asset_watch',     tz: SCHED_TZ_ET, at: '09:00', fn: triggerDuplicateAssetWatch },
   { id: 'timer_emails_second',       tz: SCHED_TZ_ET, at: '09:00', fn: triggerTimerEmailsSecond },
