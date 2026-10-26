@@ -4049,3 +4049,14 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
 - `scripts/sim_pipeline_trigger_scheduler.js`: Node check with stubbed Apps Script services; 8 days of 5-min ticks with jitter across the Nov 1 DST end: every job once per day at its time, Manila jobs move 1 h in ET on Nov 1 and stay fixed in PHT, ET jobs stay fixed in ET, weekly jobs once, injected dispatch failure retried next tick, setup refuses at 09:05 ET.
 
 **Deploy (Jamil)**: paste the whole file, run `setupScheduler()` between 10 AM and 5 PM ET, then `previewSchedule()`. Roster sync then fires daily at 7 PM PHT; check the next `sync-employees` run shows event `repository_dispatch` and close INIT-734.
+## 2026-10-26 (1:55 AM - 2:20 AM ET) - Dispatch cadence watcher (INIT-827)
+
+**Why**: on 2026-09-30 the Apps Script dispatch PAT expired; every `repository_dispatch` pipeline stopped for 22 h and `Watch: Pipeline Health` stayed green (it only watches pg_cron, MV freshness and row counts).
+
+**Evidence (30 days, 2026-09-26 to 2026-10-26, 20,567 dispatch runs, pulled per half-day through the runs API)**: dispatches run 24/7, weekends included, no quiet windows. Gap between consecutive dispatch runs: median 2.2 min, p99.99 5.0 min, max outside the outage 5.6 min. Per heartbeat: Daily Reports (Rolling) 8,453 runs and User Priorities 8,476 runs, median 5.0 min, max 10 min. The only gap over 8 min: 1,330 min from 2026-09-30 07:23 ET (the outage). Daily Reports (Rolling) is fired by the ontel-account `daily_reports_trigger.gs`, User Priorities by the nanoninth `pipeline_trigger.gs`: two separate tokens.
+
+**Built**: `swift_api_pipeline/dispatch_cadence_watcher.py` + `.github/workflows/dispatch-cadence-watch.yml` (GHA cron :07/:22/:37/:52, `GITHUB_TOKEN` with `actions: read`, so independent of the PAT). Three checks, each breached past 30 min: newest dispatch run of any workflow, plus one per 5-min heartbeat (catches a token dead in only one Apps Script project). No storm: alerting state in a small JSON carried by `actions/cache` (no DB object, no migration); one email per outage or when a new check joins it, a reminder every 6 h, one recovery email. Recipient Jamil only, `Pipeline Alerts` sender mask via `gmail_client`. Stdlib check; the workflow installs only the Google client libraries.
+
+**Gates**: 16 new unit tests (`test_dispatch_cadence_watcher.py`) + the 6 existing health-watcher tests green. Dry run against the real API: newest dispatch 1 min (any), 1 min (Daily Reports Rolling), 2 min (User Priorities); action none.
+
+**Open (Jamil, manual Apps Script)**: re-arm `scheduleTokenRotationReminder()` in `gmail_trigger.gs`; finish the two remaining Apps Script projects from the card. After merge: one `workflow_dispatch` with `threshold_min=0` to prove the email path (the next scheduled run sends the recovery email).
