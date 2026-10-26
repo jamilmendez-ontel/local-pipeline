@@ -8,33 +8,22 @@
  *   1. Open the existing Apps Script project under jamil.mendez@nanoninth.com
  *      (same project as gmail_trigger.gs — reuses GITHUB_TOKEN)
  *   2. Paste these functions into a new file (e.g. pipeline_trigger.gs)
- *   3. Create time-driven triggers in Apps Script:
- *      - triggerOrgs()             → Daily, 10:13 PM EST
- *      - triggerLightPipelines()   → Daily, ~1:15 AM EST (Timer only now; create
- *                                    via setupTimerTrigger(), not the editor UI)
- *      - triggerForms()            → Daily, 12:17 AM EST (QA Forms — own trigger)
- *      - triggerOpenItemsData()    → Daily, 02:00 AM EST (Open Items Report Data)
- *      - triggerPrioritiesDaily()  → Daily, 12:13 AM EST (full run: refresh + export + Drive)
- *      - triggerPriorities()       → Every 10 min (DB refresh only) — or run
- *                                    setupPriorityRefreshTrigger() once to create it
- *      - checkForRevenueReports()  → Every 5 min (Gmail watcher → gmail-revenue-report;
- *                                    create via setupRevenueWatchTrigger())
- *      - triggerScheduleFeedAudit() → Every 15 min (Swift schedule feed audit;
- *                                    create via setupScheduleFeedAuditTrigger())
- *      - triggerHolidayFeedWatch() → Mondays 6 PM EST (PH holiday proclamation
- *                                    watch vs reference.ref_holidays; create via
- *                                    setupHolidayFeedWatchTrigger())
- *      - triggerDuplicateAssetWatch() → Daily 9 AM EST (Swift assets created
- *                                    twice; Mondays = full list; create via
- *                                    setupDuplicateAssetWatchTrigger())
- *      - triggerPackageScrape()   → Daily 6:00 PM Asia/Manila (Gmail Package
- *                                    Scraper, gmail-scraper repo; create via
- *                                    setupPackageScrapeTrigger(). Moved here
- *                                    2026-09-08 from the retired
- *                                    gmail-scraper/scripts/package_scraper_trigger.gs)
+ *   3. Run setupScheduler() once (since 2026-10-26). It deletes the old
+ *      one-per-job daily/weekly triggers and creates ONE runScheduler()
+ *      trigger every 5 minutes, which fires each job in SCHEDULE (bottom of
+ *      this file) at its time, in its own time zone, once per day.
+ *      Apps Script allows only 20 triggers per script; the old
+ *      one-trigger-per-job layout hit that limit on 2026-10-26
+ *      (setupEmployeeSyncTrigger: "This script has too many triggers").
+ *      Only the high-frequency jobs keep their own triggers:
+ *      - triggerPriorities()        → every 10 min (setupPriorityRefreshTrigger())
+ *      - checkForRevenueReports()   → every 5 min (setupRevenueWatchTrigger())
+ *      - triggerScheduleFeedAudit() → every 15 min (setupScheduleFeedAuditTrigger())
+ *      Total: 4 triggers. To change a time, edit SCHEDULE and paste the
+ *      whole file; no trigger change is needed.
  *   4. The GITHUB_TOKEN script property is already set from gmail_trigger.gs
  *
- * Schedules (EST):
+ * Schedules (ET unless marked; SCHEDULE at the bottom is the source of truth):
  *   10:13 PM  — Orgs & Projects
  *   ~1:15 AM  — Timer (moved from 12:09 AM on 2026-08-06: its
  *               rebuild_timer_clean() calls were colliding with the Asset
@@ -62,10 +51,10 @@
  *   02:00 AM  — Open Items Report Data (targeted_asset_tasks + _task_requirements;
  *               run after User Priorities is fresh. Create via own trigger.)
  *   5:00 AM & 5:00 PM — Calendar Events (twice daily; was 6 AM/6 PM, before that 12:30 AM once daily.
- *               Create via setupCalendarEventsTriggers())
+ *               SCHEDULE: calendar_am / calendar_pm)
  *   Sat 6:00 PM — Asset Tasks INC weekly full-walk sweep (= Sunday ~6 AM PHT;
  *               heals assign/reschedule drift the hourly shadow walk can't see.
- *               Create via setupAssetTasksIncFullWalkTrigger())
+ *               SCHEDULE: asset_tasks_inc_full_walk)
  *
  * Note: QA Forms used to be staggered inside triggerLightPipelines() via an
  * 8-min Utilities.sleep() after Timer. That was fragile — if the trigger
@@ -82,13 +71,13 @@ var REPO = 'jamilmendez-ontel/local-pipeline';
  * Trigger orgs pipeline — schedule this at 10:13 PM EST daily.
  */
 function triggerOrgs() {
-  fireDispatch_('pipeline-orgs');
+  return fireDispatch_('pipeline-orgs');
 }
 
 /**
  * Trigger the daily Timer pipeline.
  * Schedule: ~1:15 AM ET daily. Create/refresh the trigger by running
- * setupTimerTrigger() once from the Apps Script editor.
+ * SCHEDULE (job 'timer') at the bottom of this file.
  *
  * Moved from 12:09 AM on 2026-08-06: the run's two rebuild_timer_clean()
  * calls (~15 and ~45 min in) landed on top of the Asset Tasks transform
@@ -107,45 +96,7 @@ function triggerOrgs() {
  * cannot silently drop a later dispatch.
  */
 function triggerLightPipelines() {
-  fireDispatch_('pipeline-timer');
-}
-
-/**
- * Target time (project timezone, ET) for the daily Timer run.
- * nearMinute() is a +/-15 min hint, so the trigger fires ~1:00-1:30 AM.
- */
-var TIMER_HOUR = 1;
-var TIMER_MINUTE = 15;
-
-/**
- * Idempotently (re)create the daily time-driven trigger for
- * triggerLightPipelines() at ~1:15 AM ET. RUN THIS ONCE from the Apps Script
- * editor after deploying this file; it replaces the old editor-created
- * 12:09 AM trigger (deleted first by handler name, so re-running is safe,
- * e.g. after editing TIMER_HOUR/TIMER_MINUTE).
- *
- * NOTE: atHour() fires in the project's time zone. This assumes the project is
- * set to America/New_York (ET) like the rest of these schedules; verify via
- * File > Project Settings > Time zone before relying on the 1:15 AM time.
- */
-function setupTimerTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerLightPipelines') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  ScriptApp.newTrigger('triggerLightPipelines')
-    .timeBased()
-    .everyDays(1)
-    .atHour(TIMER_HOUR)
-    .nearMinute(TIMER_MINUTE)
-    .create();
-
-  Logger.log('Created triggerLightPipelines trigger at ~' +
-             TIMER_HOUR + ':' + (TIMER_MINUTE < 10 ? '0' : '') + TIMER_MINUTE +
-             ' ET daily.');
+  return fireDispatch_('pipeline-timer');
 }
 
 /**
@@ -172,55 +123,12 @@ function setupTimerTrigger() {
  * DIFFERENT dispatch type from 'pipeline-timer' on purpose: the two runs must
  * never be fired by the same trigger.
  */
-var TIMER_EMAILS_FIRST_HOUR = 18;    // America/New_York
-var TIMER_EMAILS_FIRST_MINUTE = 30;
-var TIMER_EMAILS_SECOND_HOUR = 9;    // America/New_York
-var TIMER_EMAILS_SECOND_MINUTE = 0;
-
 function triggerTimerEmails() {
-  fireDispatch_('pipeline-timer-emails');
+  return fireDispatch_('pipeline-timer-emails');
 }
 
 function triggerTimerEmailsSecond() {
-  fireDispatch_('pipeline-timer-emails');
-}
-
-/**
- * Idempotently (re)create BOTH daily time-driven triggers. RUN THIS ONCE from
- * the Apps Script editor after deploying this file (and again after editing
- * the constants); it deletes any existing trigger on either handler first,
- * so re-running is safe.
- *
- * CUTOVER (2026-10-01): run after migration 275 + the two-window PR are live
- * and BEFORE 18:15 ET on 2026-10-01, so the first Eastern-clock send covers
- * (2026-10-01, first).
- */
-function setupTimerEmailsTrigger() {
-  var handlers = ['triggerTimerEmails', 'triggerTimerEmailsSecond'];
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (handlers.indexOf(existing[i].getHandlerFunction()) !== -1) {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  ScriptApp.newTrigger('triggerTimerEmails')
-    .timeBased()
-    .everyDays(1)
-    .atHour(TIMER_EMAILS_FIRST_HOUR)
-    .nearMinute(TIMER_EMAILS_FIRST_MINUTE)
-    .inTimezone('America/New_York')
-    .create();
-  ScriptApp.newTrigger('triggerTimerEmailsSecond')
-    .timeBased()
-    .everyDays(1)
-    .atHour(TIMER_EMAILS_SECOND_HOUR)
-    .nearMinute(TIMER_EMAILS_SECOND_MINUTE)
-    .inTimezone('America/New_York')
-    .create();
-
-  Logger.log('Created triggerTimerEmails at ~18:30 America/New_York and ' +
-             'triggerTimerEmailsSecond at ~09:00 America/New_York (daily, +/-15 min).');
+  return fireDispatch_('pipeline-timer-emails');
 }
 
 /**
@@ -232,7 +140,7 @@ function setupTimerEmailsTrigger() {
  * pipeline now has its own dedicated trigger.
  */
 function triggerForms() {
-  fireDispatch_('pipeline-forms');
+  return fireDispatch_('pipeline-forms');
 }
 
 /**
@@ -256,7 +164,7 @@ function triggerForms() {
  * can never lose it again. Re-create the time trigger once in the Apps Script UI.
  */
 function triggerOpenItemsData() {
-  fireDispatch_('pipeline-open-items-data');
+  return fireDispatch_('pipeline-open-items-data');
 }
 
 /**
@@ -284,7 +192,7 @@ function triggerPriorities() {
  * Fires with run_export=true so the workflow runs the export + upload steps.
  */
 function triggerPrioritiesDaily() {
-  fireDispatchWithPayload_('pipeline-priorities', { run_export: true });
+  return fireDispatchWithPayload_('pipeline-priorities', { run_export: true });
 }
 
 /**
@@ -321,52 +229,10 @@ function setupPriorityRefreshTrigger() {
 /**
  * Trigger the Calendar Events pipeline (all kinds: leave/holiday/birthday/
  * training/other). Runs TWICE daily at 5:00 AM and 5:00 PM ET. Create the
- * triggers by running setupCalendarEventsTriggers() once.
+ * SCHEDULE (calendar_am / calendar_pm).
  */
 function triggerCalendarEvents() {
-  fireDispatch_('pipeline-calendar-events');
-}
-
-/**
- * Run hours (project timezone, ET) for the twice-daily Calendar Events runs.
- * Apps Script daily triggers fire within a ~1-hour window around the given hour.
- */
-var CALENDAR_EVENTS_HOURS = [5, 17];
-
-/**
- * Idempotently (re)create the twice-daily time-driven triggers for
- * triggerCalendarEvents() at 5:00 AM and 5:00 PM ET. RUN THIS ONCE from the
- * Apps Script editor after deploying this file. It first deletes ALL existing
- * triggers bound to triggerCalendarEvents AND to the legacy triggerCalendarLeave
- * (this function was renamed; the old time triggers are still bound to the old
- * name and MUST be cleared, or they fail silently with "Script function not
- * found"). Safe to re-run (e.g. after editing CALENDAR_EVENTS_HOURS).
- *
- * NOTE: atHour() fires in the project's time zone. This assumes the project is
- * set to America/New_York (ET) like the rest of these schedules — verify via
- * File > Project Settings > Time zone before relying on the 5 AM / 5 PM times.
- */
-function setupCalendarEventsTriggers() {
-  // Remove existing triggers bound to the new name AND to the legacy
-  // triggerCalendarLeave (renamed function — clear its now-orphaned triggers).
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    var fn = existing[i].getHandlerFunction();
-    if (fn === 'triggerCalendarEvents' || fn === 'triggerCalendarLeave') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  for (var h = 0; h < CALENDAR_EVENTS_HOURS.length; h++) {
-    ScriptApp.newTrigger('triggerCalendarEvents')
-      .timeBased()
-      .everyDays(1)
-      .atHour(CALENDAR_EVENTS_HOURS[h])
-      .create();
-  }
-
-  Logger.log('Created triggerCalendarEvents triggers at hours (ET): ' +
-             CALENDAR_EVENTS_HOURS.join(', '));
+  return fireDispatch_('pipeline-calendar-events');
 }
 
 /**
@@ -382,7 +248,7 @@ function setupCalendarEventsTriggers() {
  *     Chat post both go out once a week on Friday)
  */
 function triggerAssetTasks() {
-  fireDispatch_('pipeline-asset-tasks');
+  return fireDispatch_('pipeline-asset-tasks');
 }
 
 /**
@@ -397,7 +263,7 @@ function triggerAssetTasks() {
  * ZERO repository_dispatch runs before 2026-08-06.
  *
  * Schedule: Saturday 6 PM ET = Sunday 6 AM PHT (7 AM in US winter), the
- * plan's quiet-window slot. Create via setupAssetTasksIncFullWalkTrigger().
+ * plan's quiet-window slot. SCHEDULE: asset_tasks_inc_full_walk.
  * Run cost: ~2-3h walk + one ~6-9 GB drift audit (dispatched runs always
  * audit); hourly inc runs queue behind it (concurrency group,
  * cancel-in-progress: false), and the audit evidence persists to
@@ -406,36 +272,10 @@ function triggerAssetTasks() {
  * strict_audit stays 'false': this is a heal sweep, not the nightly gate.
  */
 function triggerAssetTasksIncFullWalk() {
-  fireDispatchWithPayload_('pipeline-asset-tasks-inc', {
+  return fireDispatchWithPayload_('pipeline-asset-tasks-inc', {
     mode: 'full-walk',
     strict_audit: 'false'
   });
-}
-
-/**
- * Idempotently (re)create the weekly Saturday 6 PM ET trigger for
- * triggerAssetTasksIncFullWalk(). RUN THIS ONCE from the Apps Script editor
- * after deploying this file. Safe to re-run: deletes any existing triggers
- * bound to the handler first (orphaned-trigger gotcha — see
- * setupCalendarEventsTriggers).
- */
-function setupAssetTasksIncFullWalkTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerAssetTasksIncFullWalk') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  ScriptApp.newTrigger('triggerAssetTasksIncFullWalk')
-    .timeBased()
-    .everyWeeks(1)
-    .onWeekDay(ScriptApp.WeekDay.SATURDAY)
-    .atHour(18)
-    .create();
-
-  Logger.log('Created weekly triggerAssetTasksIncFullWalk trigger: ' +
-             'Saturdays ~6 PM ET (Sunday morning PHT full-walk sweep).');
 }
 
 /**
@@ -465,7 +305,7 @@ var SCHEDULE_AUDIT_MINUTES = 15;
  * Idempotently (re)create the every-15-minute time-driven trigger for
  * triggerScheduleFeedAudit(). RUN THIS ONCE from the Apps Script editor after
  * deploying this file. Deletes existing triggers bound to the handler first
- * (orphaned-trigger gotcha — see setupCalendarEventsTriggers), so it is safe
+ * (orphaned-trigger gotcha), so it is safe
  * to re-run after changing SCHEDULE_AUDIT_MINUTES.
  */
 function setupScheduleFeedAuditTrigger() {
@@ -491,33 +331,10 @@ function setupScheduleFeedAuditTrigger() {
  * vs reference.ref_holidays; emails Jamil proposed SQL, never edits the table).
  * The weekly GHA cron in holiday-feed-watch.yml is the backstop; the watermark
  * in pipeline.holiday_watch_runs makes a double fire a no-op.
- * Create the trigger by running setupHolidayFeedWatchTrigger() once.
+ * Scheduled by SCHEDULE (holiday_feed_watch).
  */
 function triggerHolidayFeedWatch() {
-  fireDispatch_('holiday-feed-watch');
-}
-
-/**
- * Idempotently (re)create the weekly trigger for triggerHolidayFeedWatch():
- * Mondays, 6 PM script time (EST) = Tuesday 7 AM PHT. RUN THIS ONCE from the
- * Apps Script editor after deploying this file. Deletes existing triggers
- * bound to the handler first (orphaned-trigger gotcha).
- */
-function setupHolidayFeedWatchTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerHolidayFeedWatch') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  ScriptApp.newTrigger('triggerHolidayFeedWatch')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(18)
-    .create();
-
-  Logger.log('Created triggerHolidayFeedWatch trigger: Mondays 6 PM.');
+  return fireDispatch_('holiday-feed-watch');
 }
 
 /**
@@ -528,72 +345,17 @@ function setupHolidayFeedWatchTrigger() {
  * Monday full list catches anything a missed day skipped.
  */
 function triggerDuplicateAssetWatch() {
-  fireDispatch_('duplicate-asset-watch');
-}
-
-/**
- * Idempotently (re)create the daily trigger for triggerDuplicateAssetWatch():
- * 9 AM script time (EST/EDT). RUN THIS ONCE from the Apps Script editor after
- * deploying this file. Deletes existing triggers bound to the handler first.
- */
-function setupDuplicateAssetWatchTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerDuplicateAssetWatch') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  ScriptApp.newTrigger('triggerDuplicateAssetWatch')
-    .timeBased()
-    .everyDays(1)
-    .atHour(9)
-    .create();
-
-  Logger.log('Created triggerDuplicateAssetWatch trigger: daily 9 AM.');
+  return fireDispatch_('duplicate-asset-watch');
 }
 
 /**
  * Daily HR schedule-changes sheet sync (sync-schedule-changes.yml) at 8 PM PHT.
- * atHour() fires in the project's time zone (America/New_York), which moves
- * against PHT twice a year, so setupScheduleChangesSyncTrigger() installs
- * BOTH a 7 AM and an 8 AM ET trigger and this handler only dispatches when
- * the Manila clock reads 20:xx (8 AM ET during EDT, 7 AM ET during EST). The
- * other firing is a logged no-op.
+ * Scheduled by SCHEDULE (schedule_changes, 20:00 Asia/Manila). Until
+ * 2026-10-26 this needed two ET triggers ("DST twins") and a Manila-hour
+ * check; the scheduler's per-job time zone replaced both.
  */
 function triggerScheduleChangesSync() {
-  var manilaHour = parseInt(Utilities.formatDate(new Date(), 'Asia/Manila', 'H'), 10);
-  if (manilaHour !== 20) {
-    Logger.log('triggerScheduleChangesSync: Manila hour is ' + manilaHour + ', not 20; skipping (DST twin).');
-    return;
-  }
-  fireDispatch_('sync-schedule-changes');
-}
-
-/**
- * Idempotently (re)create the two daily triggers for triggerScheduleChangesSync()
- * (7 AM and 8 AM script time = ET; whichever is 8 PM Manila fires the dispatch).
- * RUN THIS ONCE from the Apps Script editor after deploying this file. Deletes
- * existing triggers bound to the handler first (orphaned-trigger gotcha).
- */
-function setupScheduleChangesSyncTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerScheduleChangesSync') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  var hours = [7, 8];
-  for (var h = 0; h < hours.length; h++) {
-    ScriptApp.newTrigger('triggerScheduleChangesSync')
-      .timeBased()
-      .everyDays(1)
-      .atHour(hours[h])
-      .create();
-  }
-
-  Logger.log('Created triggerScheduleChangesSync triggers: daily 7 AM and 8 AM ET (fires only at 8 PM PHT).');
+  return fireDispatch_('sync-schedule-changes');
 }
 
 /**
@@ -601,42 +363,11 @@ function setupScheduleChangesSyncTrigger() {
  * at 7 PM PHT, one hour BEFORE the schedule-changes sync (which resolves emp_ids
  * against ref_employees). Until 2026-09-16 the roster only synced when someone
  * pressed "Sync to Supabase" in the HR sheet (4 runs ever), so resignations
- * reached the DB weeks late. Same DST-twin pattern as triggerScheduleChangesSync:
- * 6 AM and 7 AM ET triggers, only the one where Manila reads 19:xx dispatches.
- * The workflow's cron backstop is 23:00 UTC (7 AM PHT), 12 h later.
+ * reached the DB weeks late. Scheduled by SCHEDULE (employee_sync, 19:00
+ * Asia/Manila). The workflow's cron backstop is 23:00 UTC (7 AM PHT), 12 h later.
  */
 function triggerEmployeeSync() {
-  var manilaHour = parseInt(Utilities.formatDate(new Date(), 'Asia/Manila', 'H'), 10);
-  if (manilaHour !== 19) {
-    Logger.log('triggerEmployeeSync: Manila hour is ' + manilaHour + ', not 19; skipping (DST twin).');
-    return;
-  }
-  fireDispatch_('sync-employees');
-}
-
-/**
- * Idempotently (re)create the two daily triggers for triggerEmployeeSync()
- * (6 AM and 7 AM script time = ET; whichever is 7 PM Manila fires the dispatch).
- * RUN THIS ONCE from the Apps Script editor after deploying this file.
- */
-function setupEmployeeSyncTrigger() {
-  var existing = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < existing.length; i++) {
-    if (existing[i].getHandlerFunction() === 'triggerEmployeeSync') {
-      ScriptApp.deleteTrigger(existing[i]);
-    }
-  }
-
-  var hours = [6, 7];
-  for (var h = 0; h < hours.length; h++) {
-    ScriptApp.newTrigger('triggerEmployeeSync')
-      .timeBased()
-      .everyDays(1)
-      .atHour(hours[h])
-      .create();
-  }
-
-  Logger.log('Created triggerEmployeeSync triggers: daily 6 AM and 7 AM ET (fires only at 7 PM PHT).');
+  return fireDispatch_('sync-employees');
 }
 
 /**
@@ -648,7 +379,7 @@ function fireDispatchWithPayload_(eventType, clientPayload) {
   var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!token) {
     Logger.log('ERROR: GITHUB_TOKEN not set in Script Properties');
-    return;
+    return false;
   }
 
   var url = 'https://api.github.com/repos/' + REPO + '/dispatches';
@@ -673,9 +404,10 @@ function fireDispatchWithPayload_(eventType, clientPayload) {
 
   if (code === 204) {
     Logger.log('Dispatched ' + eventType + ' with payload ' + JSON.stringify(clientPayload) + ' successfully');
-  } else {
-    Logger.log('ERROR dispatching ' + eventType + ': HTTP ' + code + ' — ' + response.getContentText());
+    return true;
   }
+  Logger.log('ERROR dispatching ' + eventType + ': HTTP ' + code + ' — ' + response.getContentText());
+  return false;
 }
 
 /**
@@ -773,7 +505,7 @@ function checkForRevenueReports() {
 /**
  * Idempotently (re)create the every-5-minute time-driven trigger for
  * checkForRevenueReports(). Deletes any existing triggers bound to the handler
- * first (orphaned-trigger gotcha — see setupCalendarEventsTriggers), so it is
+ * first (orphaned-trigger gotcha), so it is
  * safe to re-run. If a working 5-min trigger already exists, you do NOT need
  * to run this.
  */
@@ -874,7 +606,7 @@ function testAllDispatches() {
  *     that PAT must have contents:read+write on BOTH gmail-scraper and
  *     local-pipeline (the scrape workflow's own COP_DISPATCH_PAT secret needs
  *     local-pipeline too, for the chain dispatch).
- *   - Create/reset the trigger with setupPackageScrapeTrigger() (idempotent).
+ *   - Scheduled by SCHEDULE (package_scrape, 18:00 Asia/Manila).
  */
 
 var PACKAGE_SCRAPE_ALERT_EMAIL = 'jamil.mendez@ontel.co';
@@ -995,31 +727,186 @@ function schedulePackageScraperTokenReminder() {
   Logger.log('Rotation reminder created for ' + reminderDate.toDateString());
 }
 
+// ============================================================================
+// SCHEDULER: one 5-minute trigger fires every daily and weekly job (2026-10-26)
+// ============================================================================
 /**
- * Create (or re-create) the daily 6 PM Asia/Manila trigger for
- * triggerPackageScrape. RUN THIS ONCE from the Apps Script editor after
- * pasting this file; it is idempotent (existing triggers for the function
- * are deleted first, so re-running never stacks duplicates).
+ * Why: Apps Script allows 20 triggers per script. One trigger per job (plus
+ * two "DST twin" triggers for each Manila-time job) reached 20 on 2026-10-26
+ * and setupEmployeeSyncTrigger() failed with "This script has too many
+ * triggers". Now ONE runScheduler() trigger runs every 5 minutes and fires
+ * the jobs below. Only the high-frequency jobs (priorities, revenue watch,
+ * schedule feed audit) keep their own triggers, so a scheduler bug can never
+ * stop them too.
  *
- * Why an explicit time zone: Apps Script's atHour() otherwise fires in the
- * project's time zone (America/New_York), which would move the scrape by
- * an hour in PHT every DST change. The contract is 6 PM PHT.
+ * How a tick decides, per job, on the clock of the job's own time zone:
+ *   NOT_TODAY  weekday not in `days`
+ *   DONE       already succeeded on this local date
+ *   LATER      before `at`
+ *   DUE        at or after `at` and less than `graceMin` (default 60) past it
+ *   MISSED     more than `graceMin` past `at`: skipped for today, so nothing
+ *              fires hours late (timer emails must run soon after their window)
+ * A job that returns false (dispatch failed) stays DUE and retries on the next
+ * tick inside its grace window. State: Script Property SCHED_LAST_<id> = the
+ * local date of the last success. `at` + graceMin must stay before midnight.
+ *
+ * Time zones are explicit per job, so the Manila jobs no longer need two
+ * triggers to follow US daylight saving.
+ *
+ * To change a time: edit SCHEDULE, paste the whole file. No trigger change.
+ * To see what each job will do now: run previewSchedule().
  */
-function setupPackageScrapeTrigger() {
-  var FN = 'triggerPackageScrape';
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === FN) {
-      ScriptApp.deleteTrigger(triggers[i]);
-      Logger.log('Deleted existing ' + FN + ' trigger');
+var SCHED_TZ_ET = 'America/New_York';
+var SCHED_TZ_PH = 'Asia/Manila';
+var SCHED_PROP_PREFIX = 'SCHED_LAST_';
+var SCHED_TICK_MINUTES = 5;
+var SCHED_DEFAULT_GRACE_MIN = 60;
+
+// days: 1 = Monday ... 7 = Sunday, in the job's time zone. Omit for every day.
+var SCHEDULE = [
+  { id: 'asset_tasks',               tz: SCHED_TZ_ET, at: '00:01', fn: triggerAssetTasks },
+  { id: 'priorities_daily',          tz: SCHED_TZ_ET, at: '00:13', fn: triggerPrioritiesDaily },
+  { id: 'forms',                     tz: SCHED_TZ_ET, at: '00:17', fn: triggerForms },
+  { id: 'timer',                     tz: SCHED_TZ_ET, at: '01:15', fn: triggerLightPipelines },
+  { id: 'open_items_data',           tz: SCHED_TZ_ET, at: '02:00', graceMin: 90, fn: triggerOpenItemsData },  // 90: the US spring-forward day has no 02:xx
+  { id: 'calendar_am',               tz: SCHED_TZ_ET, at: '05:00', fn: triggerCalendarEvents },
+  { id: 'duplicate_asset_watch',     tz: SCHED_TZ_ET, at: '09:00', fn: triggerDuplicateAssetWatch },
+  { id: 'timer_emails_second',       tz: SCHED_TZ_ET, at: '09:00', fn: triggerTimerEmailsSecond },
+  { id: 'calendar_pm',               tz: SCHED_TZ_ET, at: '17:00', fn: triggerCalendarEvents },
+  { id: 'holiday_feed_watch',        tz: SCHED_TZ_ET, at: '18:00', days: [1], fn: triggerHolidayFeedWatch },
+  { id: 'asset_tasks_inc_full_walk', tz: SCHED_TZ_ET, at: '18:00', days: [6], fn: triggerAssetTasksIncFullWalk },
+  { id: 'timer_emails_first',        tz: SCHED_TZ_ET, at: '18:30', fn: triggerTimerEmails },
+  { id: 'orgs',                      tz: SCHED_TZ_ET, at: '22:13', fn: triggerOrgs },
+  { id: 'package_scrape',            tz: SCHED_TZ_PH, at: '18:00', fn: triggerPackageScrape },
+  { id: 'employee_sync',             tz: SCHED_TZ_PH, at: '19:00', fn: triggerEmployeeSync },
+  { id: 'schedule_changes',          tz: SCHED_TZ_PH, at: '20:00', fn: triggerScheduleChangesSync }
+];
+
+// Old handlers whose time triggers setupScheduler() deletes (renamed or retired).
+var SCHED_LEGACY_HANDLERS = ['triggerAssetTasksGC', 'triggerCalendarLeave'];
+
+/** The 5-minute tick. Created by setupScheduler(); never schedule it by hand. */
+function runScheduler() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) {
+    Logger.log('runScheduler: previous tick still running; skipping this one.');
+    return;
+  }
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var now = new Date();
+    for (var i = 0; i < SCHEDULE.length; i++) {
+      var job = SCHEDULE[i];
+      var st = schedJobState_(job, now, props.getProperty(SCHED_PROP_PREFIX + job.id));
+      if (st.state !== 'DUE') continue;
+      var ok = false;
+      try {
+        ok = job.fn() !== false; // handlers return false only when the dispatch failed
+      } catch (e) {
+        Logger.log('runScheduler: ' + job.id + ' threw: ' + e);
+      }
+      if (ok) {
+        props.setProperty(SCHED_PROP_PREFIX + job.id, st.localDate);
+        Logger.log('runScheduler: fired ' + job.id + ' (' + job.at + ' ' + job.tz + ', ' + st.localDate + ')');
+      } else {
+        Logger.log('runScheduler: ' + job.id + ' failed; retrying on the next tick inside its grace window.');
+      }
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Pure state check for one job at instant `now`. See the block comment above. */
+function schedJobState_(job, now, lastDate) {
+  var localDate = Utilities.formatDate(now, job.tz, 'yyyy-MM-dd');
+  var hm = Utilities.formatDate(now, job.tz, 'HH:mm').split(':');
+  var nowMin = parseInt(hm[0], 10) * 60 + parseInt(hm[1], 10);
+  var at = job.at.split(':');
+  var atMin = parseInt(at[0], 10) * 60 + parseInt(at[1], 10);
+  var grace = job.graceMin || SCHED_DEFAULT_GRACE_MIN;
+  var dow = parseInt(Utilities.formatDate(now, job.tz, 'u'), 10); // 1 = Monday
+  var state;
+  if (job.days && job.days.indexOf(dow) === -1) state = 'NOT_TODAY';
+  else if (lastDate === localDate) state = 'DONE';
+  else if (nowMin < atMin) state = 'LATER';
+  else if (nowMin < atMin + grace) state = 'DUE';
+  else state = 'MISSED';
+  return { state: state, localDate: localDate };
+}
+
+function validateSchedule_() {
+  var seen = {};
+  for (var i = 0; i < SCHEDULE.length; i++) {
+    var j = SCHEDULE[i];
+    if (seen[j.id]) throw new Error('SCHEDULE: duplicate id ' + j.id);
+    seen[j.id] = true;
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(j.at)) throw new Error('SCHEDULE: bad time for ' + j.id + ': ' + j.at);
+    if (typeof j.fn !== 'function') throw new Error('SCHEDULE: ' + j.id + ' has no handler function');
+    var p = j.at.split(':');
+    if (parseInt(p[0], 10) * 60 + parseInt(p[1], 10) + (j.graceMin || SCHED_DEFAULT_GRACE_MIN) > 24 * 60) {
+      throw new Error('SCHEDULE: ' + j.id + ' grace window crosses midnight');
     }
   }
-  ScriptApp.newTrigger(FN)
+}
+
+/**
+ * RUN THIS ONCE from the Apps Script editor after pasting this file, between
+ * 10 AM and 5 PM ET (no job is due then; it refuses otherwise, so an old
+ * trigger and the scheduler can never both fire the same job today).
+ * Deletes every time trigger bound to a SCHEDULE handler, the legacy handlers
+ * and runScheduler itself, then creates the single 5-minute runScheduler
+ * trigger. Safe to re-run.
+ */
+function setupScheduler() {
+  validateSchedule_();
+  var now = new Date();
+  var props = PropertiesService.getScriptProperties();
+  var due = [];
+  for (var i = 0; i < SCHEDULE.length; i++) {
+    var st = schedJobState_(SCHEDULE[i], now, props.getProperty(SCHED_PROP_PREFIX + SCHEDULE[i].id));
+    if (st.state === 'DUE') due.push(SCHEDULE[i].id);
+  }
+  if (due.length) {
+    throw new Error('setupScheduler: these jobs are due right now: ' + due.join(', ') +
+                    '. Run it again between 10 AM and 5 PM ET.');
+  }
+
+  var handlers = { runScheduler: true };
+  for (var k = 0; k < SCHEDULE.length; k++) handlers[SCHEDULE[k].fn.name] = true;
+  for (var m = 0; m < SCHED_LEGACY_HANDLERS.length; m++) handlers[SCHED_LEGACY_HANDLERS[m]] = true;
+
+  var existing = ScriptApp.getProjectTriggers();
+  var deleted = 0;
+  for (var t = 0; t < existing.length; t++) {
+    if (handlers[existing[t].getHandlerFunction()]) {
+      ScriptApp.deleteTrigger(existing[t]);
+      deleted++;
+    }
+  }
+
+  ScriptApp.newTrigger('runScheduler')
     .timeBased()
-    .everyDays(1)
-    .atHour(18)
-    .nearMinute(0)
-    .inTimezone('Asia/Manila')
+    .everyMinutes(SCHED_TICK_MINUTES)
     .create();
-  Logger.log('Created daily ' + FN + ' trigger at 18:00 Asia/Manila (+/-15 min)');
+
+  var left = ScriptApp.getProjectTriggers().map(function (x) { return x.getHandlerFunction(); });
+  Logger.log('setupScheduler: deleted ' + deleted + ' trigger(s); created runScheduler every ' +
+             SCHED_TICK_MINUTES + ' min. Triggers now (' + left.length + '): ' + left.join(', '));
+}
+
+/** Read-only: log every job's state right now, and the project's triggers. Fires nothing. */
+function previewSchedule() {
+  validateSchedule_();
+  var now = new Date();
+  var props = PropertiesService.getScriptProperties();
+  for (var i = 0; i < SCHEDULE.length; i++) {
+    var j = SCHEDULE[i];
+    var last = props.getProperty(SCHED_PROP_PREFIX + j.id);
+    var st = schedJobState_(j, now, last);
+    Logger.log(j.id + ': ' + st.state + ' (at ' + j.at + ' ' + j.tz +
+               (j.days ? ', days ' + j.days.join('/') : '') + '; last success ' + (last || 'never') + ')');
+  }
+  var left = ScriptApp.getProjectTriggers().map(function (x) { return x.getHandlerFunction(); });
+  Logger.log('Triggers (' + left.length + ' of 20): ' + left.join(', '));
 }
