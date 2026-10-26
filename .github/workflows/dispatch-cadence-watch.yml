@@ -1,0 +1,101 @@
+name: "Watch: Dispatch Cadence"
+
+# Alerts Jamil when repository_dispatch runs stop arriving (OnPoint INIT-827).
+# On 2026-09-30 the Apps Script dispatch PAT expired and every dispatch-driven
+# pipeline stopped for 22 h with no alert. This watcher lists runs with the
+# built-in GITHUB_TOKEN (actions: read), so it never depends on that PAT, and
+# it runs on GHA cron only (never repository_dispatch, which would die with
+# the thing it watches).
+#
+# Checks: newest dispatch run of any workflow + the two 5-min heartbeats
+# (Daily Reports Rolling = ontel Apps Script, User Priorities = nanoninth
+# Apps Script), each breached past 30 min. 30 days of history: dispatches run
+# 24/7, worst normal gap 5.6 min overall / 10 min per heartbeat.
+#
+# Every 15 min at off-peak minutes (GHA cron is often late near :00). State
+# (alerting or not) rides in actions/cache so an outage emails once, then a
+# reminder every 6 h, then once on recovery. See
+# swift_api_pipeline/dispatch_cadence_watcher.py.
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print ages, no email, no state change)"
+        required: false
+        default: "false"
+      threshold_min:
+        description: "Staleness threshold in minutes (0 = exercise the email path; the next run then sends the recovery email)"
+        required: false
+        default: "30"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: dispatch-cadence-watch
+  cancel-in-progress: false
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+  STATE_FILE: ${{ github.workspace }}/.dispatch-cadence/state.json
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # Only the Gmail client libraries: the check itself is stdlib-only.
+      - name: Install email dependencies
+        run: |
+          grep '^google' requirements.txt > /tmp/email-requirements.txt
+          pip install -r /tmp/email-requirements.txt
+
+      - name: Restore alert state
+        uses: actions/cache/restore@v6
+        with:
+          path: .dispatch-cadence
+          key: dispatch-cadence-state-${{ github.run_id }}
+          restore-keys: dispatch-cadence-state-
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Watch dispatch cadence
+        id: watch
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          THRESHOLD_MIN: ${{ github.event.inputs.threshold_min || '30' }}
+        run: |
+          DRY_ARG=""
+          if [ "$DRY_RUN" = "true" ]; then
+            DRY_ARG="--dry-run"
+          fi
+          python -u dispatch_cadence_watcher.py --state-file "$STATE_FILE" \
+            --threshold-min "$THRESHOLD_MIN" $DRY_ARG
+
+      - name: Save alert state
+        if: steps.watch.outputs.state_changed == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .dispatch-cadence
+          key: dispatch-cadence-state-${{ github.run_id }}-${{ github.run_attempt }}
