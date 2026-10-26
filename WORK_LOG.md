@@ -4065,3 +4065,14 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
 - Preflight on live OntelDB: the 5 objects naming both stg_asset_tasks and run_id (app_my_timers.legacy_import_changes, analytics.v_pmi_sites, data_staging.v_asset_tasks_cleaned, gap_report.mv_asset_tasks_recent / mv_timer_base, the last two read only) select the column or filter other tables; pg_depend / pg_constraint: 0 dependents. Code: only the INSERT column list.
 - `DROP INDEX CONCURRENTLY` (no table lock; cannot run in a transaction, so execute_sql/psql, not apply_migration). Apply outside 12:01-1:15 AM and 6:05-6:45 AM ET on Jamil's go. Rollback statement in the header.
 - APPLIED 2026-10-26 ~2:37 AM ET (Jamil's go) over the session pooler, 0.1 s; MCP execute_sql refused CONCURRENTLY twice. Verified to_regclass IS NULL. Next check: 12:01 AM ET asset-tasks run validates [OK].
+
+## 2026-10-26 (6:45-7:00 AM ET) - User Priorities "not refreshing" check: no fault
+- Report: User Priorities looked like it wasn't refreshing every 5 min.
+- GHA `pipeline-priorities.yml`: a successful repository_dispatch run every 5 min all night (Apps Script `triggerPriorities`, its own trigger; unaffected by the pending scheduler paste).
+- Runs log "Snapshot unchanged ... skipping load" when Swift's list is identical (snapshot-skip, b5e7568). Last real load 09:52 UTC (one row removed, 6,317 -> 6,316).
+- Why it looked stale: since the 2026-09-08 merge-in-place, `stg_user_priorities.loaded_at` = "row last changed", so `max(loaded_at)` stayed at 03:08 ET. Run time lives in `pipeline.content_watermarks.updated_at` (only on loads) and pipeline_runs.
+- Read-only comparison `swift_api_pipeline/out/compare_user_priorities.py` (fresh Swift pull 06:57 ET into a session TEMP table, mapped with transform.USER_PRIORITY_COLUMNS, compared every column per task_did): 6,316 vs 6,316 tasks, 0 missing, 0 extra, 0 field differences; fresh hash c7daff3d4529 = watermark. Verdict IDENTICAL.
+- Stale comment: pipeline_trigger.gs still says PRIORITY_REFRESH_MINUTES = 10, but the live trigger fires every 5 min. Not changed.
+
+## 2026-10-26 (7:00-7:10 AM ET) - pipeline_trigger.gs: User Priorities comments 10 min -> 5 min
+- Comments in `scripts/pipeline_trigger.gs` and `.github/workflows/pipeline-priorities.yml` said the refresh runs every 10 min; the live trigger fires every 5. Updated every mention, and `PRIORITY_REFRESH_MINUTES` 10 -> 5 so a re-run of `setupPriorityRefreshTrigger()` keeps 5 min. Added the night-shift "never thin this cadence" note. No behavior change for the live trigger; `setupScheduler()` still leaves the priorities trigger alone.

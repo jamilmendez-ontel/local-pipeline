@@ -16,7 +16,7 @@
  *      one-trigger-per-job layout hit that limit on 2026-10-26
  *      (setupEmployeeSyncTrigger: "This script has too many triggers").
  *      Only the high-frequency jobs keep their own triggers:
- *      - triggerPriorities()        → every 10 min (setupPriorityRefreshTrigger())
+ *      - triggerPriorities()        → every 5 min (setupPriorityRefreshTrigger())
  *      - checkForRevenueReports()   → every 5 min (setupRevenueWatchTrigger())
  *      - triggerScheduleFeedAudit() → every 15 min (setupScheduleFeedAuditTrigger())
  *      Total: 4 triggers. To change a time, edit SCHEDULE and paste the
@@ -34,7 +34,7 @@
  *               GC/Open Items wave.)
  *   12:17 AM  — QA Forms
  *   12:13 AM  — User Priorities FULL run (refresh + Excel export + shared-Drive upload)
- *   every 10m — User Priorities DB refresh only (extract + transform; no export)
+ *   every 5m  — User Priorities DB refresh only (extract + transform; no export)
  *   every 5m  — Gmail watch for unread "Daily Revenue Report" emails →
  *               gmail-revenue-report (AR aging + sales; downstream: the
  *               Daily Finance report + COP invoice forecast chains)
@@ -91,7 +91,7 @@ function triggerOrgs() {
  * NOTE: This used to also fire QA Forms after an 8-min Utilities.sleep() and
  * User Priorities before that. Both have been split out:
  *   - QA Forms      → triggerForms() on its own 12:17 AM trigger
- *   - User Priorities → triggerPriorities() (every 10 min) + triggerPrioritiesDaily()
+ *   - User Priorities → triggerPriorities() (every 5 min) + triggerPrioritiesDaily()
  * There is no longer any in-process sleep here, so the execution is short and
  * cannot silently drop a later dispatch.
  */
@@ -151,7 +151,7 @@ function triggerForms() {
  *
  * Run it AFTER User Priorities is fresh: targeted_task_requirements reads
  * stg_user_priorities to decide which task_dids to fetch requirements for.
- * Priorities refreshes every 10 min (triggerPriorities), so any time around
+ * Priorities refreshes every 5 min (triggerPriorities), so any time around
  * 02:00 AM is safe.
  *
  * ROOT CAUSE of the 6-22 outage — DO NOT REMOVE THIS FUNCTION FROM SOURCE:
@@ -169,17 +169,18 @@ function triggerOpenItemsData() {
 
 /**
  * Trigger the User Priorities DB refresh ONLY (extract + transform).
- * Schedule this on a time-driven trigger every 10 minutes (later 5 min).
+ * Runs on a time-driven trigger every 5 minutes, around the clock: a
+ * night-shift user depends on it, so never thin this cadence.
  *
  * Fires with run_export=false so the workflow skips the Excel export and the
  * shared-Drive upload — those run once daily via triggerPrioritiesDaily().
  *
  * The workflow itself emails only on FAILURE (after its internal retry), so a
- * 10-min cadence produces no success-email noise.
+ * 5-min cadence produces no success-email noise.
  *
- * To create/refresh the 10-min trigger programmatically, run
- * setupPriorityRefreshTrigger() once (edit PRIORITY_REFRESH_MINUTES to 5 to
- * move from 10 → 5 min, then re-run it).
+ * To create/refresh the 5-min trigger programmatically, run
+ * setupPriorityRefreshTrigger() once. It keeps its own trigger;
+ * setupScheduler() does not touch it.
  */
 function triggerPriorities() {
   fireDispatchWithPayload_('pipeline-priorities', { run_export: false });
@@ -198,15 +199,15 @@ function triggerPrioritiesDaily() {
 /**
  * Cadence (minutes) for the User Priorities DB-refresh trigger.
  * Apps Script minute-based triggers allow 1, 5, 10, 15, or 30.
- * Start at 10; change to 5 and re-run setupPriorityRefreshTrigger() to speed up.
+ * Live at 5 (the live trigger has fired every 5 min since July 2026).
  */
-var PRIORITY_REFRESH_MINUTES = 10;
+var PRIORITY_REFRESH_MINUTES = 5;
 
 /**
  * Idempotently (re)create the every-N-minute time-driven trigger for
  * triggerPriorities(). Run this once from the Apps Script editor. Re-running it
  * deletes the old triggerPriorities trigger first, so it is safe to re-run
- * after changing PRIORITY_REFRESH_MINUTES (10 → 5).
+ * after changing PRIORITY_REFRESH_MINUTES.
  */
 function setupPriorityRefreshTrigger() {
   // Remove any existing triggers bound to triggerPriorities to avoid duplicates.
