@@ -25,8 +25,22 @@ Sheets ──────┘
 ## Automation — GitHub Actions only (Windows Task Scheduler retired 2026-05-28)
 
 All nightly pipelines run as GHA workflows in this repo, fired by Apps
-Script time-driven triggers under the notifier account. See
-`scripts/pipeline_trigger.gs` for the full schedule.
+Script under the notifier account. See `scripts/pipeline_trigger.gs` for the
+full schedule.
+
+**One scheduler trigger (since 2026-10-26).** Apps Script allows 20 triggers
+per script and the old one-trigger-per-job layout hit that limit. Every daily
+and weekly job is now a row in `SCHEDULE` at the bottom of
+`pipeline_trigger.gs` (id, time zone, local time, optional weekdays). A single
+`runScheduler()` trigger runs every 5 minutes and fires each job once per
+local day, on the job's own clock (so the Manila jobs follow PHT with no
+daylight-saving twins), retrying a failed dispatch on the next tick for up to
+60 minutes and skipping the day after that. Only the frequent jobs keep their
+own triggers (priorities, revenue mail watch, schedule feed audit): 4 triggers
+in total. To change a time, edit `SCHEDULE` and paste the whole file;
+`previewSchedule()` logs what each job will do right now. Install or reinstall
+with `setupScheduler()` between 10 AM and 5 PM ET (it refuses while a job is
+due). Logic check: `node scripts/sim_pipeline_trigger_scheduler.js`.
 
 | Workflow | Trigger | What it refreshes |
 |---|---|---|
@@ -47,10 +61,10 @@ Script time-driven triggers under the notifier account. See
 | `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
 | `holiday-feed-watch.yml` | Apps Script Mon 6 PM ET + cron Thu 22:00 UTC backstop | PH holiday proclamation watch: lawphil proclamation index (+ Official Gazette RSS when not 403-blocked) + Nager.Date vs `reference.ref_holidays`; emails Jamil proposed INSERT/UPDATE SQL (never writes the table), silent when nothing new (see below) |
 | `duplicate-asset-watch.yml` | Apps Script daily 9 AM ET (no cron backstop: stateless) | Swift assets created twice (same project, path and name), which leave v1 timer/QA form `asset_did` empty; emails Jamil an HTML report (Ontel style: KPI cards, sections fix-first / merge / clutter, blank v1 timers + hours per site) with workbooks attached, one for all CGs plus one per CG (CG1 Verizon / CG2 AT&T-DISH / CG3 TMO-USCC from `stg_assets.carrier_group`) to share with each team (Summary, Groups, Copies, Blank timers); new groups daily, full list Mondays ET; never writes |
-| `sync-schedule-changes.yml` | Apps Script daily 8 PM PHT (DST-locked) + cron 00:00 UTC backstop | HR schedule-changes sheet → `raw_schedule_changes` / `stg_schedule_change_history` / `v_employee_schedule_history` (DRMC directory Schedule history); idempotent upsert-then-prune, so the 8 AM PHT backstop is harmless; `workflow_dispatch` has a `dry_run` input |
-| `sync-employees.yml` | Apps Script daily 7 PM PHT (DST-locked, `triggerEmployeeSync` in `pipeline_trigger.gs`) + cron 23:00 UTC backstop; also the HR sheet's "Sync to Supabase" menu button (`repository_dispatch`) and `workflow_dispatch` with an `effective_date` | HR "Active Employee Information" sheet → `reference.ref_employees` (+ `ref_employee_approvers`) via `sync_employees.py --apply`; runs an hour before the schedule-changes sync that resolves emp_ids against it; resignation-on-absence guarded by a 50% row-count floor. Daily since 2026-09-16 (#75); before that it only ran from the menu button (4 runs ever) |
+| `sync-schedule-changes.yml` | Apps Script scheduler daily 8 PM PHT (`schedule_changes`, Asia/Manila clock) + cron 00:00 UTC backstop | HR schedule-changes sheet → `raw_schedule_changes` / `stg_schedule_change_history` / `v_employee_schedule_history` (DRMC directory Schedule history); idempotent upsert-then-prune, so the 8 AM PHT backstop is harmless; `workflow_dispatch` has a `dry_run` input |
+| `sync-employees.yml` | Apps Script scheduler daily 7 PM PHT (`employee_sync` in `SCHEDULE`, Asia/Manila clock) + cron 23:00 UTC backstop; also the HR sheet's "Sync to Supabase" menu button (`repository_dispatch`) and `workflow_dispatch` with an `effective_date` | HR "Active Employee Information" sheet → `reference.ref_employees` (+ `ref_employee_approvers`) via `sync_employees.py --apply`; runs an hour before the schedule-changes sync that resolves emp_ids against it; resignation-on-absence guarded by a 50% row-count floor. Daily since 2026-09-16 (#75); before that it only ran from the menu button (4 runs ever) |
 
-Exact trigger times live in `scripts/pipeline_trigger.gs`. The
+Exact times live in `SCHEDULE` in `scripts/pipeline_trigger.gs`. The
 `pipeline-asset-tasks` workflow fires downstream dispatches at end-of-run
 (export, discrepancies, validator, weekly compliance). The
 `pipeline-open-items-data` workflow fires a downstream report email

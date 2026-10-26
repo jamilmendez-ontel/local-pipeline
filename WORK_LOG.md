@@ -4036,3 +4036,16 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
 **Live (10-19)**: CG1 Verizon 54 sites, 8 hiding 58 timers (28.5 h), 2 merges; CG2 AT&T/DISH 2 sites, 28 timers (16.4 h; KSL05814 alone 22 timers / 11.9 h); CG3 TMO/USCC 2 sites, 1 timer (0.2 h). Files: `out/duplicate-swift-assets-2026-10-19-CG*.xlsx` (git-ignored). Email sent (run 39234776159).
 
 **Open PR sweep (Jamil's go)**: #81 merged (`dffbdc1`): file record of `272_gc_tracker_task_requirements_view.sql`, applied 2026-09-25 and since rebuilt by mig 278; nothing re-applied. ontel-data-platform #17 (GC tracker handout docs) merged. #105 stays a draft until the asset-tasks cutover (Jamil's 2026-10-14 rule: v1 and its GHA shadow walker keep running).
+
+## 2026-10-26 (1:20 AM - 2:10 AM ET) - Apps Script: one scheduler trigger replaces 16 (trigger limit hit)
+
+**Trigger**: closing INIT-734 (daily roster sync). `setupEmployeeSyncTrigger()` failed in the nanoninth project: "This script has too many triggers". The project held 20 time triggers, Apps Script's per-script maximum, so the roster dispatch was never installed and `sync-employees.yml` has run only from its 23:00 UTC cron backstop (about 12 h later than planned). The list also still held `triggerAssetTasksGC` (100% failing; INIT-818), which Jamil then deleted.
+
+**Built** (`scripts/pipeline_trigger.gs`):
+- `SCHEDULE`: 16 jobs (id, time zone, local `at`, optional weekdays, handler). `runScheduler()` runs every 5 minutes; per job on its own clock it is DUE from `at` until 60 minutes after, once per local date (Script Property `SCHED_LAST_<id>`), retrying a failed dispatch on the next tick; past the grace window the day is skipped so nothing fires hours late. Script lock against overlapping ticks.
+- Manila jobs (package scrape 18:00, employee sync 19:00, schedule changes 20:00) carry `Asia/Manila`, so the DST-twin pairs and Manila-hour checks are gone. Handlers now return the dispatch result (`fireDispatchWithPayload_` returns true/false like `fireDispatch_`).
+- `setupScheduler()`: refuses while any job is due (run 10 AM - 5 PM ET), deletes triggers of every SCHEDULE handler + legacy `triggerAssetTasksGC` / `triggerCalendarLeave` + itself, creates the one 5-min trigger. `previewSchedule()` is read-only.
+- Removed the 9 per-job setup functions (re-running one would double-fire alongside the scheduler) and their time constants. Kept: `setupPriorityRefreshTrigger`, `setupRevenueWatchTrigger`, `setupScheduleFeedAuditTrigger`. Result: 4 triggers (was 20).
+- `scripts/sim_pipeline_trigger_scheduler.js`: Node check with stubbed Apps Script services; 8 days of 5-min ticks with jitter across the Nov 1 DST end: every job once per day at its time, Manila jobs move 1 h in ET on Nov 1 and stay fixed in PHT, ET jobs stay fixed in ET, weekly jobs once, injected dispatch failure retried next tick, setup refuses at 09:05 ET.
+
+**Deploy (Jamil)**: paste the whole file, run `setupScheduler()` between 10 AM and 5 PM ET, then `previewSchedule()`. Roster sync then fires daily at 7 PM PHT; check the next `sync-employees` run shows event `repository_dispatch` and close INIT-734.
