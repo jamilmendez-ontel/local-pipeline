@@ -140,6 +140,25 @@ def _sentence_case(text: str) -> str:
     return out[:1].upper() + out[1:]
 
 
+def id_suffix_match(note: str | None, emp_by_id: dict) -> dict | None:
+    """The employee id typed at the end of an event ("VL - CG1 - Ana - 200601", parsed
+    into person_note) is the reference for who is on leave: the creator is often
+    someone else filing for them, and the name part is a nickname. When that id is in
+    the roster it decides the person, ahead of the name cache, exact match and AI.
+    An id not in the roster (a typo such as 2202325) returns None so the name match
+    still runs. (Agreed 2026-10-28 by Jamil Mendez, INIT-397.)"""
+    if note is None:
+        return None
+    s = "".join(note.split())
+    if not _EMP_ID_RE.fullmatch(s):
+        return None
+    emp = emp_by_id.get(s.lstrip("-"))
+    if emp is None:
+        return None
+    return {"emp_id": emp["emp_id"], "person_normalized": emp.get("full_name"),
+            "confidence": 1.0, "match_source": "id_suffix"}
+
+
 def normalize_person_note(note: str | None) -> str | None:
     """Clean a calendar person_note. See the module comment above for forms."""
     if note is None:

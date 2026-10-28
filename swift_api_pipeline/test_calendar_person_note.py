@@ -172,3 +172,81 @@ def test_backfill_plan_only_changes_differing_rows():
     assert stats["with_note"] == 3
     assert stats["would_have_value"] == 2
     assert stats["note_to_null"] == 1
+
+
+# --- the employee-id suffix decides the person (agreed 2026-10-28, Jamil) ---
+
+_ROSTER = {
+    "221001": {"emp_id": "221001", "full_name": "Mikaela Louise Santos Patolot", "carrier_group": "CG1 - Verizon"},
+    "230103": {"emp_id": "230103", "full_name": "Jan Daniel Dela Camara Bernabe", "carrier_group": None},
+}
+
+
+@pytest.mark.parametrize("note", ["221001", " 221001 ", "-221001"])
+def test_id_suffix_match_uses_roster_id(note):
+    from calendar_normalize import id_suffix_match
+    m = id_suffix_match(note, _ROSTER)
+    assert m == {"emp_id": "221001", "person_normalized": "Mikaela Louise Santos Patolot",
+                 "confidence": 1.0, "match_source": "id_suffix"}
+
+
+@pytest.mark.parametrize("note", [None, "", "2202325", "220108", "2PM onwards", "22100", "Half day 221001"])
+def test_id_suffix_match_falls_back(note):
+    from calendar_normalize import id_suffix_match
+    assert id_suffix_match(note, _ROSTER) is None
+
+
+def test_load_staging_id_suffix_beats_name_match():
+    from calendar_events_load import _enrich
+    calls = []
+
+    class DB:
+        def fetchrow(self, *a):
+            calls.append(a)
+            return {"emp_id": "250811", "person_normalized": "Mike Steffan Imperial Silvosa",
+                    "confidence": 0.6, "match_source": "ai"}
+
+    lookups = {"code_map": {}, "team_map": {}, "emp_index": {}, "emp_by_id": _ROSTER}
+    norm = _enrich(DB(), {"person": "Mik", "team": "CG1", "person_note": "221001"}, lookups)
+    assert norm["emp_id"] == "221001"
+    assert norm["person_match_source"] == "id_suffix"
+    assert norm["team_normalized"] == "CG1 - Verizon"
+    assert norm["person_note_normalized"] is None
+    assert calls == []  # no cache / AI lookup when the id decides
+
+
+def test_load_staging_typo_id_keeps_name_match():
+    from calendar_events_load import _enrich
+
+    class DB:
+        def fetchrow(self, *a):
+            return {"emp_id": "220325", "person_normalized": "Randolf Christian Fuertes Garcia",
+                    "confidence": 0.9, "match_source": "ai"}
+
+    lookups = {"code_map": {}, "team_map": {}, "emp_index": {}, "emp_by_id": _ROSTER}
+    norm = _enrich(DB(), {"person": "Randolf Garcia", "team": None, "person_note": "2202325"}, lookups)
+    assert norm["emp_id"] == "220325"
+    assert norm["person_match_source"] == "ai"
+
+
+def test_backfill_plan_person_repoints_only_differing_rows():
+    from _backfill_person_note import plan_person
+    lookups = {"emp_by_id": _ROSTER, "team_map": {}}
+    rows = [
+        {"event_id": "mik", "person_note": "221001", "team": "CG1", "emp_id": "250811",
+         "person_normalized": "Mike Steffan Imperial Silvosa", "person_match_source": "ai",
+         "team_normalized": "CG1 - Verizon", "team_level": "carrier_group"},
+        {"event_id": "same", "person_note": "221001", "team": "CG1", "emp_id": "221001",
+         "person_normalized": "Mikaela Louise Santos Patolot", "person_match_source": "id_suffix",
+         "team_normalized": "CG1 - Verizon", "team_level": "carrier_group"},
+        {"event_id": "typo", "person_note": "2202325", "team": None, "emp_id": "220325",
+         "person_normalized": "Randolf", "person_match_source": "ai",
+         "team_normalized": None, "team_level": None},
+        {"event_id": "note", "person_note": "2pm onwards", "team": None, "emp_id": None,
+         "person_normalized": None, "person_match_source": "unmatched",
+         "team_normalized": None, "team_level": None},
+    ]
+    out = plan_person(rows, lookups)
+    assert [c[0] for c in out] == ["mik"]
+    assert out[0][2] == ("221001", "Mikaela Louise Santos Patolot", "id_suffix",
+                         "CG1 - Verizon", "carrier_group")

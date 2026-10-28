@@ -56,7 +56,8 @@ def renormalize(db):
     avoid a per-row loop against the remote DB (which times out at scale)."""
     from calendar_lookups import load_lookups
     from calendar_normalize import (normalize_leave_type, normalize_team,
-                                     match_person_deterministic, normalize_person_note)
+                                     match_person_deterministic, normalize_person_note,
+                                     id_suffix_match)
     from calendar_person_cache import extract_person_with_ai
 
     lookups = load_lookups(db)
@@ -112,7 +113,8 @@ def renormalize(db):
     event_ids, ltns, tns, tls, pns, eids, pmss, pnns = [], [], [], [], [], [], [], []
     for r in rows:
         lt_norm, _cat = normalize_leave_type(r["leave_type"], lookups["code_map"])
-        pm = _resolve(r["person"], r["team"])
+        pm = (id_suffix_match(r["person_note"], lookups["emp_by_id"])
+              or _resolve(r["person"], r["team"]))
         emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
         team_norm, team_level = normalize_team(emp, r["team"], lookups["team_map"])
         event_ids.append(r["event_id"]); ltns.append(lt_norm); tns.append(team_norm)
