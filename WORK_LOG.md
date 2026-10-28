@@ -4076,3 +4076,18 @@ FOUND, NOT CAUSED BY 274, NOT TOUCHED:
 
 ## 2026-10-26 (7:00-7:10 AM ET) - pipeline_trigger.gs: User Priorities comments 10 min -> 5 min
 - Comments in `scripts/pipeline_trigger.gs` and `.github/workflows/pipeline-priorities.yml` said the refresh runs every 10 min; the live trigger fires every 5. Updated every mention, and `PRIORITY_REFRESH_MINUTES` 10 -> 5 so a re-run of `setupPriorityRefreshTrigger()` keeps 5 min. Added the night-shift "never thin this cadence" note. No behavior change for the live trigger; `setupScheduler()` still leaves the priorities trigger alone.
+## 2026-10-26 (2:50 AM - 3:40 AM ET) - Calendar Wave 2: fill person_note_normalized (INIT-397)
+
+**Why empty (0 of 1,351 noted rows)**: never wired. Wave 1 added the column and the views (migrations 128/129) but deferred the logic: `calendar_events_load._enrich` hard-coded `"person_note_normalized": None  # filled in Wave 2`, and `extract_calendar_events.renormalize` never selected `person_note` or set the column. No AI step was planned; the spec (5.2) calls for a deterministic regex.
+
+**Live data finding**: 1,110 of the 1,351 notes are employee-id suffixes (`VL - CG1 - Ana - 200601`), 1,102 equal `emp_id` already. Only 241 rows (125 distinct raw values) are real partial-day notes.
+
+**Built** (branch `feat/calendar-wave2-person-note`):
+- `calendar_normalize.normalize_person_note`: start time → `2:00 PM onwards`, end time → `Until 12:00 PM`, window → `9:00 AM - 2:00 PM`, bare time → `2:00 PM`, time zone kept; workday rule for hours with no AM/PM; employee-id suffix and `(2)` → NULL; anything else passes through sentence-cased (acronyms kept).
+- Wired into `_enrich` (every run) and `--renormalize` (8th unnest array).
+- `_backfill_person_note.py`: note-only bulk UPDATE, only rows whose value differs; dry run by default, `--apply` writes, `--notes-json` for an offline dry run.
+- 72 new tests (`test_calendar_person_note.py`), calendar suite 130 passed.
+
+**Dry run (live export via read-only MCP, 12,113 rows)**: 240 rows would get a value, 1,111 stay NULL on purpose (1,110 id suffixes + `(2)`), 240 would change; 125 distinct raw notes → 50 values (`2:00 PM onwards` from 7 raw spellings, `1:00 PM onwards` from 11, `12:00 PM onwards` from 9). No migration needed (column + views exist). Nothing written.
+
+**Open (Jamil)**: run `_backfill_person_note.py --apply` (needs WARP, so outside a Claude session) or let the next `--renormalize` do it. The id suffix shows 8 person-match mismatches worth a look: 4 rows with `emp_id` NULL where the suffix is a known employee (Dee Bernabe 230103 x3, Tope Gonzales 220602) and 4 where the AI match disagrees with the suffix (Mik 221001 → 250811 x2, Myka Florano 220108 → 220801, Randolf Garcia 2202325 → 220325).

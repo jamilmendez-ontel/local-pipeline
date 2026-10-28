@@ -265,6 +265,17 @@ preserved; the cleaned value goes to `person_note_normalized`. Notes that do not
 known pattern (for example `Weekend Work`, `Working AM`) are passed through with casing
 standardized only.
 
+As built (2026-10-26): the live data differed from the 110-value survey. 1,110 of the
+1,351 non-NULL notes are employee-id suffixes (`... - Ana - 200601`), and 1,102 of them
+already equal `emp_id`. Those normalize to NULL (an identifier, not a note). The other
+241 rows (125 distinct raw notes) collapse to 50 values. Forms: `2:00 PM onwards`
+(also lead-ins `After`, `In by`, `Available`, `Working`, `will work at`, `Reports at`),
+`Until 12:00 PM` (also `Out 2PM`), `9:00 AM - 2:00 PM` (`to` or `-`), bare `2:00 PM`
+(needs AM/PM), time zone kept after the time. Hours without AM/PM: workday rule
+(7-11 AM, 12 and 1-6 PM, 13-23 as 24-hour); a range start without AM/PM takes the end's
+when earlier on the clock (`2-6PM`, `7-9AM`), else the other (`9-1 PM`). `(2)` noise →
+NULL; `halfday` / `Half Day` → `Half day`. Backfill: `_backfill_person_note.py`.
+
 ## 6. Migrations
 
 - `126_ref_leave_code`: create + seed `reference.ref_leave_code`.
@@ -300,6 +311,8 @@ into Wave 1 (it cannot be a later wave). Revised plan:
    existing rows. This wave fills both empty columns the user is looking at, plus the new
    person columns.
 2. Notes: `person_note_normalized` regex, backfill. Independent and shippable separately.
+   BUILT 2026-10-26 (INIT-397, branch `feat/calendar-wave2-person-note`): see 5.2
+   "As built" below.
 
 `leave_type_normalized` is independent of person matching, so it can be implemented and
 backfilled first within Wave 1 as an early checkpoint if desired.

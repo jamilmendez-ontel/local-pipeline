@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from config import SCHEMA_STAGING, retry_db
 from calendar_events_transform import build_row
 from calendar_lookups import load_lookups
-from calendar_normalize import normalize_leave_type, normalize_team
+from calendar_normalize import (normalize_leave_type, normalize_team, normalize_person_note,
+                                 id_suffix_match)
 from calendar_person_cache import resolve_person
 
 logger = logging.getLogger("calendar_events")
@@ -25,11 +26,12 @@ _UPSERT_COLS = [
 
 
 def _enrich(db, shape, lookups):
-    """Return the norm dict (leave/team/person normalized values) for one event.
-    person_note_normalized is always None until Wave 2."""
+    """Return the norm dict (leave/team/person/note normalized values) for one event."""
     lt_norm, _cat = normalize_leave_type(shape.get("leave_type"), lookups["code_map"])
-    pm = resolve_person(db, shape.get("person"), shape.get("team"),
-                        lookups["emp_index"], lookups["team_map"])
+    # A roster id typed at the end of the event wins over name matching.
+    pm = (id_suffix_match(shape.get("person_note"), lookups["emp_by_id"])
+          or resolve_person(db, shape.get("person"), shape.get("team"),
+                            lookups["emp_index"], lookups["team_map"]))
     emp = lookups["emp_by_id"].get(pm["emp_id"]) if pm["emp_id"] else None
     team_norm, team_level = normalize_team(emp, shape.get("team"), lookups["team_map"])
     return {
@@ -39,7 +41,7 @@ def _enrich(db, shape, lookups):
         "person_normalized": pm["person_normalized"],
         "emp_id": pm["emp_id"],
         "person_match_source": pm["match_source"],
-        "person_note_normalized": None,   # filled in Wave 2
+        "person_note_normalized": normalize_person_note(shape.get("person_note")),
     }
 
 

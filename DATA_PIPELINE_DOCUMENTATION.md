@@ -381,7 +381,8 @@ an `event_kind` discriminator; per-kind serving views split them out.
 ### Extraction (`extract_calendar_events.py`)
 
 1. Incremental by default via `updatedMin`; `--full-refresh` ignores the watermark
-2. `--renormalize` re-runs normalization over existing rows (bulk, no re-fetch)
+2. `--renormalize` re-runs normalization over existing rows (bulk, no re-fetch), now including `person_note_normalized`
+3. `_backfill_person_note.py` backfills only `person_note_normalized` (dry run by default, `--apply` writes; `--notes-json` runs the dry run offline from an exported note list)
 
 ### Transform
 
@@ -390,6 +391,17 @@ an `event_kind` discriminator; per-kind serving views split them out.
 - **Normalization:** `leave_type_normalized` (via `reference.ref_leave_code`),
   `team_normalized` (person-derived from `ref_employees.carrier_group`, label fallback),
   person match (deterministic + Haiku-cached in `agent.calendar_person_match`)
+- **Person note (Wave 2, 2026-10-26):** `person_note_normalized` from
+  `calendar_normalize.normalize_person_note`, deterministic regex, no AI. Start times
+  become `H:MM AM/PM onwards` (also `After 4 PM`, `In by 12PM`, `Working 12 PM`), end
+  times `Until H:MM AM/PM` (also `Out 2PM`), windows `H:MM AM - H:MM PM` (`9am to 2pm`,
+  `2-6PM`, `9-1 PM`), a time zone is kept after the time (`10:00 AM - 3:00 PM EST`). An
+  hour with no AM/PM uses the workday rule (7-11 AM, 12 and 1-6 PM; 13-23 read as 24-hour),
+  and a range start without AM/PM takes it from the end. An employee-id suffix
+  (`VL - CG1 - Ana - 200601` puts `200601` in `person_note`; 1,110 of 1,351 notes on
+  2026-10-26) is an identifier, not a note, so it normalizes to NULL; `emp_id` already holds
+  it. Any other note passes through with whitespace and casing standardized
+  (`Weekend Work` → `Weekend work`, acronyms kept). Raw `person_note` is never changed.
 - **Date handling:** all-day end_date exclusive (subtract 1 day); same-day timed: days = 1
 
 ### Storage
