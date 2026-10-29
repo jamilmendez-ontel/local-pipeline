@@ -65,7 +65,10 @@ env:
 jobs:
   asset-tasks:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 120 (was 90): on 2026-10-29 the extract alone took 86 min (normal 40-75)
+    # and the job was cancelled 4 min into the transform, leaving stg_asset_tasks
+    # on the previous night's load. A 00:18 ET nightly now ends by ~02:20 ET at worst.
+    timeout-minutes: 120
 
     steps:
       # Normalize inputs: workflow_dispatch uses inputs.*, repository_dispatch
