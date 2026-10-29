@@ -298,8 +298,18 @@ jobs:
             --downstream "${{ steps.resolve.outputs.downstream }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      # A timeout (timeout-minutes) CANCELS the job: failure() is false and the
+      # asset_tasks step's own notifier dies with it, so a timeout used to be
+      # silent (2026-10-29: staging stayed a day old, nobody was told).
+      - name: Notify on cancel / timeout
+        if: ${{ cancelled() }}
+        continue-on-error: true
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          python -u notify_workflow_failure.py             --reason cancelled             --workflow "Pipeline: Asset Tasks"             --downstream "${{ steps.resolve.outputs.downstream }}"             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
       - name: Upload logs on failure
-        if: failure()
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: asset-tasks-logs

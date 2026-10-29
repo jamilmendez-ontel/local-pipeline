@@ -1,6 +1,10 @@
 """Email a FAILED notice for a GHA workflow step that has no notifier of its own.
 
-Used by pipeline-asset-tasks.yml's `if: failure()` step. The asset_tasks
+Used by pipeline-asset-tasks.yml's `if: failure()` step, and (since
+2026-10-29, --reason cancelled) by its `if: cancelled()` step: a job that hits
+timeout-minutes is CANCELLED, not failed, and the asset_tasks step's own
+notifier is killed with it, so before this a timeout sent no email at all
+(10-29: cancelled 4 min into the transform, staging stayed a day old, silent). The asset_tasks
 step itself already emails on failure via run_pipeline_with_notification,
 so the workflow only calls this when a LATER step (backfill, analytics MV
 refresh, downstream dispatch) failed. Since 2026-09-08 that matters more:
@@ -21,14 +25,25 @@ from datetime import datetime, timezone
 from pipeline_notifier import PipelineResult, send_pipeline_email
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--workflow", required=True)
-    p.add_argument("--downstream", default="")
-    p.add_argument("--run-url", default="")
-    args = p.parse_args()
-
-    now = datetime.now(timezone.utc)
+def build_result(args, now: datetime) -> PipelineResult:
+    if args.reason == "cancelled":
+        return PipelineResult(
+            pipeline_name=f"{args.workflow} (cancelled / timed out)",
+            status="FAILED",
+            started_at=now,
+            ended_at=now,
+            duration_seconds=0.0,
+            error_message=(
+                "The job was CANCELLED, almost always by its timeout-minutes limit "
+                "(or a manual cancel). Whatever step was running did not finish: "
+                "data_staging.stg_asset_tasks may still hold the previous load and "
+                "the downstream dispatches (export email, Fri/Mon reports, validator) "
+                "after it did not fire. Recovery: if asset_tasks_extract shows success "
+                "for tonight in pipeline.pipeline_runs, re-run this workflow with "
+                "stage=transform (minutes, no API re-pull); otherwise stage=full. "
+                f"Run: {args.run_url or 'n/a'}"
+            ),
+        )
     consequence = (
         "The 6 PM PHT chain (gmail-scraper -> asset tasks -> date-validator) "
         "stopped here: date-validator-daily was NOT dispatched, so today's "
@@ -37,7 +52,7 @@ def main() -> int:
         if args.downstream == "validator"
         else "A post-extract step failed; downstream dispatches after it did not fire."
     )
-    result = PipelineResult(
+    return PipelineResult(
         pipeline_name=f"{args.workflow} (post-extract step)",
         status="FAILED",
         started_at=now,
@@ -49,12 +64,25 @@ def main() -> int:
             f"{consequence} Run: {args.run_url or 'n/a'}"
         ),
     )
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--workflow", required=True)
+    p.add_argument("--downstream", default="")
+    p.add_argument("--run-url", default="")
+    p.add_argument("--reason", choices=("failed", "cancelled"), default="failed")
+    args = p.parse_args(argv)
+
+    now = datetime.now(timezone.utc)
+    result = build_result(args, now)
     try:
         send_pipeline_email(
             results=[result],
             log_output=f"downstream mode: {args.downstream or 'all'}\nrun: {args.run_url}\n",
             overall_status="FAILED",
-            run_label=f"{args.workflow} [{args.downstream or 'all'}]",
+            run_label=(f"{args.workflow} [{args.downstream or 'all'}]"
+                       + (" CANCELLED/TIMEOUT" if args.reason == "cancelled" else "")),
             started_at=now,
             ended_at=now,
             total_duration=0.0,
