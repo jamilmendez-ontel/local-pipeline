@@ -178,6 +178,12 @@ On GHA, logs are uploaded as workflow artifacts on failure.
 
 - **Asset tasks timeout** — see internal incident docs for the
   atomic-transform + extended-timeout fix.
+  The GHA job limit is 180 min (raised from 90 on 2026-10-29, when an 86-min
+  extract got the transform cancelled). Recover a cancelled transform without
+  re-pulling the API: run the workflow with `stage=transform`.
+  A timeout CANCELS the job, so since 2026-10-29 a `cancelled()` step emails
+  the pipeline list ("CANCELLED/TIMEOUT", with the recovery steps) and uploads
+  the logs; before that a timeout was silent.
 - **Pool exhaustion (EMAXCONNSESSION)** — caused by overlapping nightly
   jobs hitting the pooler's session cap. Stagger schedules out of the
   busiest window.
