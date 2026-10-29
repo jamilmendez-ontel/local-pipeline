@@ -1,13 +1,15 @@
 """Email a FAILED notice for a GHA workflow step that has no notifier of its own.
 
-Used by pipeline-asset-tasks.yml's `if: failure()` step, and (since
-2026-10-29, --reason cancelled) by its `if: cancelled()` step: a job that hits
-timeout-minutes is CANCELLED, not failed, and the asset_tasks step's own
-notifier is killed with it, so before this a timeout sent no email at all
-(10-29: cancelled 4 min into the transform, staging stayed a day old, silent). The asset_tasks
-step itself already emails on failure via run_pipeline_with_notification,
-so the workflow only calls this when a LATER step (backfill, analytics MV
-refresh, downstream dispatch) failed. Since 2026-09-08 that matters more:
+Used by pipeline-asset-tasks.yml in two ways:
+- `if: failure()` (default --reason failed): a step AFTER the asset_tasks
+  extract/transform failed (backfill, analytics MV refresh, downstream
+  dispatch). The asset_tasks step itself already emails on its own failure
+  via run_pipeline_with_notification.
+- `if: cancelled()` (--reason cancelled, since 2026-10-29): a job that hits
+  timeout-minutes is CANCELLED, not failed, and the asset_tasks step's own
+  notifier is killed with it. On 10-29 the job was cancelled 4 min into the
+  transform, staging stayed a day old, and no email went out.
+Since 2026-09-08 the failed path matters more:
 in the 6 PM PHT chain (gmail-scraper -> this workflow -> date-validator) a
 silent failure here means the day's validator email never goes out.
 
@@ -37,8 +39,8 @@ def build_result(args, now: datetime) -> PipelineResult:
                 "The job was CANCELLED, almost always by its timeout-minutes limit "
                 "(or a manual cancel). Whatever step was running did not finish: "
                 "data_staging.stg_asset_tasks may still hold the previous load and "
-                "the downstream dispatches (export email, Fri/Mon reports, validator) "
-                "after it did not fire. Recovery: if asset_tasks_extract shows success "
+                "the downstream dispatches that follow it (export email, Fri/Mon reports, "
+                "validator) did not fire. Recovery: if asset_tasks_extract shows success "
                 "for tonight in pipeline.pipeline_runs, re-run this workflow with "
                 "stage=transform (minutes, no API re-pull); otherwise stage=full. "
                 f"Run: {args.run_url or 'n/a'}"

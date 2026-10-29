@@ -1,16 +1,12 @@
 """notify_workflow_failure: the failed (post-extract) and cancelled (timeout) alerts."""
 import os
 import sys
-from datetime import datetime, timezone
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import notify_workflow_failure as nwf  # noqa: E402
-
-NOW = datetime(2026, 10, 29, 5, 49, tzinfo=timezone.utc)
-
 
 
 def _parse(argv):

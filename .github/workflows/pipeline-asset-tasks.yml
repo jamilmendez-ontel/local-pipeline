@@ -306,7 +306,11 @@ jobs:
         continue-on-error: true
         working-directory: ${{ env.PIPELINE_DIR }}
         run: |
-          python -u notify_workflow_failure.py             --reason cancelled             --workflow "Pipeline: Asset Tasks"             --downstream "${{ steps.resolve.outputs.downstream }}"             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          python -u notify_workflow_failure.py \
+            --reason cancelled \
+            --workflow "Pipeline: Asset Tasks" \
+            --downstream "${{ steps.resolve.outputs.downstream }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload logs on failure
         if: ${{ failure() || cancelled() }}
