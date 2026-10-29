@@ -178,7 +178,7 @@ On GHA, logs are uploaded as workflow artifacts on failure.
 
 - **Asset tasks timeout** — see internal incident docs for the
   atomic-transform + extended-timeout fix.
-  The GHA job limit is 120 min (raised from 90 on 2026-10-29, when an 86-min
+  The GHA job limit is 180 min (raised from 90 on 2026-10-29, when an 86-min
   extract got the transform cancelled). Recover a cancelled transform without
   re-pulling the API: run the workflow with `stage=transform`.
 - **Pool exhaustion (EMAXCONNSESSION)** — caused by overlapping nightly
