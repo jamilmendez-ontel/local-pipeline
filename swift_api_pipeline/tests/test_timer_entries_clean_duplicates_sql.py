@@ -145,10 +145,21 @@ def test_duplicate_mark_counts_zero_and_keeps_the_longest():
     assert re.search(r"partition by coalesce\(x\.emp_id, 'email:' \|\| lower\(x\.user_email\)\),\s*"
                      r"x\.start_time, x\.project_did, x\.task_did, x\.asset_did", mark)
     assert re.search(r"order by x\.actual_minutes desc, x\.swift_timer_id", mark)
-    assert "where x.project_did is not null" in mark, "a row with no project is never grouped"
+    assert "where x.project_did is not null and x.source = 'swift'" in mark, \
+        "only Swift rows are grouped (a legacy row is v1's own row; a request is never a duplicate); no project, never grouped"
     # after the one-row-per-id check, before the guards and any write
     assert body.index("create unique index on pg_temp._tec") < body.index(mark) < body.index("v_lost > 10")
     assert body.index(mark) < body.index("insert into " + TABLE)
+
+
+def test_only_swift_rows_are_marked_and_documented():
+    sql = _read(MIG)
+    head = _header(sql)
+    assert "source = 'swift'" in head and "121 legacy copies" in head
+    assert "about 1,053 on production" in head, "VERIFY names the expected nightly updates"
+    assert "lowest swift_timer_id in\n--     text order" in head
+    meta = _code(sql)[_code(sql).index("insert into agent.schema_metadata"):]
+    assert "Only source swift rows are marked" in meta and "source swift only" in meta
 
 
 def test_parity_duplicate_cause():

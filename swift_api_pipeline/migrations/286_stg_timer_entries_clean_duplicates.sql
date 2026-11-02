@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 286_stg_timer_entries_clean_duplicates.sql
 -- data_staging.stg_timer_entries_clean counts an exact duplicate Swift entry once: a new
--- column is_duplicate, the refresh marks every copy but one (counted_minutes 0), and the
+-- column is_duplicate, the refresh marks every Swift copy but one (counted_minutes 0), and the
 -- parity check gets the cause 'duplicate'. Decision: Jamil 2026-11-02, "counting once".
 -- Builds on 285 (applied 2026-11-02); 285's file is never edited.
 --
@@ -16,11 +16,17 @@
 --     its own) and the app keeps showing both. Only the warehouse count changes here.
 --   * The rule (refresh, after the temp table is filled and its one-row-per-id index built,
 --     before the guards and any write): group by (coalesce(emp_id, 'email:' || lower(user_email)),
---     start_time, project_did, task_did, asset_did) where project_did is not null; the copy with
---     the most actual_minutes counts (tie: the lowest swift_timer_id); every other copy gets
---     is_duplicate = true and counted_minutes = 0. is_capped stays as computed from
---     actual_minutes. A row with no project is never grouped (both parity sides drop it
---     anyway). A null task_did or asset_did groups with the same null (window partition).
+--     start_time, project_did, task_did, asset_did) where source = 'swift' and project_did is
+--     not null; the copy with the most actual_minutes counts (tie: the lowest swift_timer_id in
+--     text order, which is fine: any fixed order picks one copy the same way every run); every
+--     other copy gets is_duplicate = true and counted_minutes = 0. is_capped stays as computed
+--     from actual_minutes. A row with no project is never grouped (both parity sides drop it
+--     anyway).
+--   * Only source = 'swift' is grouped (coordinator ruling, 2026-11-02). A legacy row is a copy
+--     of v1's own clean row, so a legacy pair is one v1 itself counts twice; marking it would
+--     make new differences from v1 (production: 121 legacy copies in 118 groups, against 1,053
+--     Swift copies in 900 groups). A request row (an approved missing entry) is never grouped.
+--     A legacy row and a Swift row with the same start are never grouped either. A null task_did or asset_did groups with the same null (window partition).
 --     Duplicates share start_time, so every copy is always in the same refresh window.
 --     A running copy that outgrows a closed one takes over the count on the next run (both
 --     rows are rewritten; the day total stays the longest copy).
@@ -53,7 +59,7 @@
 --   To size the first run (copies that will count 0):
 --   select count(*) as groups, sum(n - 1) as copies from (
 --     select count(*) as n from data_staging.stg_timer_entries_clean
---     where project_did is not null
+--     where project_did is not null and source = 'swift'
 --     group by coalesce(emp_id, 'email:' || lower(user_email)), start_time, project_did, task_did, asset_did
 --     having count(*) > 1) g;
 --
@@ -73,14 +79,16 @@
 -- VERIFY (after apply):
 --   select count(*) filter (where is_duplicate) from data_staging.stg_timer_entries_clean;  -- 0 before a run
 --   select data_staging.refresh_timer_entries_clean(timestamptz '2025-08-31 16:00:00+00', now() + interval '1 day');
---     -- {"inserted": 0, "deleted": 0, "updated": about the copies of the PREFLIGHT sizing
---     --  plus the running entries}
+--     -- {"inserted": 0, "deleted": 0, "updated": about 1,053 on production (the Swift copies of
+--     --  the PREFLIGHT sizing, 900 groups on 2026-11-02) plus the running entries}
 --   select data_staging.refresh_timer_entries_clean(timestamptz '2025-08-31 16:00:00+00', now() + interval '1 day');
 --     -- {"inserted": 0, "deleted": 0, "updated": <running entries>}
 --   select count(*), sum(actual_minutes) / 60 as hours_not_counted
 --     from data_staging.stg_timer_entries_clean where is_duplicate;
 --   select count(*) from data_staging.stg_timer_entries_clean
 --     where is_duplicate and counted_minutes <> 0;                       -- 0
+--   select source, count(*) from data_staging.stg_timer_entries_clean
+--     where is_duplicate group by 1;                                     -- swift only
 --   select data_staging.snapshot_timer_entries_parity();
 --   select cause, count(*), sum(new_minutes - old_minutes) from data_staging.stg_timer_entries_parity
 --     group by 1 order by 2 desc;
@@ -194,8 +202,10 @@ begin
   -- 286: an exact duplicate Swift entry counts once (Jamil, 2026-11-02). Same owner, start,
   -- project, task and asset: the copy with the most actual minutes counts (tie: the lowest
   -- swift_timer_id); every other copy keeps its row, is_duplicate true, counted 0. is_capped
-  -- stays as computed from actual_minutes. A row with no project is never grouped. My Timers
-  -- keeps showing both copies until the member removes one.
+  -- stays as computed from actual_minutes. Only Swift rows are grouped: a legacy row is a copy
+  -- of v1's own clean row (v1 counts a legacy pair twice) and a request row is never a
+  -- duplicate. A row with no project is never grouped. My Timers keeps showing every copy
+  -- until the member removes one.
   update pg_temp._tec t
      set is_duplicate = true,
          counted_minutes = 0
@@ -206,7 +216,7 @@ begin
                             x.start_time, x.project_did, x.task_did, x.asset_did
                order by x.actual_minutes desc, x.swift_timer_id) as rn
       from pg_temp._tec x
-      where x.project_did is not null
+      where x.project_did is not null and x.source = 'swift'
     ) d
    where d.swift_timer_id = t.swift_timer_id
      and d.rn > 1;
@@ -459,9 +469,9 @@ insert into agent.schema_metadata
 select v.schema_name, v.table_name, v.column_name, v.description, v.business_context, v.data_notes, v.related_tables
 from (values
   ('data_staging', 'stg_timer_entries_clean', 'is_duplicate',
-   'True for an exact duplicate copy of a Swift entry (same owner, start_time, project_did, task_did and asset_did as another row, another swift_timer_id) that does not count: its counted_minutes is 0.',
+   'True for an exact duplicate copy of a Swift entry (source swift; same owner, start_time, project_did, task_did and asset_did as another Swift row, another swift_timer_id) that does not count: its counted_minutes is 0.',
    'An exact duplicate counts once (Jamil, 2026-11-02): the copy with the most actual_minutes counts (tie: the lowest swift_timer_id). Summing counted_minutes adds nothing for a duplicate; filter not is_duplicate to count entries.',
-   'Set by data_staging.refresh_timer_entries_clean (migration 286). Rows with no project_did are never marked. My Timers still shows every copy until the member removes one; actual_minutes and is_capped keep the copy''s own clock time.',
+   'Set by data_staging.refresh_timer_entries_clean (migration 286). Only source swift rows are marked: a legacy row is a copy of v1''s own clean row (v1 counts a legacy pair twice) and a request row is never a duplicate. Rows with no project_did are never marked. My Timers still shows every copy until the member removes one; actual_minutes and is_capped keep the copy''s own clock time.',
    array['data_staging.stg_timer_activities_clean']::text[])
 ) as v(schema_name, table_name, column_name, description, business_context, data_notes, related_tables)
 where not exists (
@@ -471,7 +481,7 @@ where not exists (
 );
 
 update agent.schema_metadata
-set data_notes = 'Owner: My Timers. Grain: one row per timer entry (swift_timer_id). Source: data_staging.refresh_timer_entries_clean() from app_my_timers.entries_layout: hourly (pg_cron timer-entries-clean-hourly, last 40 days) and nightly (timer-entries-clean-nightly, from 2025-09-01 Manila); the jobs are created inactive until ACTIVATE (migration 285 header). Cap: counted_minutes = least(actual_minutes, 600); a running entry counts up to the refresh time. Duplicates counted once (migration 286): of an exact duplicate Swift entry (same owner, start_time, project_did, task_did, asset_did) only the copy with the most actual_minutes counts; every other copy keeps its row with is_duplicate true and counted_minutes 0. Writes only changed rows. The My Timers app never reads this table. PII: yes, user_email (employee email). Retention: kept as long as data_staging.stg_timer_activities_clean (no purge of its own).'
+set data_notes = 'Owner: My Timers. Grain: one row per timer entry (swift_timer_id). Source: data_staging.refresh_timer_entries_clean() from app_my_timers.entries_layout: hourly (pg_cron timer-entries-clean-hourly, last 40 days) and nightly (timer-entries-clean-nightly, from 2025-09-01 Manila); the jobs are created inactive until ACTIVATE (migration 285 header). Cap: counted_minutes = least(actual_minutes, 600); a running entry counts up to the refresh time. Duplicates counted once (migration 286): of an exact duplicate Swift entry (source swift only; same owner, start_time, project_did, task_did, asset_did) only the copy with the most actual_minutes counts; every other copy keeps its row with is_duplicate true and counted_minutes 0. Writes only changed rows. The My Timers app never reads this table. PII: yes, user_email (employee email). Retention: kept as long as data_staging.stg_timer_activities_clean (no purge of its own).'
 where schema_name = 'data_staging' and table_name = 'stg_timer_entries_clean'
   and column_name is null;
 
