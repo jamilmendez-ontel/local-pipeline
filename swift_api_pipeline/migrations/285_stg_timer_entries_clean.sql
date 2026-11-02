@@ -66,6 +66,45 @@
 --     select for service_role (bypasses RLS) like the other warehouse facts. The functions run
 --     as their owner (postgres) and are revoked from public, anon, authenticated.
 --
+-- COST (measured 2026-11-02 on production, read-only, before apply; plan Task 3):
+--   The reader is not on production yet, so its body ran inline (parameters as literals, the
+--   window check as true) under EXPLAIN (ANALYZE, BUFFERS) in a read-only transaction, as
+--   postgres. Sizes: stg_timer_activities_inc 42,820 rows (3,026 pages), legacy_entry 128,576
+--   (5,509 pages), timer_change 2,774, about 453 new Swift entries a day.
+--   * 40-day window (hourly): 296 ms, 18,201 rows; 12,578 buffers (12,149 hit, 429 read,
+--     98 MB logical, 3.4 MB from disk); its sort spilled 4.4 MB at the session work_mem, which
+--     the function's 64MB keeps in memory.
+--   * Full range from 2025-08-31T16:00Z (nightly): 1,452 ms, 169,136 rows; 11,033 buffers (all
+--     but 10 hit, 86 MB logical); seq scans of both sources; a 36 MB sort spill (temp, no WAL).
+--     Far under 120 s, so the nightly stays one call: no batching by month.
+--   * v_timer_entry's window filter: stg_timer_activities_inc has no start_time index. The
+--     planner walks idx_stg_timer_inc_project_start (project_did, start_time) on its second
+--     column: 10,529 buffer hits for 19,069 rows, more than the 3,026-page seq scan it
+--     replaces, but 87 ms. Not worth an index at this size; look again near 200k rows.
+--   * Parity (v1 side): 40 days of stg_timer_activities_clean by its start_time index, 80 ms,
+--     18,711 buffers. The snapshot itself writes a few hundred to a few thousand small rows.
+--   * Timeouts: postgres has statement_timeout 20min in database postgres (pg_db_role_setting;
+--     rolconfig has none), and every pg_cron job runs as postgres@postgres
+--     (cron.use_background_workers off, so each run is a new libpq session with that default).
+--     The function's `set statement_timeout = '300s'` does not rearm the timer of the call
+--     already running, so 20 min is the bound that applies; the nightly needs about 2 s.
+--   * Writes per day (estimate): 68 running entries now (67 of them past 10 hours, so capped
+--     and still rewritten hourly as actual_minutes counts up) plus about 19 new entries an hour,
+--     so about 90 rows per hourly run; at most 5 pages each with full-page images
+--     (heap + 4 indexes) that is under 4 MB WAL a run, under 0.1 GB/day for 24 runs. The nightly
+--     changes only what the hourly window missed (near 0) and the parity snapshot is small.
+--     The first full load writes 169k rows once: about 0.15 to 0.2 GB WAL.
+--   * Reads per day (estimate): the reader is about 12.6k buffers a run; the refresh around it
+--     (temp table fill, the NOT EXISTS compare and the stored-window scan, about 3 PK probes a
+--     row) adds about 4 to 6 times that, so roughly 0.5 to 0.7 GB logical a run, 12 to 17
+--     GB/day logical over 24 runs plus about 1 GB for the nightly and parity. Almost all of it is
+--     shared-buffer hits (both sources are 67 MB together and stay cached); disk reads are
+--     a few MB a day.
+--   * Against the Disk IO budget (OntelDB WAL is about 64 GB/day; tens of GB/day of new IO is
+--     noticeable): under 0.1 GB/day WAL and a few MB/day of disk reads is noise. Recheck with a
+--     pg_stat_statements diff (calls, shared_blks_read, temp_blks_written, wal_bytes) on the
+--     first day after apply.
+--
 -- PREFLIGHT (the DO block below refuses to apply on any of these; read-only):
 --   select to_regprocedure('app_my_timers.entries_layout(timestamptz,timestamptz)');   -- not null
 --   select has_function_privilege('postgres', 'app_my_timers.entries_layout(timestamptz,timestamptz)', 'execute');  -- true
