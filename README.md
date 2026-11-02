@@ -87,6 +87,7 @@ main.py
 │   ├── extract_forms.py → raw_form_qa_ts13..ts19 (dynamic, `reference.ref_qa_forms`) → stg_qa_form
 │   └── extract_timer.py → raw_timer_activities → stg_timer_activities
 │       └── data_staging.rebuild_timer_clean() → stg_timer_activities_clean
+│   (pg_cron, migration 285) app_my_timers.entries_layout → refresh_timer_entries_clean() → stg_timer_entries_clean
 │
 └── Post-Phase 2:
     ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
@@ -465,6 +466,15 @@ serving views `analytics.v_gc_tracker_tasks`, `v_gc_tracker_requirements` and
 dormant marker (`pipeline.content_watermarks` `gc_tracker_gone/<project>`, ontel-data-platform
 #28) and hide projects missing for more than 30 days; the `*_all` variants keep every row.
 Rows are never deleted (Jamil, 2026-10-09).
+
+Timer entries as My Timers lays them out (migration 285, 2026-11-02, NOT APPLIED yet; applied
+only after the app's `app_my_timers.entries_layout` is live):
+
+| Object | What it is |
+|--------|------------|
+| `data_staging.stg_timer_entries_clean` | One row per timer entry (PK `swift_timer_id`) with every My Timers fix laid on, removed entries out, approved missing entries in (`req-<id>`). `counted_minutes = least(actual_minutes, 600)` (10-hour cap; a running entry counts up to the refresh time). Canonical for reports after the My Timers release (D13); until then `stg_timer_activities_clean` stays canonical. |
+| `data_staging.refresh_timer_entries_clean(p_from, p_to)` | Builds the window from the reader in a temp table, writes only changed rows, deletes rows of its own window the reader no longer returns, refuses a reader that would delete, or leave without an owner (`emp_id` to null), more than 5% of the window unless the session sets `timer_entries_clean.allow_mass_delete = 'on'` (one manual run, line in the 285 header); ledger in `pipeline.pipeline_runs` (`timer_entries_clean`). pg_cron `timer-entries-clean-hourly` (`20 * * * *`, last 40 days), `timer-entries-clean-nightly` (`40 19 * * *` = 3:40 AM PHT, from 2025-09-01 Manila) and `timer-entries-clean-parity` (`55 19 * * *`, the parity snapshot, its own job), all created **inactive**; the ACTIVATE block of the 285 header turns them on after VERIFY and a `pg_stat_statements` diff of one manual run. |
+| `data_staging.stg_timer_entries_parity` | Nightly snapshot of `data_staging.timer_entries_parity(p_from, p_to)`: member-days (emp_id, else lower email; v1 emails mapped through `ref_employee_emails`) where the new table and `stg_timer_activities_clean` differ by more than 1 minute, with the cause (`cap`, `running`, `my_timers_fix` (incl. the original day of a moved start), `unowned_in_my_timers`, `v1_fix_not_carried` (an old-system fix the app's importer could not carry, from `app_my_timers.legacy_import`), `only_in_my_timers`, `only_in_v1`, `unexplained`; rows with no project left out on both sides). The go / no-go for the cutover: `unexplained` and `unowned_in_my_timers` days block it until explained, and a `my_timers_fix` day can hide a second difference, so read its minute delta. |
 
 See `migrations/` for the full history. Run `git log --oneline
 migrations/` for recent changes. Latest: 274 approved-by Swift name

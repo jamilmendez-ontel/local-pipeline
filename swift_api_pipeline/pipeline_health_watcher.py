@@ -8,9 +8,12 @@ Checks (spec 2026-08-04, thresholds are spec-fixed):
      start_time-based window inert and let old failures linger forever).
   2. The 5-min DR refresh chain and the 10-min timer rollup refresh: last
      SUCCESSFUL run older than 30 minutes (jobs located by command text, never
-     by jobid; jobids change when jobs are recreated).
+     by jobid; jobids change when jobs are recreated). The clean entries jobs
+     of migration 285 (hourly, nightly, parity) use their own thresholds
+     (JOB_STALE_MIN: 90 min, 26 h, 26 h).
   3. Zero rows on stg_timer_activities_clean / mv_timer_day_rollup /
-     mv_hr_report_review (the stale-not-blank guards' worst case).
+     mv_hr_report_review / stg_timer_entries_clean (the stale-not-blank
+     guards' worst case); a missing table is its own finding.
   4. rebuild_timer_clean() max_exec_time above 120s (headroom alarm before its
      300s statement_timeout; migration 218 made it non-blocking, not fast).
      After a real alarm (not --dry-run/--force-findings) the statement's
@@ -52,6 +55,9 @@ BLANK_TABLES = [
     "data_staging.stg_timer_activities_clean",
     "analytics.mv_timer_day_rollup",
     "analytics.mv_hr_report_review",
+    # Migration 285 (My Timers clean entries, 10-hour cap). A refresh never
+    # empties it (the 5% mass-delete guard), so 0 rows means a lost source.
+    "data_staging.stg_timer_entries_clean",
 ]
 # Located by command text (jobids change when jobs are recreated). Needles
 # must match cron.job.command text (verified live 2026-08-04: jobid 9 =
@@ -60,6 +66,19 @@ BLANK_TABLES = [
 WATCHED_JOBS = {
     "dr_task_rollup": "refresh_dr_task_rollup_safe",
     "timer_day_rollup": "refresh_timer_day_rollup_safe",
+    # Migration 285. The hourly command has empty parentheses; the nightly
+    # passes the full range, so "(timestamptz" tells the two apart.
+    "timer_entries_clean_hourly": "refresh_timer_entries_clean()",
+    "timer_entries_clean_nightly": "refresh_timer_entries_clean(timestamptz",
+    "timer_entries_clean_parity": "snapshot_timer_entries_parity()",
+}
+# Per-job staleness thresholds (minutes) for jobs that do not run every few
+# minutes; every other watched job uses STALE_THRESHOLD_MIN. Hourly at :20
+# gets one missed run of slack; the nightly pair gets 26 h.
+JOB_STALE_MIN = {
+    "timer_entries_clean_hourly": 90,
+    "timer_entries_clean_nightly": 26 * 60,
+    "timer_entries_clean_parity": 26 * 60,
 }
 
 
@@ -84,10 +103,16 @@ def evaluate_failed_runs(rows):
     return findings
 
 
-def evaluate_staleness(rows, now, threshold_min=STALE_THRESHOLD_MIN):
-    """rows: [{job_name, last_success: datetime|None}]."""
+def evaluate_staleness(rows, now, threshold_min=STALE_THRESHOLD_MIN,
+                       override_min=None):
+    """rows: [{job_name, last_success: datetime|None, threshold_min?}].
+    A row's own threshold_min wins over the default; override_min (the
+    --force-findings path) wins over both."""
     findings = []
     for r in rows:
+        limit = r.get("threshold_min", threshold_min)
+        if override_min is not None:
+            limit = override_min
         if r["last_success"] is None:
             findings.append(
                 f"refresh job {r['job_name']}: no successful run found in "
@@ -95,23 +120,27 @@ def evaluate_staleness(rows, now, threshold_min=STALE_THRESHOLD_MIN):
             )
             continue
         age_min = (now - r["last_success"]).total_seconds() / 60.0
-        if age_min > threshold_min:
+        if age_min > limit:
             findings.append(
                 f"refresh job {r['job_name']}: last SUCCESSFUL run was "
-                f"{age_min:.0f} minutes ago (threshold {threshold_min}m); "
-                f"DR Monitoring / Hours Variance are serving stale data"
+                f"{age_min:.0f} minutes ago (threshold {limit}m); "
+                f"its table is serving stale data"
             )
     return findings
 
 
 def evaluate_blanks(counts):
-    """counts: {qualified_table_name: row_count}."""
-    return [
-        f"{table}: 0 rows; a rebuild or refresh ran from an empty source "
-        f"(stale-not-blank guard bypassed)"
-        for table, n in counts.items()
-        if n == 0
-    ]
+    """counts: {qualified_table_name: row_count, or None when the table
+    does not exist}."""
+    findings = []
+    for table, n in counts.items():
+        if n is None:
+            findings.append(f"{table}: does not exist (dropped, renamed, or "
+                            f"its migration is not applied)")
+        elif n == 0:
+            findings.append(f"{table}: 0 rows; a rebuild or refresh ran from an "
+                            f"empty source (stale-not-blank guard bypassed)")
+    return findings
 
 
 def evaluate_rebuild_duration(max_ms, threshold_ms=REBUILD_ALARM_MS):
@@ -178,14 +207,25 @@ def probe_staleness(db):
             "WHERE d.status = 'succeeded' AND j.command ILIKE '%' || $1 || '%'",
             n
         ), description=f"staleness {job_name}")
-        out.append({"job_name": job_name,
-                    "last_success": row["last_success"] if row else None})
+        entry = {"job_name": job_name,
+                 "last_success": row["last_success"] if row else None}
+        if job_name in JOB_STALE_MIN:
+            entry["threshold_min"] = JOB_STALE_MIN[job_name]
+        out.append(entry)
     return out
 
 
 def probe_blanks(db):
     counts = {}
     for table in BLANK_TABLES:
+        # A missing table is a finding, not a watcher crash that hides the
+        # other checks.
+        exists = retry_db(lambda t=table: db.fetchrow(
+            "SELECT to_regclass($1) IS NOT NULL AS ok", t),
+            description=f"exists {table}")
+        if not exists["ok"]:
+            counts[table] = None
+            continue
         row = retry_db(lambda t=table: db.fetchrow(f"SELECT count(*) AS n FROM {t}"),
                        description=f"count {table}")
         counts[table] = int(row["n"])
@@ -247,14 +287,15 @@ def main():
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
-    stale_threshold = 0 if args.force_findings else STALE_THRESHOLD_MIN
+    stale_override = 0 if args.force_findings else None
     rebuild_threshold = 0 if args.force_findings else REBUILD_ALARM_MS
 
     db = get_db()
     try:
         findings = []
         findings += evaluate_failed_runs(probe_failed_runs(db))
-        findings += evaluate_staleness(probe_staleness(db), now, stale_threshold)
+        findings += evaluate_staleness(probe_staleness(db), now,
+                                       override_min=stale_override)
         findings += evaluate_blanks(probe_blanks(db))
         rebuild_findings = evaluate_rebuild_duration(
             probe_rebuild_duration(db), rebuild_threshold)
