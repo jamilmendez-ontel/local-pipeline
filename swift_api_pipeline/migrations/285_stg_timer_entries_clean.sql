@@ -8,9 +8,19 @@
 -- spec: ontel-my-timers docs/superpowers/specs/2026-10-30-team-demo-rules-design.md 6.5
 -- (D7, D8, D9, D12; the cutover is D13).
 --
--- STATUS: NOT APPLIED. Apply only after the app migration 20261102113535_entries_layout.sql
---   (app_my_timers.entries_layout) is live in production (migrate-production), by MCP
---   apply_migration, whole file. Then record APPLIED <date> ... VERIFIED here.
+-- STATUS: APPLIED 2026-11-02 13:20 UTC via MCP apply_migration (after the app's migrate-production
+--   run 41448662354 put app_my_timers.entries_layout live; app main 06e5be7). VERIFIED after:
+--   table empty, 3 jobs inactive, my_timers_owner no select, service_role select only, 31
+--   schema_metadata rows. Manual runs (pipeline_runs all success):
+--     hourly #1 1.3 s, inserted 18,147; hourly #2 0.8 s, updated 28 (the running timers), 0 ins/del;
+--     nightly #1 10.6 s, inserted 151,009 (first full load, about 115 MB WAL, once);
+--     nightly #2 5.7 s, updated 29, about 2 MB WAL; parity snapshot 0.8 s, 451 member-days.
+--   Table: 169,156 rows, 2,059 capped (21,604 hours cut by the cap), 29 running, 5 without an
+--   owner, 498 edited, 1 request, 128,576 old entries.
+--   ACTIVATED 2026-11-02 13:25 UTC: all three jobs active.
+--   Parity (Sep 22 to Oct 31): cap 180 days, my_timers_fix 59, running 7, unexplained 205; 203
+--   of the 205 hold exact duplicate Swift entries (same start, project, task, asset) that v1's
+--   cleanup counts once and My Timers keeps until the member removes one (open decision).
 --
 -- WHY
 --   * After D13 (My Timers released, v1 retired) this table is the canonical clean timer fact
