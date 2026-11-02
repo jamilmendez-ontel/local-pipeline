@@ -5,7 +5,11 @@
 -- parity check gets the cause 'duplicate'. Decision: Jamil 2026-11-02, "counting once".
 -- Builds on 285 (applied 2026-11-02); 285's file is never edited.
 --
--- STATUS: NOT APPLIED
+-- STATUS: APPLIED 2026-11-02 13:55 UTC via MCP apply_migration (Jamil approved). VERIFIED after:
+--   nightly full refresh by hand 7.7 s: updated 1,073 (the 1,053 Swift duplicate copies plus running
+--   timers), inserted 10 (new entries), deleted 0, about 5.7 MB WAL; 1,053 rows is_duplicate (9 running,
+--   0 non-Swift). Parity snapshot: 306 member-days (was 451): cap 172, duplicate 77 (+13.9 h, v1 kept
+--   another copy), my_timers_fix 53, running 2, unexplained 2 (-0.6 h; was 205, +958.6 h).
 --
 -- WHY
 --   * The first parity snapshot after 285 (Sep 22 to Oct 31) had 205 unexplained member-days

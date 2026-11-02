@@ -67,7 +67,7 @@ def _norm(s):
 def test_header_blocks_present():
     head = _header(_read(MIG))
     assert head, "the file must open with the house header block"
-    for block in ("286_stg_timer_entries_clean_duplicates.sql", "STATUS: NOT APPLIED", "WHY",
+    for block in ("286_stg_timer_entries_clean_duplicates.sql", "STATUS: APPLIED", "WHY",
                   "PREFLIGHT", "ROLLBACK", "VERIFY"):
         assert block in head, f"header lacks {block}"
     for step in ("alter table data_staging.stg_timer_entries_clean drop column if exists is_duplicate",
