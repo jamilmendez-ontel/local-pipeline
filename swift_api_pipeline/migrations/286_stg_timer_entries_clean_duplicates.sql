@@ -17,27 +17,33 @@
 --   * The rule (refresh, after the temp table is filled and its one-row-per-id index built,
 --     before the guards and any write): group by (coalesce(emp_id, 'email:' || lower(user_email)),
 --     start_time, project_did, task_did, asset_did) where source = 'swift' and project_did is
---     not null; the copy with the most actual_minutes counts (tie: the lowest swift_timer_id in
---     text order, which is fine: any fixed order picks one copy the same way every run); every
---     other copy gets is_duplicate = true and counted_minutes = 0. is_capped stays as computed
---     from actual_minutes. A row with no project is never grouped (both parity sides drop it
---     anyway).
+--     not null and (emp_id or user_email is not null); a closed copy counts before a running one,
+--     then the copy with the most actual_minutes (tie: the lowest swift_timer_id in text order,
+--     which is fine: any fixed order picks one copy the same way every run); every other copy
+--     gets is_duplicate = true and counted_minutes = 0. is_capped stays as computed from
+--     actual_minutes. A row with no project is never grouped (both parity sides drop it
+--     anyway); nor is a row with neither emp_id nor email (such rows would all share one
+--     partition).
 --   * Only source = 'swift' is grouped (coordinator ruling, 2026-11-02). A legacy row is a copy
 --     of v1's own clean row, so a legacy pair is one v1 itself counts twice; marking it would
 --     make new differences from v1 (production: 121 legacy copies in 118 groups, against 1,053
 --     Swift copies in 900 groups). A request row (an approved missing entry) is never grouped.
 --     A legacy row and a Swift row with the same start are never grouped either. A null task_did or asset_did groups with the same null (window partition).
 --     Duplicates share start_time, so every copy is always in the same refresh window.
---     A running copy that outgrows a closed one takes over the count on the next run (both
---     rows are rewritten; the day total stays the longest copy).
+--     Closed first: a running copy starts with the closed one, so its minutes pass the closed
+--     one's as soon as that ended; v1 counts a running timer as 0 and so counts the closed
+--     copy. Ordering by (end_time is null) first keeps the closed copy counted, which matches
+--     v1 and never flips while the running copy grows. Of two running copies (or two closed
+--     ones) the longest counts.
 --   * The 285 body is kept as is; the only changes to the refresh are the mark and the new
 --     column in the insert list, the `is not distinct from` compare tuple and the on-conflict
 --     update (a column missing from the tuple would never update: the asset_id drift class).
 --     Same signature, settings (search_path '', statement_timeout 300s, work_mem 64MB) and
 --     revokes. The temp table is `like ... including defaults`, so it gets the column.
 --   * The parity: duplicates now count 0, so such a day should match v1. Two changes:
---     the cap check's uncapped sum leaves the duplicates out (a capped day with a duplicate
---     would otherwise never read as cap), and a new cause 'duplicate' for a day with an
+--     the cap check leaves the duplicates out of its uncapped sum and of its capped flag (a
+--     capped duplicate copy would otherwise make a day read as cap, or a capped day with a
+--     duplicate never read as cap), and a new cause 'duplicate' for a day with an
 --     is_duplicate row whose difference remains (for example v1 kept the shorter copy).
 --     Cause order, the first that applies: cap, running, my_timers_fix, unowned_in_my_timers,
 --     v1_fix_not_carried, only_in_my_timers, only_in_v1, duplicate, unexplained.
@@ -63,7 +69,9 @@
 --     group by coalesce(emp_id, 'email:' || lower(user_email)), start_time, project_did, task_did, asset_did
 --     having count(*) > 1) g;
 --
--- ROLLBACK (in this order):
+-- ROLLBACK (in this order, in one transaction: begin; set local lock_timeout = '10s'; ... commit;
+--   the drop column takes an access exclusive lock; the timeout keeps it from queueing long
+--   behind a running cron refresh):
 --   1. Re-create both functions from 285: run the two `create function` statements of
 --      285_stg_timer_entries_clean.sql (section 3, the refresh, and section 4, the parity) as
 --      `create or replace function`, with their revoke lines. Their bodies do not name
@@ -200,12 +208,13 @@ begin
   create unique index on pg_temp._tec (swift_timer_id);
 
   -- 286: an exact duplicate Swift entry counts once (Jamil, 2026-11-02). Same owner, start,
-  -- project, task and asset: the copy with the most actual minutes counts (tie: the lowest
-  -- swift_timer_id); every other copy keeps its row, is_duplicate true, counted 0. is_capped
-  -- stays as computed from actual_minutes. Only Swift rows are grouped: a legacy row is a copy
-  -- of v1's own clean row (v1 counts a legacy pair twice) and a request row is never a
-  -- duplicate. A row with no project is never grouped. My Timers keeps showing every copy
-  -- until the member removes one.
+  -- project, task and asset: a closed copy counts before a running one (v1 counts a running
+  -- timer as 0, so v1 counts the closed copy), then the copy with the most actual minutes
+  -- (tie: the lowest swift_timer_id); every other copy keeps its row, is_duplicate true,
+  -- counted 0. is_capped stays as computed from actual_minutes. Only Swift rows are grouped: a
+  -- legacy row is a copy of v1's own clean row (v1 counts a legacy pair twice) and a request
+  -- row is never a duplicate. A row with no project, or with neither owner nor email, is never
+  -- grouped. My Timers keeps showing every copy until the member removes one.
   update pg_temp._tec t
      set is_duplicate = true,
          counted_minutes = 0
@@ -214,9 +223,10 @@ begin
              row_number() over (
                partition by coalesce(x.emp_id, 'email:' || lower(x.user_email)),
                             x.start_time, x.project_did, x.task_did, x.asset_did
-               order by x.actual_minutes desc, x.swift_timer_id) as rn
+               order by (x.end_time is null), x.actual_minutes desc, x.swift_timer_id) as rn
       from pg_temp._tec x
       where x.project_did is not null and x.source = 'swift'
+        and (x.emp_id is not null or x.user_email is not null)
     ) d
    where d.swift_timer_id = t.swift_timer_id
      and d.rn > 1;
@@ -355,7 +365,7 @@ as $$
   ),
   new_days as (
     select r.member_key, r.day, sum(r.counted_minutes) as minutes,
-           sum(r.actual_minutes) filter (where not r.is_duplicate) as uncapped, bool_or(r.is_capped) as capped,
+           sum(r.actual_minutes) filter (where not r.is_duplicate) as uncapped, bool_or(r.is_capped) filter (where not r.is_duplicate) as capped,
            coalesce(sum(r.counted_minutes) filter (where not r.is_running), 0) as closed,
            bool_or(r.is_running) as running,
            bool_or(r.fixed) as fixed, bool_or(r.unowned_emp is not null) as unowned,

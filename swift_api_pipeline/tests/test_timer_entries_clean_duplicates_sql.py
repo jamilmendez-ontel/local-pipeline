@@ -144,9 +144,12 @@ def test_duplicate_mark_counts_zero_and_keeps_the_longest():
     assert "is_capped" not in mark, "is_capped stays as computed from actual_minutes"
     assert re.search(r"partition by coalesce\(x\.emp_id, 'email:' \|\| lower\(x\.user_email\)\),\s*"
                      r"x\.start_time, x\.project_did, x\.task_did, x\.asset_did", mark)
-    assert re.search(r"order by x\.actual_minutes desc, x\.swift_timer_id", mark)
+    # a closed copy counts before a running one (v1 counts a running timer as 0), then the longest
+    assert re.search(r"order by \(x\.end_time is null\), x\.actual_minutes desc, x\.swift_timer_id\)", mark)
     assert "where x.project_did is not null and x.source = 'swift'" in mark, \
         "only Swift rows are grouped (a legacy row is v1's own row; a request is never a duplicate); no project, never grouped"
+    assert "and (x.emp_id is not null or x.user_email is not null)" in mark, \
+        "a row with neither owner nor email is never grouped (they would share one partition)"
     # after the one-row-per-id check, before the guards and any write
     assert body.index("create unique index on pg_temp._tec") < body.index(mark) < body.index("v_lost > 10")
     assert body.index(mark) < body.index("insert into " + TABLE)
@@ -157,7 +160,8 @@ def test_only_swift_rows_are_marked_and_documented():
     head = _header(sql)
     assert "source = 'swift'" in head and "121 legacy copies" in head
     assert "about 1,053 on production" in head, "VERIFY names the expected nightly updates"
-    assert "lowest swift_timer_id in\n--     text order" in head
+    assert "a closed copy counts before a running one" in head
+    assert "begin; set local lock_timeout = '10s';" in head[head.index("ROLLBACK"):head.index("VERIFY")]
     meta = _code(sql)[_code(sql).index("insert into agent.schema_metadata"):]
     assert "Only source swift rows are marked" in meta and "source swift only" in meta
 
@@ -174,6 +178,7 @@ def test_parity_duplicate_cause():
     assert "bool_or(r.is_duplicate) as duplicated" in stmt
     # the cap check reads the uncapped minutes of the copies that count only
     assert "sum(r.actual_minutes) filter (where not r.is_duplicate) as uncapped" in stmt
+    assert "bool_or(r.is_capped) filter (where not r.is_duplicate) as capped" in stmt
     new_rows = re.search(r"new_rows as \((.*?)\n  \),", stmt, re.S).group(1)
     assert "n.is_duplicate" in new_rows and "n.project_did is not null" in new_rows
 
