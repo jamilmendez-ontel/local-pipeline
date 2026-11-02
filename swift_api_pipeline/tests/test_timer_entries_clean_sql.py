@@ -107,6 +107,7 @@ def test_preflight_gates_are_hard():
     assert "nspname = 'cron'" in pre
     assert "from cron.job where jobname like 'timer-entries-clean-%'" in pre, "no job of ours exists yet"
     assert "end_time < start_time" in pre, "an entry ending before its start would fail every run"
+    assert "has_table_privilege('postgres', 'app_my_timers.legacy_import', 'select')" in pre
 
 
 def test_table_has_ruling_5_columns_and_pk():
@@ -133,6 +134,21 @@ def test_mass_delete_needs_the_session_setting():
     assert "set local timer_entries_clean.allow_mass_delete = 'on'; select data_staging.refresh_timer_entries_clean(" in head
     assert "allow_mass_delete" not in "".join(re.findall(r"\$cmd\$(.*?)\$cmd\$", _code(), re.S)), \
         "the cron jobs never allow a mass delete"
+
+
+def test_mass_owner_loss_is_refused():
+    """A reader that suddenly loses the owners (a lost grant on the email reference reads as
+    empty) would rewrite the window with emp_id null: refused like a mass delete."""
+    body = _functions()[REFRESH]
+    assert re.search(r"s\.emp_id is not null\s+and exists \(\s*select 1 from pg_temp\._tec t\s+"
+                     r"where t\.swift_timer_id = s\.swift_timer_id and t\.emp_id is null\)", body), \
+        "count of stored owned rows whose new row has no owner"
+    m = re.search(r"if v_lost > 10 and v_lost > v_stored \* 0\.05(.*?)then(.*?)end if;", body, re.S)
+    assert m and "current_setting('timer_entries_clean.allow_mass_delete', true)" in m.group(1)
+    assert "<> 'on'" in m.group(1)
+    assert "raise exception" in m.group(2) and "lose their owner" in m.group(2)
+    # refused before any write
+    assert body.index("v_lost > 10") < body.index("insert into " + TABLE)
 
 
 def test_every_function_pins_search_path_and_is_revoked():
@@ -194,7 +210,11 @@ def test_refresh_cap_and_one_now():
     assert inner.count("now()") == 1, "one now() per refresh (v_now), so every row shares it"
     assert "least(m.actual_minutes, 600)" in body
     assert "m.actual_minutes > 600" in body
-    assert "coalesce(l.end_time, v_now)" in body
+    # a running entry counts from its start to v_now, never below 0 (a start a moment ahead of
+    # the refresh clock); a closed entry is not clamped, so one ending before it starts still fails
+    assert "when l.end_time is null then greatest(v_now - l.start_time, interval '0')" in body
+    assert "else l.end_time - l.start_time" in body
+    assert "coalesce(l.end_time, v_now)" not in body
 
 
 def test_refresh_ledger_status_values():
@@ -207,7 +227,14 @@ def test_refresh_ledger_status_values():
 
 def test_no_legacy_function_reads_the_new_table():
     code = _code().lower()
-    assert "legacy_" not in code, "no legacy_ function is created, altered or called here"
+    # The app's import ledger (a table) is read by the preflight and the parity only.
+    assert "legacy_" not in code.replace("app_my_timers.legacy_import", ""), \
+        "no legacy_ function is created, altered or called here"
+    for name, stmt in _functions().items():
+        if name != PARITY_FN:
+            assert "legacy_import" not in stmt.lower(), f"{name} must not read legacy_import"
+    assert "legacy_import l" not in code.replace(
+        _functions()[PARITY_FN].lower(), ""), "only the parity reads the ledger rows"
     for name, stmt in _functions().items():
         if name != REFRESH and name != SNAPSHOT:
             assert f"insert into {TABLE}" not in stmt and f"update {TABLE}" not in stmt
@@ -226,6 +253,14 @@ def test_cron_commands_only_call_the_two_functions():
         assert len(stmts) == 1, f"{job}: one call per job (a snapshot failure must not roll back a refresh)"
         for s in stmts:
             assert allowed.match(s), f"{job}: {s!r} is not a call of the two functions"
+    # every job starts inactive; the ACTIVATE block turns them on after the IO diff
+    wrapped = re.findall(r"cron\.alter_job\(\s*cron\.schedule\(\s*'([\w-]+)',.*?\$cmd\$\s*\),\s*active := false\s*\)",
+                         code, re.S)
+    assert sorted(wrapped) == sorted(j for j, _s, _c in jobs), wrapped
+    head = _header()
+    assert "ACTIVATE" in head and "pg_stat_statements" in head
+    assert ("select cron.alter_job(jobid, active := true) from cron.job "
+            "where jobname like 'timer-entries-clean-%';") in head
     cmds = dict((j, c) for j, _s, c in jobs)
     assert "2025-08-31 16:00:00+00" in cmds["timer-entries-clean-nightly"]
     assert cmds["timer-entries-clean-parity"] == "select data_staging.snapshot_timer_entries_parity()"
@@ -239,8 +274,8 @@ def test_parity_keys_and_causes():
     stmt = _functions()[PARITY_FN]
     assert re.search(r"returns table \(emp_id text, user_email text, day date, new_minutes numeric, "
                      r"old_minutes numeric, cause text\)", stmt)
-    for cause in ("'cap'", "'running'", "'my_timers_fix'", "'unowned_in_my_timers'", "'only_in_my_timers'",
-                  "'only_in_v1'", "'unexplained'"):
+    for cause in ("'cap'", "'running'", "'my_timers_fix'", "'unowned_in_my_timers'",
+                  "'v1_fix_not_carried'", "'only_in_my_timers'", "'only_in_v1'", "'unexplained'"):
         assert cause in stmt, cause
     assert "data_staging.stg_timer_activities_clean" in stmt and TABLE in stmt
     assert "reference.ref_employee_emails" in stmt, "v1 emails map to emp_id"
@@ -250,8 +285,21 @@ def test_parity_keys_and_causes():
     assert "c.last_kind = 'remove'" in fixed and "c.new_start is not null" in fixed
     assert "(c.start_time at time zone 'Asia/Manila')::date" in fixed
     order = ["'cap'", "'running'", "'my_timers_fix'", "'unowned_in_my_timers'",
-             "'only_in_my_timers'", "'unexplained'"]
+             "'v1_fix_not_carried'", "'only_in_my_timers'", "'unexplained'"]
     assert [stmt.index(c) for c in order] == sorted(stmt.index(c) for c in order), "cause order"
+    # an old-system fix the app's importer could not carry explains the day it is on
+    nc = re.search(r"not_carried as \((.*?)\n  \),", stmt, re.S)
+    assert nc, "not_carried CTE"
+    nc = nc.group(1)
+    assert "app_my_timers.legacy_import" in nc
+    assert "distinct on (l.source, l.source_id)" in nc and "l.source_version desc" in nc, "latest version"
+    assert "('no_entry', 'ambiguous', 'no_member', 'no_task', 'own_addition')" in nc
+    assert "(l.old_row ->> 'start_time')::timestamptz at time zone 'Asia/Manila'" in nc
+    # the same null-project filter on both sides
+    new_rows = re.search(r"new_rows as \((.*?)\n  \),", stmt, re.S).group(1)
+    assert "n.project_did is not null" in new_rows
+    old_days = re.search(r"old_days as \((.*?)\n  \),", stmt, re.S).group(1)
+    assert "c.project_did is not null" in old_days
     assert _table_columns(PARITY_TABLE)[:7] == ["emp_id", "user_email", "day", "new_minutes",
                                                 "old_minutes", "cause", "checked_at"]
 
@@ -262,7 +310,15 @@ def test_rls_grants_and_metadata():
         assert f"alter table {t} enable row level security" in code, t
         assert f"revoke all on {t} from anon, authenticated" in code, t
         assert not re.search(r"create policy \S+ on " + re.escape(t), code), f"{t}: no policy"
+        # read only for service_role: everything revoked, then select alone
+        rv = code.index(f"revoke all on {t} from service_role;")
+        assert rv < code.index(f"grant select on {t} to service_role;"), t
+    head = _header()
+    assert "has_table_privilege('my_timers_owner', 'data_staging.stg_timer_entries_clean', 'select')" in head
     meta = code[code.index("insert into agent.schema_metadata"):]
+    assert "Group by emp_id, else lower(user_email)" in meta, "unowned entries carry emp_id null"
+    assert "unowned_in_my_timers" in meta and "block the D13 cutover" in meta
+    assert "PII" in meta and "Retention" in meta and "stg_timer_activities_clean" in meta
     assert "'stg_timer_entries_clean'" in meta and "'stg_timer_entries_parity'" in meta
     assert "array[]::text[]" in meta or "::text[]" in meta
     assert "where not exists" in meta and "is not distinct from v.column_name" in meta

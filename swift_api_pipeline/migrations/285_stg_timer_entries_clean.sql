@@ -27,9 +27,11 @@
 --   * Disk IO budget: the refresh builds the window in a session temp table (no WAL), writes
 --     only rows that differ (IS DISTINCT FROM on every column but refreshed_at), deletes only
 --     rows of its own window that the reader no longer returns, never truncates, holds an
---     advisory lock, and pins statement_timeout 300s and work_mem 64MB on itself (254's
---     function-scoped pattern). A running entry is rewritten on every run (its minutes count
---     up), so a second run reports `updated` = the running entries in the window, else 0.
+--     advisory lock, and sets work_mem 64MB on itself (254's function-scoped pattern). Its
+--     `set statement_timeout = '300s'` does not bind the call already running: a cron run is
+--     bound by the postgres role default, 20 min (COST, Timeouts). A running entry is rewritten
+--     on every run (its minutes count up), so a second run reports `updated` = the running
+--     entries in the window, else 0.
 --   * Ledger: pipeline.pipeline_runs, pipeline_name 'timer_entries_clean', 'running' then
 --     'success' with records_extracted and the result in metadata. A failing run raises, so
 --     pg_cron records the error in cron.job_run_details (watched by pipeline_health_watcher);
@@ -42,8 +44,15 @@
 --     A real mass removal is let through by one manual run with the session setting
 --     timer_entries_clean.allow_mass_delete = 'on' (see ALLOW A MASS DELETE below); the cron
 --     jobs never set it.
---   * Minutes are never negative (check on the table). An entry whose end is before its start
---     would fail every run; the preflight counts such entries and refuses (0 on the stand-in).
+--     The same rule guards a silent mass rewrite: a reader that loses the owners (a lost grant
+--     or policy on reference.ref_employee_emails reads as empty) returns every entry with
+--     emp_id null, which deletes nothing but rewrites the window unowned. The refresh refuses
+--     when more than 10 stored rows and more than 5% of the window's stored rows would go from
+--     an emp_id to null; the same setting lets a real one through.
+--   * Minutes are never negative (check on the table). A closed entry whose end is before its
+--     start would fail every run; the preflight counts such entries and refuses (0 on
+--     production 2026-11-02). A running entry counts greatest(now - start, 0): a start a moment
+--     ahead of the refresh clock counts 0, not a failed run.
 --   * Parity key (Task 1 review): emp_id where present, else lower(user_email). A request row's
 --     user_email is the member's latest email and a Swift row keeps Swift's spelling, so email
 --     alone would split one person. v1 has only user_email: it maps to emp_id through
@@ -54,17 +63,32 @@
 --     (my_timers_fix): the new day by edited_fields, the original day (Swift's start) by the
 --     change itself. A timer still running in My Timers has duration_min null in v1 (counted 0
 --     there): a day whose only difference is its running entries is cause running.
+--     A fix made in the old system that the app's importer could not carry (latest version of
+--     an app_my_timers.legacy_import row with status no_entry, ambiguous, no_member, no_task or
+--     own_addition) is in v1 but not in My Timers: its member-day (the ledger's emp_id, else
+--     its lower email through ref_employee_emails; the old row's start_time, Manila) is cause
+--     v1_fix_not_carried, placed after the My Timers causes and before only_in_* / unexplained.
+--     carried, reverted, superseded, added_then_removed and out_of_range are not causes (in
+--     both, in neither, or before the window).
+--     The cause is the first that applies, so a my_timers_fix day can hide a second difference
+--     on the same day (a fix plus a missing entry). The D13 review reads the minute deltas of
+--     every my_timers_fix day, not only the unexplained ones.
+--     Both sides drop rows with no project (v1's rule), so a request or entry with no project
+--     never reads as a difference.
 --   * Three pg_cron jobs: timer-entries-clean-hourly ('20 * * * *', the 40-day window),
 --     timer-entries-clean-nightly ('40 19 * * *' = 3:40 AM PHT, the full range) and
 --     timer-entries-clean-parity ('55 19 * * *', the snapshot). The snapshot is its own job so
 --     its failure cannot roll back the nightly refresh; it takes the refresh's advisory lock
 --     first, so a full run still going at 19:55 is waited for, not read half done.
+--     The three jobs are created inactive: they start only after VERIFY and an IO diff of one
+--     manual run of each (see ACTIVATE below).
 --   * Parity window: the nightly snapshot covers the 40 Manila days ending two days ago. v1 is
 --     reloaded at 13:15 PHT, so at 3:40 AM PHT yesterday's shift is not in v1 yet and today's
 --     is still running; those days would differ every night for no reason.
 --   * Grants: RLS on with no policy (deny-all for API roles), anon and authenticated revoked,
---     select for service_role (bypasses RLS) like the other warehouse facts. The functions run
---     as their owner (postgres) and are revoked from public, anon, authenticated.
+--     service_role read only (all revoked, then select; it bypasses RLS) like the other
+--     warehouse facts. my_timers_owner gets nothing (the app never reads these tables). The
+--     functions run as their owner (postgres) and are revoked from public, anon, authenticated.
 --
 -- COST (measured 2026-11-02 on production, read-only, before apply; plan Task 3):
 --   The reader is not on production yet, so its body ran inline (parameters as literals, the
@@ -122,6 +146,8 @@
 --   select count(*) from cron.job where jobname like 'timer-entries-clean-%';  -- 0
 --   select count(*) from app_my_timers.v_timer_entry
 --     where start_time >= timestamptz '2025-08-31 16:00:00+00' and end_time < start_time;  -- 0
+--   select has_table_privilege('postgres', 'app_my_timers.legacy_import', 'select');  -- true
+--     (the parity cause v1_fix_not_carried reads the app's import ledger)
 --
 -- ROLLBACK (in this order):
 --   select cron.unschedule('timer-entries-clean-hourly');
@@ -156,12 +182,32 @@
 --   select status, records_extracted, metadata from pipeline.pipeline_runs
 --     where pipeline_name = 'timer_entries_clean' order by started_at desc limit 3;
 --   select jobname, schedule, command, active from cron.job where jobname like 'timer-entries-clean-%';
+--     -- three rows, active false until ACTIVATE
+--   select has_table_privilege('my_timers_owner', 'data_staging.stg_timer_entries_clean', 'select'),
+--          has_table_privilege('my_timers_owner', 'data_staging.stg_timer_entries_parity', 'select');  -- false, false
+--   select has_table_privilege('service_role', 'data_staging.stg_timer_entries_clean', 'select'),
+--          has_table_privilege('service_role', 'data_staging.stg_timer_entries_clean', 'insert');  -- true, false
+--
+-- ACTIVATE (after VERIFY, by hand; the jobs are created inactive):
+--   1. Note pg_stat_statements for the two calls (calls, total_exec_time, shared_blks_hit,
+--      shared_blks_read, temp_blks_written, wal_bytes):
+--        select query, calls, total_exec_time, shared_blks_hit, shared_blks_read, temp_blks_written, wal_bytes
+--        from extensions.pg_stat_statements where query ilike '%timer_entries%';
+--   2. Run one hourly and one nightly by hand (the job commands), then the snapshot:
+--        select data_staging.refresh_timer_entries_clean();
+--        select data_staging.refresh_timer_entries_clean(timestamptz '2025-08-31 16:00:00+00', now() + interval '1 day');
+--        select data_staging.snapshot_timer_entries_parity();
+--   3. Read the same pg_stat_statements rows again; the diff is one run of each. Go on only if
+--      it matches COST (an hourly run about 12.6k reader buffers, WAL a few MB).
+--   4. select cron.alter_job(jobid, active := true) from cron.job where jobname like 'timer-entries-clean-%';
+--   Until step 4 the jobs never run, so pipeline_health_watcher (which watches them) would
+--   report "no successful run found"; ship the watcher change after step 4.
 --   the morning after:
 --   select j.jobname, d.status, d.return_message, d.start_time from cron.job_run_details d
 --     join cron.job j using (jobid) where j.jobname like 'timer-entries-clean-%'
 --     order by d.runid desc limit 5;                                       -- succeeded
 --
--- ALLOW A MASS DELETE (only after checking the removals are real; one manual run):
+-- ALLOW A MASS DELETE OR A MASS OWNER LOSS (only after checking the change is real; one manual run):
 --   begin; set local timer_entries_clean.allow_mass_delete = 'on'; select data_staging.refresh_timer_entries_clean(timestamptz '2025-08-31 16:00:00+00', now() + interval '1 day'); commit;
 -- =============================================================================
 
@@ -215,6 +261,10 @@ begin
   ) then
     raise exception '285: an entry ends before it starts; its minutes would be negative and every refresh would fail. Look at it first.';
   end if;
+  if to_regclass('app_my_timers.legacy_import') is null
+     or not has_table_privilege('postgres', 'app_my_timers.legacy_import', 'select') then
+    raise exception '285: postgres cannot read app_my_timers.legacy_import (the parity cause v1_fix_not_carried). Check the membership in my_timers_owner.';
+  end if;
 end $$;
 
 -- 1. The table (Ruling 5 columns).
@@ -248,6 +298,7 @@ create index idx_stg_timer_entries_clean_email_day on data_staging.stg_timer_ent
 create index idx_stg_timer_entries_clean_start on data_staging.stg_timer_entries_clean (start_time);
 alter table data_staging.stg_timer_entries_clean enable row level security;
 revoke all on data_staging.stg_timer_entries_clean from anon, authenticated;
+revoke all on data_staging.stg_timer_entries_clean from service_role;
 grant select on data_staging.stg_timer_entries_clean to service_role;
 
 -- 2. The parity snapshot (replaced every night). member_key = emp_id, else 'email:' || email.
@@ -264,6 +315,7 @@ create table data_staging.stg_timer_entries_parity (
 );
 alter table data_staging.stg_timer_entries_parity enable row level security;
 revoke all on data_staging.stg_timer_entries_parity from anon, authenticated;
+revoke all on data_staging.stg_timer_entries_parity from service_role;
 grant select on data_staging.stg_timer_entries_parity to service_role;
 
 -- 3. The refresh. Window [p_from, p_to) on the laid start (Ruling 2); hourly 40 days back to a
@@ -285,6 +337,7 @@ declare
   v_rows     bigint;
   v_stored   bigint;
   v_gone     bigint;
+  v_lost     bigint;
   v_inserted bigint;
   v_updated  bigint;
   v_deleted  bigint;
@@ -324,7 +377,11 @@ begin
          v_now
   from app_my_timers.entries_layout(p_from, p_to) l
   cross join lateral (
-    select round(extract(epoch from coalesce(l.end_time, v_now) - l.start_time) / 60, 2) as actual_minutes
+    -- A running entry counts up to v_now, never below 0; a closed one is not clamped (an end
+    -- before its start fails the table check, loudly).
+    select round(extract(epoch from
+             case when l.end_time is null then greatest(v_now - l.start_time, interval '0')
+                  else l.end_time - l.start_time end) / 60, 2) as actual_minutes
   ) m;
   get diagnostics v_rows = row_count;
 
@@ -332,13 +389,22 @@ begin
   create unique index on pg_temp._tec (swift_timer_id);
   analyze pg_temp._tec;
 
-  -- Refuse a reader that suddenly returns far fewer rows (see WHY, Safety).
+  -- Refuse a reader that suddenly returns far fewer rows, or far fewer owners (see WHY, Safety).
   select count(*),
          count(*) filter (where not exists (
-           select 1 from pg_temp._tec t where t.swift_timer_id = s.swift_timer_id))
-    into v_stored, v_gone
+           select 1 from pg_temp._tec t where t.swift_timer_id = s.swift_timer_id)),
+         count(*) filter (where s.emp_id is not null
+           and exists (
+             select 1 from pg_temp._tec t
+             where t.swift_timer_id = s.swift_timer_id and t.emp_id is null))
+    into v_stored, v_gone, v_lost
   from data_staging.stg_timer_entries_clean s
   where s.start_time >= p_from and s.start_time < p_to;
+  if v_lost > 10 and v_lost > v_stored * 0.05
+     and coalesce(current_setting('timer_entries_clean.allow_mass_delete', true), '') <> 'on' then
+    raise exception 'refresh_timer_entries_clean: % of the % stored entries of the window would lose their owner (emp_id becomes null; more than 5%%). Refused; the table keeps its rows. Check entries_layout and the grants on reference.ref_employee_emails and reference.ref_swift_users; if the change is real, run once with set local timer_entries_clean.allow_mass_delete = on (header of migration 285).',
+      v_lost, v_stored;
+  end if;
   if v_gone > 10 and v_gone > v_stored * 0.05
      and coalesce(current_setting('timer_entries_clean.allow_mass_delete', true), '') <> 'on' then
     raise exception 'refresh_timer_entries_clean: the reader would remove % of the % stored entries of the window (more than 5%%). Refused; the table keeps its rows. Check entries_layout and its grants; if the removals are real, run once with set local timer_entries_clean.allow_mass_delete = on (header of migration 285).',
@@ -419,8 +485,9 @@ revoke all on function data_staging.refresh_timer_entries_clean(timestamptz, tim
 --    timer has no duration), my_timers_fix (an entry of the day has edited_fields, is a
 --    request, was removed in My Timers, or had its start moved away from this day),
 --    unowned_in_my_timers (an entry of the day has no owner in My Timers while
---    v1's email maps to a member), only_in_my_timers / only_in_v1 (no rows on one side),
---    else unexplained.
+--    v1's email maps to a member), v1_fix_not_carried (an old-system fix the importer could not
+--    carry is on the day), only_in_my_timers / only_in_v1 (no rows on one side), else
+--    unexplained. Rows with no project are left out on both sides.
 create function data_staging.timer_entries_parity(p_from date, p_to date)
 returns table (emp_id text, user_email text, day date, new_minutes numeric, old_minutes numeric, cause text)
 language sql
@@ -454,7 +521,8 @@ as $$
     from data_staging.stg_timer_entries_clean n
     cross join bounds b
     left join owners o on o.email = lower(n.user_email)
-    where n.start_time >= b.t_from and n.start_time < b.t_to
+    where n.project_did is not null
+      and n.start_time >= b.t_from and n.start_time < b.t_to
   ),
   new_days as (
     select r.member_key, r.day, sum(r.counted_minutes) as minutes,
@@ -507,6 +575,22 @@ as $$
     from changes c
     where c.new_start is not null
   ),
+  -- Old-system fixes the app's importer could not carry (latest version of each old row): in
+  -- v1, not in My Timers. Keyed like old_days: the ledger's emp_id, else the lower email.
+  not_carried as (
+    select distinct coalesce(x.emp_id, o.emp_id, 'email:' || lower(x.user_email)) as member_key,
+           x.day
+    from (
+      select distinct on (l.source, l.source_id)
+             l.status, l.emp_id, l.user_email,
+             ((l.old_row ->> 'start_time')::timestamptz at time zone 'Asia/Manila')::date as day
+      from app_my_timers.legacy_import l
+      order by l.source, l.source_id, l.source_version desc, l.id desc
+    ) x
+    left join owners o on o.email = lower(x.user_email)
+    where x.status in ('no_entry', 'ambiguous', 'no_member', 'no_task', 'own_addition')
+      and x.day is not null
+  ),
   diff as (
     select coalesce(n.member_key, o.member_key) as member_key,
            coalesce(n.day, o.day) as day,
@@ -533,6 +617,7 @@ as $$
            when d.running_explains then 'running'
            when d.fixed or r.member_key is not null then 'my_timers_fix'
            when d.unowned or u.member_key is not null then 'unowned_in_my_timers'
+           when nc.member_key is not null then 'v1_fix_not_carried'
            when not d.has_old then 'only_in_my_timers'
            when not d.has_new then 'only_in_v1'
            else 'unexplained'
@@ -541,6 +626,7 @@ as $$
   left join shown sh on sh.emp_id = d.member_key
   left join fixed_days r on r.member_key = d.member_key and r.day = d.day
   left join unowned_days u on u.member_key = d.member_key and u.day = d.day
+  left join not_carried nc on nc.member_key = d.member_key and nc.day = d.day
   order by 2, 3
 $$;
 revoke all on function data_staging.timer_entries_parity(date, date)
@@ -578,21 +664,23 @@ revoke all on function data_staging.snapshot_timer_entries_parity()
 --    Hourly at :20, the 40-day window. Nightly 19:40 UTC = 3:40 AM PHT, the full range.
 --    19:55 UTC, the parity snapshot, its own job (a failure cannot roll back the refresh).
 --    The advisory locks queue an overlap.
-select cron.schedule(
+--    Every job is created inactive (cron.schedule returns its jobid); ACTIVATE in the header
+--    turns them on after VERIFY and the IO diff of one manual run.
+select cron.alter_job(cron.schedule(
   'timer-entries-clean-hourly',
   '20 * * * *',
   $cmd$select data_staging.refresh_timer_entries_clean()$cmd$
-);
-select cron.schedule(
+), active := false);
+select cron.alter_job(cron.schedule(
   'timer-entries-clean-nightly',
   '40 19 * * *',
   $cmd$select data_staging.refresh_timer_entries_clean(timestamptz '2025-08-31 16:00:00+00', now() + interval '1 day')$cmd$
-);
-select cron.schedule(
+), active := false);
+select cron.alter_job(cron.schedule(
   'timer-entries-clean-parity',
   '55 19 * * *',
   $cmd$select data_staging.snapshot_timer_entries_parity()$cmd$
-);
+), active := false);
 
 -- 7. The record for the AI semantic layer: a row per table and per column.
 insert into agent.schema_metadata
@@ -601,17 +689,17 @@ select v.schema_name, v.table_name, v.column_name, v.description, v.business_con
 from (values
   ('data_staging', 'stg_timer_entries_clean', null::text,
    'One row per timer entry as the My Timers app lays it out for every member: Swift and old entries with every fix laid on, removed entries left out, approved missing entries added. counted_minutes is capped at 600 (10 hours).',
-   'Canonical clean timer fact after the My Timers release (decision D13); until then data_staging.stg_timer_activities_clean is canonical and stg_timer_entries_parity compares the two every night. Count hours with counted_minutes; actual_minutes is the uncapped clock time.',
-   'Built by data_staging.refresh_timer_entries_clean() from app_my_timers.entries_layout: hourly (pg_cron timer-entries-clean-hourly, last 40 days) and nightly (timer-entries-clean-nightly, from 2025-09-01 Manila). Cap: counted_minutes = least(actual_minutes, 600); a running entry counts up to the refresh time. Writes only changed rows. The My Timers app never reads this table.',
+   'Canonical clean timer fact after the My Timers release (decision D13); until then data_staging.stg_timer_activities_clean is canonical and stg_timer_entries_parity compares the two every night. Count hours with counted_minutes; actual_minutes is the uncapped clock time. Group by emp_id, else lower(user_email): an entry no member owns carries emp_id null and would lose its hours in a group by emp_id alone.',
+   'Owner: My Timers. Grain: one row per timer entry (swift_timer_id). Source: data_staging.refresh_timer_entries_clean() from app_my_timers.entries_layout: hourly (pg_cron timer-entries-clean-hourly, last 40 days) and nightly (timer-entries-clean-nightly, from 2025-09-01 Manila); the jobs are created inactive until ACTIVATE (migration 285 header). Cap: counted_minutes = least(actual_minutes, 600); a running entry counts up to the refresh time. Writes only changed rows. The My Timers app never reads this table. PII: yes, user_email (employee email). Retention: kept as long as data_staging.stg_timer_activities_clean (no purge of its own).',
    array['app_my_timers.entries_layout', 'data_staging.stg_timer_activities_clean', 'data_staging.stg_timer_entries_parity']::text[]),
   ('data_staging', 'stg_timer_entries_parity', null::text,
    'Member-days where stg_timer_entries_clean (counted minutes) and v1 stg_timer_activities_clean (duration_min) differ by more than one minute, with the cause.',
-   'The go / no-go for moving reports to stg_timer_entries_clean at the My Timers release (D13). Read only; replaced every night.',
-   'Written by data_staging.snapshot_timer_entries_parity() (pg_cron timer-entries-clean-parity, 19:55 UTC) after the nightly full refresh, for the 40 Manila days ending two days ago (v1 loads at 13:15 PHT). Key: emp_id, else the lower email (member_key). Causes: cap, running, my_timers_fix, unowned_in_my_timers, only_in_my_timers, only_in_v1, unexplained.',
+   'The go / no-go for moving reports to stg_timer_entries_clean at the My Timers release (D13). Read only; replaced every night. unexplained and unowned_in_my_timers days block the D13 cutover until explained; v1_fix_not_carried days need the old fix carried or accepted; my_timers_fix days can hide a second difference, so read their minute deltas too.',
+   'Owner: My Timers. Grain: one row per member-day that differs. Source: data_staging.snapshot_timer_entries_parity() (pg_cron timer-entries-clean-parity, 19:55 UTC, inactive until ACTIVATE) after the nightly full refresh, for the 40 Manila days ending two days ago (v1 loads at 13:15 PHT). Key: emp_id, else the lower email (member_key). Causes: cap, running, my_timers_fix, unowned_in_my_timers, v1_fix_not_carried, only_in_my_timers, only_in_v1, unexplained. PII: yes, user_email (employee email). Retention: the last snapshot only (replaced every night).',
    array['data_staging.stg_timer_entries_clean', 'data_staging.stg_timer_activities_clean', 'reference.ref_employee_emails']::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'swift_timer_id', 'Entry id (PK): the Swift timer id; old-<hash> for an entry of the old system; req-<id> for an approved missing entry.', 'One row per entry.', null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'emp_id', 'The member who owns the entry in My Timers.', 'Join to the employee directory.', 'Null when no member owns the entry (email unknown or in another letter case and the Swift user unknown); such an entry is kept unchanged.', array['reference.ref_employee_emails']::text[]),
-  ('data_staging', 'stg_timer_entries_clean', 'user_email', 'Email on the entry: Swift''s spelling for Swift and old rows, the member''s latest email for a request row.', 'Group by emp_id, not by email.', null, array[]::text[]),
+  ('data_staging', 'stg_timer_entries_clean', 'user_email', 'Email on the entry: Swift''s spelling for Swift and old rows, the member''s latest email for a request row.', 'Group by emp_id, else lower(user_email) (an entry no member owns has emp_id null).', 'PII: employee email.', array[]::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'project_did', 'Swift project id, after a work change.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'project_number', 'Swift project number, after a work change.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'asset_did', 'Swift asset id, after a work change.', null, null, array[]::text[]),
@@ -631,11 +719,11 @@ from (values
   ('data_staging', 'stg_timer_entries_clean', 'fixed_by_super_admin', 'True when a super admin changed the entry or added the request in Fix as.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_clean', 'refreshed_at', 'When the refresh last wrote the row.', 'Rows that did not change keep their time.', null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'emp_id', 'Member of the day; null when the email maps to no member.', null, null, array[]::text[]),
-  ('data_staging', 'stg_timer_entries_parity', 'user_email', 'The member''s latest email, or the unmapped email itself.', null, null, array[]::text[]),
+  ('data_staging', 'stg_timer_entries_parity', 'user_email', 'The member''s latest email, or the unmapped email itself.', null, 'PII: employee email.', array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'day', 'Manila date.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'new_minutes', 'Sum of counted_minutes in stg_timer_entries_clean.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'old_minutes', 'Sum of duration_min in stg_timer_activities_clean (rows with a project and an email).', null, null, array[]::text[]),
-  ('data_staging', 'stg_timer_entries_parity', 'cause', 'Why the day differs: cap, running, my_timers_fix, unowned_in_my_timers, only_in_my_timers, only_in_v1, unexplained.', 'unexplained days block the cutover until understood.', null, array[]::text[]),
+  ('data_staging', 'stg_timer_entries_parity', 'cause', 'Why the day differs, the first that applies: cap, running, my_timers_fix, unowned_in_my_timers, v1_fix_not_carried, only_in_my_timers, only_in_v1, unexplained.', 'unexplained and unowned_in_my_timers days block the D13 cutover until explained.', 'A my_timers_fix day can hide a second difference: read new_minutes - old_minutes.', array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'checked_at', 'When the snapshot was taken.', null, null, array[]::text[]),
   ('data_staging', 'stg_timer_entries_parity', 'member_key', 'emp_id, else email: plus the email (PK with day).', null, 'Generated column.', array[]::text[])
 ) as v(schema_name, table_name, column_name, description, business_context, data_notes, related_tables)
