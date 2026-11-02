@@ -7,7 +7,7 @@ so a column the table has but the compare tuple omits would silently never updat
 (the 2026-08-06 asset_id drift bug class, same guard as test_wal_diet_guards.py).
 These tests pin, on the migration text:
 
-  1. the house header (purpose, STATUS: NOT APPLIED, WHY, PREFLIGHT, ROLLBACK, VERIFY)
+  1. the house header (purpose, STATUS (APPLIED once applied), WHY, PREFLIGHT, ROLLBACK, VERIFY)
      and the hard preflight gates (reader, duplicate emails, pipeline_runs values);
   2. every function pins search_path = '' and is revoked from public, anon, authenticated;
   3. the refresh takes its advisory lock first, compares every column but refreshed_at
@@ -78,7 +78,7 @@ def _table_columns(ddl_name):
 def test_header_blocks_present():
     head = _header()
     assert head, "the file must open with the house header block"
-    for block in ("285_stg_timer_entries_clean.sql", "STATUS: NOT APPLIED", "WHY",
+    for block in ("285_stg_timer_entries_clean.sql", "STATUS: APPLIED", "WHY",
                   "PREFLIGHT", "ROLLBACK", "VERIFY"):
         assert block in head, f"header lacks {block}"
     for step in ("cron.unschedule('timer-entries-clean-hourly')",
