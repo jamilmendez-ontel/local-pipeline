@@ -83,6 +83,7 @@ def test_header_blocks_present():
         assert block in head, f"header lacks {block}"
     for step in ("cron.unschedule('timer-entries-clean-hourly')",
                  "cron.unschedule('timer-entries-clean-nightly')",
+                 "cron.unschedule('timer-entries-clean-parity')",
                  f"drop table if exists {TABLE}", f"drop table if exists {PARITY_TABLE}",
                  "delete from agent.schema_metadata"):
         assert step in head, f"ROLLBACK lacks {step}"
@@ -104,6 +105,8 @@ def test_preflight_gates_are_hard():
     assert "pipeline.pipeline_runs" in pre and "'running'" in pre and "'failed'" in pre
     assert f"to_regclass('{TABLE}')" in pre and f"to_regclass('{PARITY_TABLE}')" in pre
     assert "nspname = 'cron'" in pre
+    assert "from cron.job where jobname like 'timer-entries-clean-%'" in pre, "no job of ours exists yet"
+    assert "end_time < start_time" in pre, "an entry ending before its start would fail every run"
 
 
 def test_table_has_ruling_5_columns_and_pk():
@@ -112,6 +115,24 @@ def test_table_has_ruling_5_columns_and_pk():
     assert re.search(r"swift_timer_id\s+text\s+primary key", code), "PK swift_timer_id"
     for idx in (r"\(work_date\)", r"\(emp_id, work_date\)", r"\(lower\(user_email\), work_date\)"):
         assert re.search(r"create index \w+ on " + re.escape(TABLE) + r"\s*" + idx, code), idx
+
+
+def test_minutes_never_negative():
+    code = _code()
+    assert "actual_minutes       numeric(10,2) not null check (actual_minutes >= 0)" in code
+    assert "check (counted_minutes >= 0 and counted_minutes <= 600)" in code
+
+
+def test_mass_delete_needs_the_session_setting():
+    body = _functions()[REFRESH]
+    m = re.search(r"if v_gone > 10 and v_gone > v_stored \* 0\.05(.*?)then", body, re.S)
+    assert m and "current_setting('timer_entries_clean.allow_mass_delete', true)" in m.group(1)
+    assert "<> 'on'" in m.group(1)
+    head = _header()
+    assert "ALLOW A MASS DELETE" in head
+    assert "set local timer_entries_clean.allow_mass_delete = 'on'; select data_staging.refresh_timer_entries_clean(" in head
+    assert "allow_mass_delete" not in "".join(re.findall(r"\$cmd\$(.*?)\$cmd\$", _code(), re.S)), \
+        "the cron jobs never allow a mass delete"
 
 
 def test_every_function_pins_search_path_and_is_revoked():
@@ -196,28 +217,41 @@ def test_cron_commands_only_call_the_two_functions():
     code = _code()
     jobs = re.findall(r"cron\.schedule\(\s*'([\w-]+)',\s*'([^']+)',\s*\$cmd\$(.*?)\$cmd\$\s*\)", code, re.S)
     assert {(j, s) for j, s, _ in jobs} == {("timer-entries-clean-hourly", "20 * * * *"),
-                                            ("timer-entries-clean-nightly", "40 19 * * *")}
+                                            ("timer-entries-clean-nightly", "40 19 * * *"),
+                                            ("timer-entries-clean-parity", "55 19 * * *")}
     allowed = re.compile(r"^select (data_staging\.refresh_timer_entries_clean\([^;]*\)"
                          r"|data_staging\.snapshot_timer_entries_parity\(\))$")
     for job, _s, cmd in jobs:
         stmts = [s.strip() for s in cmd.split(";") if s.strip()]
-        assert stmts, job
+        assert len(stmts) == 1, f"{job}: one call per job (a snapshot failure must not roll back a refresh)"
         for s in stmts:
             assert allowed.match(s), f"{job}: {s!r} is not a call of the two functions"
-    nightly = dict((j, c) for j, _s, c in jobs)["timer-entries-clean-nightly"]
-    assert "2025-08-31 16:00:00+00" in nightly and "snapshot_timer_entries_parity()" in nightly
+    cmds = dict((j, c) for j, _s, c in jobs)
+    assert "2025-08-31 16:00:00+00" in cmds["timer-entries-clean-nightly"]
+    assert cmds["timer-entries-clean-parity"] == "select data_staging.snapshot_timer_entries_parity()"
+    snap = _functions()[SNAPSHOT]
+    assert "pg_advisory_xact_lock(hashtext('data_staging.refresh_timer_entries_clean'))" in snap, \
+        "the snapshot waits for a refresh still running"
+
 
 
 def test_parity_keys_and_causes():
     stmt = _functions()[PARITY_FN]
     assert re.search(r"returns table \(emp_id text, user_email text, day date, new_minutes numeric, "
                      r"old_minutes numeric, cause text\)", stmt)
-    for cause in ("'cap'", "'my_timers_fix'", "'unowned_in_my_timers'", "'only_in_my_timers'",
+    for cause in ("'cap'", "'running'", "'my_timers_fix'", "'unowned_in_my_timers'", "'only_in_my_timers'",
                   "'only_in_v1'", "'unexplained'"):
         assert cause in stmt, cause
     assert "data_staging.stg_timer_activities_clean" in stmt and TABLE in stmt
     assert "reference.ref_employee_emails" in stmt, "v1 emails map to emp_id"
     assert "> 1" in stmt and "Asia/Manila" in stmt
+    # a moved start explains Swift's original day too, not only the removals
+    fixed = re.search(r"fixed_days as \((.*?)\n  \),", stmt, re.S).group(1)
+    assert "c.last_kind = 'remove'" in fixed and "c.new_start is not null" in fixed
+    assert "(c.start_time at time zone 'Asia/Manila')::date" in fixed
+    order = ["'cap'", "'running'", "'my_timers_fix'", "'unowned_in_my_timers'",
+             "'only_in_my_timers'", "'unexplained'"]
+    assert [stmt.index(c) for c in order] == sorted(stmt.index(c) for c in order), "cause order"
     assert _table_columns(PARITY_TABLE)[:7] == ["emp_id", "user_email", "day", "new_minutes",
                                                 "old_minutes", "cause", "checked_at"]
 
