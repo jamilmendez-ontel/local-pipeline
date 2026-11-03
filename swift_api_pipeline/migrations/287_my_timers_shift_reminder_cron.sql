@@ -26,14 +26,15 @@
 --   A missing Vault secret sends no Authorization header: the route answers 401 and nothing else
 --   happens.
 --
--- THE SWITCH: Vercel env SHIFT_REMINDER=on. Off (the default), the route answers {"on": false}
---   and asks the database nothing, so the job can run before the INIT-823 invites go out.
+-- THE GATE: Vercel env SHIFT_REMINDER. off (the default) answers {"mode":"off"} and asks the
+--   database nothing; preview sends every email to Jamil only; pilot only to SHIFT_REMINDER_PILOT;
+--   on to everyone. So the job can run before the INIT-823 invites go out.
 --
 -- ACTIVATE (after the secret is in all three places):
 --   select cron.alter_job((select jobid from cron.job where jobname = 'my-timers-shift-reminder'),
 --                         active := true);
 -- VERIFY: cron.job_run_details for the job (status succeeded), then net._http_response
---   (status_code 200, content {"on":false} until the switch is on).
+--   (status_code 200, content {"mode":"off"} until the gate opens).
 --
 -- ROLLBACK
 --   select cron.unschedule('my-timers-shift-reminder');
