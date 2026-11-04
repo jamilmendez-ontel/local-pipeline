@@ -46,6 +46,8 @@ def test_apply_responses_accepts_rebuild_kwarg():
 
 
 def test_run_apply_rebuilds_once_when_responses_applied(monkeypatch):
+    # Confirmations are retired by default (2026-11-04); switch them on to check the order.
+    monkeypatch.setenv("TIMER_MEMBER_EMAILS", "on")
     calls = []
     change = {"entry_id": "abc", "action": "remove", "user_email": "m@x.co", "entry_date": None}
     _wire(monkeypatch, calls, responses=[{"entry_id": "abc"}], applied=[change])

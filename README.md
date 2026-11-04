@@ -46,7 +46,7 @@ due). Logic check: `node scripts/sim_pipeline_trigger_scheduler.js`.
 |---|---|---|
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
 | `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | Run 1 of 2: `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + corrections apply + clean rebuild + MV refresh. **No member emails** since 2026-08-28 |
-| `pipeline-timer-emails.yml` | Apps Script ~18:30 ET (`triggerTimerEmails`) and ~09:00 ET (`triggerTimerEmailsSecond`), both pinned to America/New_York | Run 2 of 2: re-extract through today ET (`--through-today`) + backfill + apply/rebuild + MV refresh, then the member-facing emails (`--remind`, `--send`, `--resend`) for the last closed window: first = 12 AM to 6 PM ET (sent 18:30 ET), second = 6 PM to 12 AM ET (sent 09:00 ET next day). Manual backfill: workflow inputs `date` + `window`. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
+| `pipeline-timer-emails.yml` | Apps Script ~18:30 ET (`triggerTimerEmails`) and ~09:00 ET (`triggerTimerEmailsSecond`), both pinned to America/New_York | Run 2 of 2: re-extract through today ET (`--through-today`) + backfill + apply/rebuild + MV refresh, then the member-facing steps (`--remind`, `--send`, `--resend`; **member emails RETIRED 2026-11-04**, `--send` only tracks duplicates now) for the last closed window: first = 12 AM to 6 PM ET (sent 18:30 ET), second = 6 PM to 12 AM ET (sent 09:00 ET next day). Manual backfill: workflow inputs `date` + `window`. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
@@ -117,6 +117,19 @@ timer data that lands at 04:21). Do not remove either step, and do not rely on
 asset-tasks' backfill for timer rows. The durable fix is to populate `asset_did`
 during the transform's INSERT so no ordering dependency exists at all; until then
 these two steps are what keep the current month priced.
+
+**The Timer Activity Entries email is RETIRED (2026-11-04).** My Timers
+(https://ontel-my-timers.vercel.app) replaces it: members see and fix their own
+timers there. `timer_correction_review.py` sends no member email unless
+`TIMER_MEMBER_EMAILS=on` (emergency only): `--send` still tracks duplicates (the clean
+table counts a duplicate once, auto-resolve keeps the longest after 7 days) but sends
+nothing; `--apply` still applies form responses from old emails' Edit/Remove buttons,
+auto-resolves and rebuilds, with no confirmation email; `--remind` and `--resend` do
+nothing. Both workflows still run on their schedules for the data steps, because every
+report (DRMC timer hours, revenue, task mix, Sheena's clean export) still reads
+`stg_timer_activities_clean`. Next: move those readers to `stg_timer_entries_clean`
+(My Timers fixes included), then close the forms. The history below describes the
+email while it ran.
 
 **Timer data runs twice a day; member emails only on the second run (since 2026-08-28).**
 A stop pressed in the Swift app can reach Swift's report data hours later (three

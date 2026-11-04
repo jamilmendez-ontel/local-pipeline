@@ -1,5 +1,13 @@
 name: "Pipeline: Timer Emails"
 
+# RETIRED EMAIL (2026-11-04): the Timer Activity Entries email is replaced by
+# My Timers. timer_correction_review.py sends no member email unless
+# TIMER_MEMBER_EMAILS=on, so this run now only re-extracts, applies form
+# responses, rebuilds the clean table, refreshes the MVs and tracks duplicates
+# (--send). The reports still read stg_timer_activities_clean, so keep it running
+# until they move to stg_timer_entries_clean. The notes below describe the email
+# while it ran.
+
 # Run 2 of 2 for timer data. Fired TWICE a day by Apps Script on the Eastern
 # clock since 2026-10-01: ~18:30 ET (first window, 12 AM to 6 PM ET of today)
 # and ~09:00 ET (second window, 6 PM to 12 AM ET of the previous Eastern
@@ -143,14 +151,14 @@ jobs:
             python -u main.py --pipeline analytics --no-email
           }
 
-      - name: Timer corrections - remind duplicates
+      - name: Timer corrections - remind duplicates (retired 2026-11-04, sends nothing)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Remind runs BEFORE send so it only covers previous days' duplicates.
         # Gated in code to once per 20 hours per group.
         run: python -u timer_correction_review.py --remind
 
-      - name: Timer corrections - send daily entries
+      - name: Timer corrections - track duplicates (daily email retired 2026-11-04)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Target = the last closed window: (today, first) at the 18:30 ET run,
@@ -166,7 +174,7 @@ jobs:
             python -u timer_correction_review.py --send
           fi
 
-      - name: Timer corrections - resend changed days
+      - name: Timer corrections - resend changed days (retired 2026-11-04, sends nothing)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Runs after --send so today's snapshot is fresh. Threaded re-sends
