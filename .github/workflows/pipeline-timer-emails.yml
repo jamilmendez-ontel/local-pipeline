@@ -151,14 +151,14 @@ jobs:
             python -u main.py --pipeline analytics --no-email
           }
 
-      - name: Timer corrections - remind duplicates
+      - name: Timer corrections - remind duplicates (retired 2026-11-04, sends nothing)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Remind runs BEFORE send so it only covers previous days' duplicates.
         # Gated in code to once per 20 hours per group.
         run: python -u timer_correction_review.py --remind
 
-      - name: Timer corrections - send daily entries
+      - name: Timer corrections - track duplicates (daily email retired 2026-11-04)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Target = the last closed window: (today, first) at the 18:30 ET run,
@@ -174,7 +174,7 @@ jobs:
             python -u timer_correction_review.py --send
           fi
 
-      - name: Timer corrections - resend changed days
+      - name: Timer corrections - resend changed days (retired 2026-11-04, sends nothing)
         working-directory: ${{ env.PIPELINE_DIR }}
         continue-on-error: true
         # Runs after --send so today's snapshot is fresh. Threaded re-sends
