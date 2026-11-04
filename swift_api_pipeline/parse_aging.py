@@ -155,7 +155,7 @@ def parse_aging_excel(filepath: str) -> Tuple[Optional[object], List[Dict]]:
             break
 
     if not as_of_date:
-        raise ValueError(f"Could not find 'As of' date in {filepath}")
+        raise AgingLayoutError(f"AR Aging layout changed: no 'As of' date in the first rows of {filepath}")
 
     header_idx, cols = find_columns(df)
 

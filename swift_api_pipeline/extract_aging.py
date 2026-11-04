@@ -27,7 +27,7 @@ from config import (
     get_logger, get_db, retry_db
 )
 from gmail_client import authenticate, search_messages, get_message_details, download_attachment
-from parse_aging import parse_aging_excel
+from parse_aging import AgingLayoutError, parse_aging_excel
 
 logger = get_logger("ar_aging")
 
@@ -197,22 +197,27 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
 
             try:
                 as_of_date, rows = parse_aging_excel(filepath)
-            except Exception as e:
-                # Deterministic for this file (e.g. AgingLayoutError): record it so it
-                # is reported once and not retried every cycle. Nothing is loaded.
-                logger.error(f"  Parse error ({filename}): {e}")
-                record_parse_failure(db, received_date, filename, str(e))
+            except AgingLayoutError as e:
+                # The file itself is wrong: record it so it is reported once and
+                # skipped on later runs (not retried every cycle). Nothing is loaded.
+                logger.error(f"  Rejected ({filename}): {e}")
+                try:
+                    record_parse_failure(db, received_date, filename, str(e))
+                except Exception as rec_err:
+                    logger.error(f"  Could not record the rejection (will retry next run): {rec_err}")
                 parse_failures.append(f"{received_ts_str} UTC {filename}: {e}")
+                total_errors += 1
+                continue
+            except Exception as e:
+                # Anything else (corrupt download, missing library) may be transient:
+                # not recorded, so the email is retried next run. Still turns the run red.
+                logger.error(f"  Parse error ({filename}), will retry next run: {e}")
+                parse_failures.append(f"{received_ts_str} UTC {filename}: unexpected parse error, will retry: {e}")
                 total_errors += 1
                 continue
 
             logger.info(f"  As of date: {as_of_date}")
             logger.info(f"  Parsed rows: {len(rows)}")
-
-            if received_ts_str in existing_timestamps:
-                logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded (as_of_date={as_of_date})")
-                total_skipped += 1
-                continue
 
             run_id = str(uuid.uuid4())
             logger.info(f"  Run ID: {run_id}")

@@ -101,3 +101,30 @@ def test_full_run_reports_partial_failure(monkeypatch):
 
     monkeypatch.setattr(ea, "run_aging_pipeline", lambda: {"processed": ["d"], "parse_failures": []})
     assert main.run_aging_pipeline_full() is True
+
+
+def test_unexpected_parse_error_is_not_recorded(monkeypatch, tmp_path):
+    """A corrupt download or missing library may be transient: retry next run, but go red."""
+    db = FakeDB()
+    _patch(monkeypatch, tmp_path, db)
+
+    def boom(path):
+        raise OSError("truncated file")
+
+    monkeypatch.setattr(extract_aging, "parse_aging_excel", boom)
+    result = extract_aging.run_aging_pipeline()
+    assert db.executed == []  # no pipeline_runs row, so the email is retried
+    assert len(result["parse_failures"]) == 1
+    assert "will retry" in result["parse_failures"][0]
+
+
+def test_recording_failure_does_not_stop_the_run(monkeypatch, tmp_path):
+    db = FakeDB()
+    _patch(monkeypatch, tmp_path, db)
+
+    def fail_record(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(extract_aging, "record_parse_failure", fail_record)
+    result = extract_aging.run_aging_pipeline()
+    assert len(result["parse_failures"]) == 1
