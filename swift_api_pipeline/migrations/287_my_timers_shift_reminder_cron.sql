@@ -6,8 +6,13 @@
 -- (app_my_timers.shift_reminder). Spec: ontel-my-timers
 -- docs/superpowers/specs/2026-10-30-team-demo-rules-design.md 6.4 (D10, D11).
 --
--- STATUS: NOT APPLIED. Apply after the app's migrate-production run has put the app migration
---   20261103012715_shift_end_reminder live.
+-- STATUS: APPLIED 2026-11-03 ~11:48 PM ET via Supabase MCP apply_migration (job id 54), then
+--   ACTIVATED. Secret in all three places first (Vault my_timers_shift_reminder_key, Vercel
+--   SHIFT_REMINDER_SECRET, app_setting shift_reminder_key_sha256; hash = Vault, checked).
+--   VERIFIED: 23:50 ET run succeeded, net._http_response 200 {"mode":"off"}; after
+--   SHIFT_REMINDER=on + redeploy, 23:55 ET run 200 {"mode":"on","due":0,"sent":0,...}.
+--   The app's migrations 20261103012715_shift_end_reminder and
+--   20261104042651_shift_end_skip_super_admins are live.
 --
 -- WHY pg_cron and not Apps Script / GitHub Actions (Jamil, 2026-11-02)
 --   * The Apps Script SCHEDULE table fires each job once a day; this needs every 5 minutes.
