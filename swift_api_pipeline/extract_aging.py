@@ -47,6 +47,34 @@ def get_existing_received_timestamps(db) -> set:
     return {row["email_received_date"].strftime("%Y-%m-%d %H:%M:%S") for row in rows}
 
 
+def get_rejected_received_timestamps(db) -> set:
+    """Email timestamps whose attachment was rejected at parse time (bad layout).
+
+    These are skipped on later runs so one bad file sends one alert instead of
+    being retried (and failing) on every Gmail cycle. --reprocess retries them.
+    """
+    rows = db.fetch(
+        f"SELECT DISTINCT to_char((metadata->>'email_received_date')::timestamptz AT TIME ZONE 'UTC', "
+        f"'YYYY-MM-DD HH24:MI:SS') AS ts "
+        f"FROM {SCHEMA_PIPELINE}.pipeline_runs "
+        f"WHERE pipeline_name = 'ar_aging_extract' AND status = 'failed' "
+        f"AND metadata->>'failure' = 'parse' AND metadata->>'email_received_date' IS NOT NULL"
+    )
+    return {row["ts"] for row in rows}
+
+
+def record_parse_failure(db, received_date, filename: str, error: str) -> str:
+    """Log a rejected attachment in pipeline_runs (also advances the Gmail watermark)."""
+    run_id = str(uuid.uuid4())
+    start_pipeline_run(db, run_id, metadata={
+        "failure": "parse",
+        "source_file": filename,
+        "email_received_date": received_date.isoformat(),
+    })
+    complete_pipeline_run(db, run_id, "failed", records=0, error=error)
+    return run_id
+
+
 def start_pipeline_run(db, run_id: str, metadata: dict = None):
     """Record pipeline run start."""
     retry_db(
@@ -108,6 +136,7 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
     existing_timestamps = set() if reprocess else get_existing_received_timestamps(db)
     if existing_timestamps:
         logger.info(f"Found {len(existing_timestamps)} existing received timestamps in raw_ar_aging")
+    rejected_timestamps = set() if reprocess else get_rejected_received_timestamps(db)
 
     # Gmail authentication
     logger.info("Authenticating with Gmail...")
@@ -135,6 +164,7 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
     total_skipped = 0
     total_errors = 0
     processed_dates = []
+    parse_failures = []
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for details in message_details:
@@ -144,6 +174,16 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
 
             logger.info(f"\nProcessing: {subject}")
             logger.info(f"  Received: {received_date:%Y-%m-%d %H:%M:%S UTC}")
+
+            received_ts_str = received_date.strftime("%Y-%m-%d %H:%M:%S")
+            if received_ts_str in existing_timestamps:
+                logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded")
+                total_skipped += 1
+                continue
+            if received_ts_str in rejected_timestamps:
+                logger.info("  SKIPPED -- attachment was rejected on an earlier run (use --reprocess to retry)")
+                total_skipped += 1
+                continue
 
             filepath = download_attachment(service, msg_id, ATTACHMENT_PATTERN, tmp_dir)
 
@@ -158,14 +198,17 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
             try:
                 as_of_date, rows = parse_aging_excel(filepath)
             except Exception as e:
-                logger.error(f"  Parse error: {e}")
+                # Deterministic for this file (e.g. AgingLayoutError): record it so it
+                # is reported once and not retried every cycle. Nothing is loaded.
+                logger.error(f"  Parse error ({filename}): {e}")
+                record_parse_failure(db, received_date, filename, str(e))
+                parse_failures.append(f"{received_ts_str} UTC {filename}: {e}")
                 total_errors += 1
                 continue
 
             logger.info(f"  As of date: {as_of_date}")
             logger.info(f"  Parsed rows: {len(rows)}")
 
-            received_ts_str = received_date.strftime("%Y-%m-%d %H:%M:%S")
             if received_ts_str in existing_timestamps:
                 logger.info(f"  SKIPPED -- received timestamp {received_ts_str} already loaded (as_of_date={as_of_date})")
                 total_skipped += 1
@@ -226,7 +269,7 @@ def run_aging_pipeline(max_emails: int = 100, reprocess: bool = False):
         logger.info(f"  Dates: {', '.join(sorted(processed_dates))}")
     logger.info(f"{'='*60}\n")
 
-    return processed_dates if processed_dates else None
+    return {"processed": processed_dates, "parse_failures": parse_failures}
 
 
 if __name__ == "__main__":

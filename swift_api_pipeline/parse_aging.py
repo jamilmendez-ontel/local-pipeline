@@ -7,8 +7,15 @@ The QuickBooks export has a messy format:
 - Aging bucket labels appear as group headers in column 0
 - Data rows have NaN in column 0 and a date in column 1
 - "Total for..." summary rows and "TOTAL" row should be skipped
-- 10 data columns: Date, Transaction Type, Num, Customer, Location,
+- Data columns: Date, Transaction Type, Num, Customer, Location,
   Due Date, Amount, Open Balance, Past Due, P.O. Number
+
+Columns are found by HEADER NAME, not position. The export layout is not
+stable: on 2026-10-27 it had Memo/Description + Past Due (no PO) and on
+2026-10-30 Client/Vendor Message + P.O. Number (no Past Due). The old
+positional parser loaded both with Past Due blank and the Daily Finance
+report showed Overdue = 0. A file missing a required column now raises
+AgingLayoutError so nothing wrong is loaded.
 
 Usage:
     as_of_date, rows = parse_aging_excel("path/to/file.xlsx")
@@ -28,6 +35,76 @@ AGING_BUCKET_LABELS = {
     "1 - 30 days past due": "1-30 days",
     "Current": "Current",
 }
+
+# Header text (normalized: lower case, single spaces) -> record field.
+COLUMN_ALIASES = {
+    "date": ("date",),
+    "transaction_type": ("transaction type",),
+    "num": ("num", "no.", "number"),
+    "customer": ("customer", "customer full name"),
+    "location": ("location",),
+    "due_date": ("due date",),
+    "amount": ("amount",),
+    "open_balance": ("open balance",),
+    "past_due": ("past due",),
+    "po_number": ("p.o. number", "po number", "p.o. no.", "po no.", "po #"),
+}
+
+# Display names used in error messages.
+COLUMN_LABELS = {
+    "date": "Date", "transaction_type": "Transaction Type", "num": "Num",
+    "customer": "Customer", "location": "Location", "due_date": "Due Date",
+    "amount": "Amount", "open_balance": "Open Balance", "past_due": "Past Due",
+    "po_number": "P.O. Number",
+}
+
+# Location is blank for many customers and not used downstream for totals.
+OPTIONAL_COLUMNS = {"location"}
+
+HEADER_SCAN_ROWS = 12
+
+
+class AgingLayoutError(ValueError):
+    """The export does not have the columns the loader needs."""
+
+
+def _norm_header(val) -> str:
+    if pd.isna(val):
+        return ""
+    return re.sub(r"\s+", " ", str(val)).strip().lower()
+
+
+def find_columns(df) -> Tuple[int, Dict[str, int]]:
+    """Locate the column header row and map each field to its column index.
+
+    Raises AgingLayoutError if no header row is found or a required column
+    is missing.
+    """
+    alias_to_field = {a: f for f, aliases in COLUMN_ALIASES.items() for a in aliases}
+    for row_idx in range(min(HEADER_SCAN_ROWS, len(df))):
+        headers = [_norm_header(v) for v in df.iloc[row_idx].tolist()]
+        if "open balance" not in headers or "due date" not in headers:
+            continue
+        mapping: Dict[str, int] = {}
+        for col_idx, h in enumerate(headers):
+            field = alias_to_field.get(h)
+            if field and field not in mapping:
+                mapping[field] = col_idx
+        missing = [f for f in COLUMN_ALIASES if f not in mapping and f not in OPTIONAL_COLUMNS]
+        if missing:
+            found = [str(v).strip() for v in df.iloc[row_idx].tolist() if not pd.isna(v)]
+            raise AgingLayoutError(
+                "AR Aging layout changed: missing column(s) "
+                + ", ".join(COLUMN_LABELS[f] for f in missing)
+                + ". Columns in the file: " + ", ".join(found)
+                + ". Nothing was loaded; ask accounting to re-send with the saved layout."
+            )
+        return row_idx, mapping
+    raise AgingLayoutError(
+        "AR Aging layout changed: no column header row (with 'Open Balance' and "
+        f"'Due Date') in the first {HEADER_SCAN_ROWS} rows."
+    )
+
 
 # Pattern to extract the "As of" date from the header
 AS_OF_PATTERN = re.compile(r"As of\s+(.+)", re.IGNORECASE)
@@ -80,15 +157,20 @@ def parse_aging_excel(filepath: str) -> Tuple[Optional[object], List[Dict]]:
     if not as_of_date:
         raise ValueError(f"Could not find 'As of' date in {filepath}")
 
-    # Process rows — skip header rows (0-4)
+    header_idx, cols = find_columns(df)
+
+    def cell(row, field):
+        idx = cols.get(field)
+        if idx is None or idx >= len(row):
+            return None
+        return row.iloc[idx]
+
     rows = []
     current_bucket = None
 
-    for idx in range(5, len(df)):
+    for idx in range(header_idx + 1, len(df)):
         row = df.iloc[idx]
         col0 = row.iloc[0] if len(row) > 0 else None
-        col1 = row.iloc[1] if len(row) > 1 else None
-
         col0_str = str(col0).strip() if pd.notna(col0) else ""
 
         # Check if this row is an aging bucket header
@@ -105,20 +187,20 @@ def parse_aging_excel(filepath: str) -> Tuple[Optional[object], List[Dict]]:
         if col0_str.lower().startswith("total"):
             continue
 
-        # Data rows: col 0 is NaN and col 1 has a date value
-        if pd.isna(col0) and pd.notna(col1):
-            # Parse the data columns
+        # Data rows: col 0 is empty and the Date column has a value
+        date_val = cell(row, "date")
+        if pd.isna(col0) and date_val is not None and pd.notna(date_val):
             record = {
-                "date": _parse_date(col1),
-                "transaction_type": _safe_str(row.iloc[2] if len(row) > 2 else None),
-                "num": _safe_str(row.iloc[3] if len(row) > 3 else None),
-                "customer": _safe_str(row.iloc[4] if len(row) > 4 else None),
-                "location": _safe_str(row.iloc[5] if len(row) > 5 else None),
-                "due_date": _parse_date(row.iloc[6] if len(row) > 6 else None),
-                "amount": _safe_numeric(row.iloc[7] if len(row) > 7 else None),
-                "open_balance": _safe_numeric(row.iloc[8] if len(row) > 8 else None),
-                "past_due": _safe_int(row.iloc[9] if len(row) > 9 else None),
-                "po_number": _safe_str(row.iloc[10] if len(row) > 10 else None),
+                "date": _parse_date(date_val),
+                "transaction_type": _safe_str(cell(row, "transaction_type")),
+                "num": _safe_str(cell(row, "num")),
+                "customer": _safe_str(cell(row, "customer")),
+                "location": _safe_str(cell(row, "location")),
+                "due_date": _parse_date(cell(row, "due_date")),
+                "amount": _safe_numeric(cell(row, "amount")),
+                "open_balance": _safe_numeric(cell(row, "open_balance")),
+                "past_due": _safe_int(cell(row, "past_due")),
+                "po_number": _safe_str(cell(row, "po_number")),
                 "aging_bucket": current_bucket,
             }
             rows.append(record)

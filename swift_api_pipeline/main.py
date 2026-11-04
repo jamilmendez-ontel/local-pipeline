@@ -365,6 +365,14 @@ def run_aging_pipeline_full():
     # Extract processes all unloaded emails and transforms inline per-file
     result = run_aging_pipeline()
 
+    # A rejected attachment (e.g. QuickBooks layout changed, AgingLayoutError)
+    # loads nothing for that day: report it red instead of SUCCESS.
+    failures = (result or {}).get("parse_failures") or []
+    if failures:
+        return PipelineOutcome(
+            failed_projects=["AR Aging attachment"],
+            detail="Rejected, nothing loaded for these emails: " + " | ".join(failures),
+        )
     return True
 
 
