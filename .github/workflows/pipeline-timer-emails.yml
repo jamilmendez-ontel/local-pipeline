@@ -1,5 +1,13 @@
 name: "Pipeline: Timer Emails"
 
+# RETIRED EMAIL (2026-11-04): the Timer Activity Entries email is replaced by
+# My Timers. timer_correction_review.py sends no member email unless
+# TIMER_MEMBER_EMAILS=on, so this run now only re-extracts, applies form
+# responses, rebuilds the clean table, refreshes the MVs and tracks duplicates
+# (--send). The reports still read stg_timer_activities_clean, so keep it running
+# until they move to stg_timer_entries_clean. The notes below describe the email
+# while it ran.
+
 # Run 2 of 2 for timer data. Fired TWICE a day by Apps Script on the Eastern
 # clock since 2026-10-01: ~18:30 ET (first window, 12 AM to 6 PM ET of today)
 # and ~09:00 ET (second window, 6 PM to 12 AM ET of the previous Eastern

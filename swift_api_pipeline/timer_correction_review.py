@@ -40,6 +40,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 from datetime import date, datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -1432,6 +1433,15 @@ def detect_and_track_duplicates(db, entries: list[dict]):
     logger.info(f"Tracked {len(new_groups)} new duplicate groups from daily entries")
 
 
+def member_emails_on() -> bool:
+    """False since 2026-11-04: the Timer Activity Entries email is retired; My Timers
+    replaces it. Every email to a member from this script stops (--send, the --apply
+    confirmations, --remind, --resend). Duplicate tracking, auto-resolve, form
+    responses and the clean rebuild keep running, because the reports still read
+    stg_timer_activities_clean. TIMER_MEMBER_EMAILS=on turns the emails back on."""
+    return os.environ.get("TIMER_MEMBER_EMAILS", "off").strip().lower() == "on"
+
+
 def run_send(test_mode: bool = False, target_date=None, part=None):
     """Send the timer entry emails for one window and track duplicates."""
     if "PLACEHOLDER" in CORRECT_FORM_ID or "PLACEHOLDER" in REMOVE_FORM_ID:
@@ -1452,7 +1462,11 @@ def run_send(test_mode: bool = False, target_date=None, part=None):
     n_techs = len(set(e['user_email'] for e in entries))
     logger.info(f"Found {len(entries)} entries for {n_techs} techs")
 
-    send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date, part=part)
+    if member_emails_on():
+        send_daily_emails(db, entries, test_mode=test_mode, target_date=target_date, part=part)
+    else:
+        logger.info("Timer Activity Entries email retired (My Timers replaces it): "
+                    "no email sent, duplicates still tracked")
     detect_and_track_duplicates(db, entries)
 
 
@@ -3029,7 +3043,10 @@ def run_apply(test_mode: bool = False):
     rebuild_clean_table(db)
 
     # 4. Send reply-in-thread confirmation emails for this run's applied changes
-    if applied_changes:
+    # (retired with the daily email on 2026-11-04: the fix still applies, silently)
+    if applied_changes and not member_emails_on():
+        logger.info(f"Applied {len(applied_changes)} form changes; confirmation emails retired")
+    elif applied_changes:
         send_correction_confirmations(db, applied_changes, test_mode=test_mode)
 
 
@@ -3044,6 +3061,9 @@ def run_remind(test_mode: bool = False):
     daily entries email.  Falls back to standalone if no notification record
     exists for that date.
     """
+    if not member_emails_on():
+        logger.info("Duplicate reminders retired with the daily email (My Timers replaces it)")
+        return
     db = get_db()
     now = datetime.now(timezone.utc)
 
@@ -3659,6 +3679,9 @@ def send_resend_emails(db, test_mode: bool = False, lookback_days: int = 7):
 
 def run_resend(test_mode: bool = False, lookback_days: int = 7):
     """Run the daily-email re-send pass: detect changed days, send threaded updates."""
+    if not member_emails_on():
+        logger.info("Re-sends retired with the daily email (My Timers replaces it)")
+        return
     db = get_db()
     send_resend_emails(db, test_mode=test_mode, lookback_days=lookback_days)
 
