@@ -16,6 +16,7 @@
 -- (its full_visited_at stamps are gone).
 --
 -- Rollback: drop table pipeline.asset_signal_state;
+--           delete from agent.schema_metadata where schema_name = 'pipeline' and table_name = 'asset_signal_state';
 
 create table pipeline.asset_signal_state (
   asset_did        text        primary key,
@@ -36,3 +37,10 @@ grant all on pipeline.asset_signal_state to service_role;
 
 comment on table pipeline.asset_signal_state is
   'Last-seen Firebase RTDB change-signal values (asset-tasks, data, timer-activities; epoch ms) per Swift asset, used by the asset-signal walk to find changed assets (ADR 0007). To force a re-read of a project set its asset_tasks_ms to -1; deleting a project_did''s rows only makes every asset a first sight (no re-read).';
+
+-- Catalog row (DATABASE_ARCHITECTURE.md section 5). NULL column_name never hits the unique key, so guard with not exists.
+insert into agent.schema_metadata (schema_name, table_name, column_name, description)
+select 'pipeline', 'asset_signal_state', null,
+       'Last-seen RTDB change-signal values per Swift asset (ADR 0007); written by the asset-signal walk.'
+where not exists (select 1 from agent.schema_metadata
+                  where schema_name = 'pipeline' and table_name = 'asset_signal_state' and column_name is null);
