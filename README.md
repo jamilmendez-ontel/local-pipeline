@@ -85,9 +85,9 @@ main.py
 │   │   └── transform.py → stg_assets (RPC), stg_asset_tasks (server-side SQL)
 │   ├── pipeline.py:user_priorities → raw_user_priorities → stg_user_priorities
 │   ├── extract_forms.py → raw_form_qa_ts13..ts19 (dynamic, `reference.ref_qa_forms`) → stg_qa_form
-│   └── extract_timer.py → raw_timer_activities → stg_timer_activities
-│       └── data_staging.rebuild_timer_clean() → stg_timer_activities_clean
+│   └── extract_timer.py → raw_timer_activities → stg_timer_activities (mv_project_summary; no longer feeds the clean table)
 │   (pg_cron, migration 285) app_my_timers.entries_layout → refresh_timer_entries_clean() → stg_timer_entries_clean
+│       └── (pg_cron :35, migration 288) rebuild_timer_clean() → stg_timer_activities_clean (rows since 2025-09-01 PHT)
 │
 └── Post-Phase 2:
     ├── data_staging.backfill_asset_did() (3-pass: asset_id → asset_name → FA regex)
@@ -127,9 +127,19 @@ nothing; `--apply` still applies form responses from old emails' Edit/Remove but
 auto-resolves and rebuilds, with no confirmation email; `--remind` and `--resend` do
 nothing. Both workflows still run on their schedules for the data steps, because every
 report (DRMC timer hours, revenue, task mix, Sheena's clean export) still reads
-`stg_timer_activities_clean`. Next: move those readers to `stg_timer_entries_clean`
-(My Timers fixes included), then close the forms. The history below describes the
-email while it ran.
+`stg_timer_activities_clean`.
+
+**Since migration 288 (2026-11-04) the reports read My Timers' answer.**
+`rebuild_timer_clean()` no longer builds `stg_timer_activities_clean` from the raw extract
+and the old forms: it refills it every hour (pg_cron `rebuild-timer-clean-hourly`, :35) from
+`stg_timer_entries_clean`, so members' My Timers fixes, the 10-hour cap (an entry over 10 hours
+counts as 10 and its end is moved to start + 10 h) and exact duplicates counted once reach DRMC
+hours, revenue, task mix, the gap report and the clean export. Same table, same columns: no
+reader changed. Rows before 2025-09-01 PHT are frozen as the old system left them. It refuses
+to run (writes nothing) when My Timers' table is empty or under 90% of the reports' rows.
+From then on the old forms change nothing that a report reads; they are closed next, with the
+old workflow steps. Parity at the switch: 86% of the last 30 days' member-days unchanged,
+October 15,146 h to 14,787 h. The history below describes the email while it ran.
 
 **Timer data runs twice a day; member emails only on the second run (since 2026-08-28).**
 A stop pressed in the Swift app can reach Swift's report data hours later (three
