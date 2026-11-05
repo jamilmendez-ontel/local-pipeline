@@ -39,8 +39,9 @@
 --   * site_id, site and user GPS, user_name, user_role (My Timers does not carry them): from
 --     Swift's live copy (stg_timer_activities_inc) for a Swift entry; else from the row this
 --     function wrote last time (same id); else, on the first run, from the old row the legacy
---     entry was copied from; else the latest live row of the project / member. site_id and the
---     site GPS are dropped when the member moved the entry to another site.
+--     entry was copied from; else the latest live row of the member. site_id and the site GPS
+--     are dropped when the member moved the entry to another site; the project name is taken
+--     only from a copy of the same project, else from data_staging.stg_projects.
 --   * start_date / end_date = the first and last day of the start's ET month, run_date = the
 --     start's ET date (the old table's start_date/end_date were the extraction month, and
 --     mv_timer_revenue reads them as first/last work date). run_id = ...0003 marks these rows.
@@ -48,9 +49,21 @@
 --     as the old system left them.
 --   * The 45 rows since the cutoff with no project or no email leave (My Timers never had them).
 --
+-- APPLY ORDER (a hard dependency, found in review 2026-11-04)
+--   ontel-my-timers' nightly workflow legacy-import (07:00 UTC, scripts/legacy-import.ts ->
+--   app_my_timers.legacy_refresh_entries() + legacy_import_changes()) copies the OLD rows of
+--   this table into app_my_timers.legacy_entry, keyed on project|email|start|site|task|twin.
+--   After this migration those rows are My Timers' own output, so the copy would loop: a
+--   member-moved start becomes a second entry (the first one vanishes with its fixes), a dropped
+--   duplicate vanishes, and the cap is written back into legacy_entry.duration_min.
+--   So, before applying: (1) the old-system seeding into My Timers is finished; (2) the
+--   legacy-import workflow is disabled (gh workflow disable legacy-import.yml -R Ontel/ontel-my-timers).
+--   The old forms are closed with this switch, so legacy_import_changes has nothing new to import.
+--
 -- SAFETY
---   * Refuses (raises, writes nothing) when My Timers' table has no entries or fewer than 90%
---     of the rows the reports hold since the cutoff: a broken refresh can never empty a report.
+--   * Refuses (raises, writes nothing) when My Timers' table has no entries, or fewer than 90%
+--     of the rows the reports hold since the cutoff, or fewer than 90% of them in the last 40
+--     days (My Timers' hourly window): a broken refresh can never empty a report.
 --   * Builds in a temp table, writes only the rows that differ (WAL diet, migration 257), never
 --     truncates (readers stay up), advisory lock first (migration 259).
 --   * The old email forms stop affecting reports at apply: their corrections only ever reached
@@ -84,6 +97,17 @@
 --   5. cron.job_run_details for rebuild-timer-clean-hourly ordered by runid desc: succeeded.
 -- =============================================================================
 
+do $preflight$
+begin
+  if to_regclass('data_staging.stg_timer_entries_clean') is null then
+    raise exception '288 preflight: data_staging.stg_timer_entries_clean is missing (migration 285)';
+  end if;
+  if not exists (select 1 from data_staging.stg_timer_entries_clean) then
+    raise exception '288 preflight: data_staging.stg_timer_entries_clean is empty';
+  end if;
+end
+$preflight$;
+
 create or replace function data_staging.rebuild_timer_clean()
 returns void
 language plpgsql
@@ -95,6 +119,8 @@ declare
   c_run_id constant uuid := '00000000-0000-0000-0000-000000000003'::uuid;
   v_src      bigint;
   v_cur      bigint;
+  v_src_40   bigint;
+  v_cur_40   bigint;
   v_deleted  bigint;
   v_inserted bigint;
 begin
@@ -106,6 +132,15 @@ begin
   where c.start_time >= c_cutoff;
   if v_src = 0 or v_src < 0.9 * v_cur then
     raise exception 'rebuild_timer_clean: My Timers has % entries but the reports hold % since 2025-09-01; refusing to shrink them by more than 10 percent', v_src, v_cur;
+  end if;
+  -- The same check on the last 40 days alone (My Timers' hourly window): a loss inside that
+  -- window is too small for the whole-range check to see.
+  select count(*) into v_src_40 from data_staging.stg_timer_entries_clean n
+  where not n.is_duplicate and n.start_time >= now() - interval '40 days';
+  select count(*) into v_cur_40 from data_staging.stg_timer_activities_clean c
+  where c.start_time >= now() - interval '40 days';
+  if v_src_40 < 0.9 * v_cur_40 then
+    raise exception 'rebuild_timer_clean: My Timers has % entries in the last 40 days but the reports hold %; refusing to shrink them by more than 10 percent', v_src_40, v_cur_40;
   end if;
 
   create temp table if not exists tmp_timer_clean
@@ -120,7 +155,12 @@ begin
   )
   select
     k.id,
-    coalesce(i.project, le.project, cur.project, fl.project, px.project),
+    -- A name only from a copy of the same project (a member may have moved the entry's work).
+    coalesce(case when i.project_did = n.project_did then i.project end,
+             case when le.project_did = n.project_did then le.project end,
+             case when cur.project_did = n.project_did then cur.project end,
+             case when le.project_did = n.project_did then fl.project end,
+             px.project),
     n.project_number, n.project_did, n.site_name,
     case when i.swift_timer_id is not null then
            case when i.site_name is not distinct from n.site_name then i.site_id end
@@ -170,14 +210,17 @@ begin
     order by c.id
     limit 1
   ) fl on true
-  -- An entry with no Swift, legacy or earlier row (a member's added entry): latest live names.
+  -- The project's name when no copy of the same project has it (an added entry, or a member
+  -- moved the entry to another project).
   left join lateral (
-    select x.project from data_staging.stg_timer_activities_inc x
-    where i.swift_timer_id is null and le.swift_timer_id is null and cur.id is null
-      and x.project_did = n.project_did
-    order by x.start_time desc
+    select p.project_name as project from data_staging.stg_projects p
+    where coalesce(i.project_did = n.project_did, false) is false
+      and coalesce(le.project_did = n.project_did, false) is false
+      and coalesce(cur.project_did = n.project_did, false) is false
+      and p.project_did = n.project_did
     limit 1
   ) px on true
+  -- An entry with no Swift, legacy or earlier row (a member's added entry): latest live names.
   left join lateral (
     select x.user_name, x.user_role from data_staging.stg_timer_activities_inc x
     where i.swift_timer_id is null and le.swift_timer_id is null and cur.id is null

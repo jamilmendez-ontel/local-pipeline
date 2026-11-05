@@ -53,7 +53,7 @@ def _statements():
 
 
 def test_header_has_the_house_sections():
-    head = _sql()[:6000]
+    head = _sql()[:_sql().index("do $preflight$")]
     for word in ("STATUS:", "WHY", "PREFLIGHT", "ROLLBACK", "VERIFY"):
         assert word in head, word
 
@@ -134,3 +134,23 @@ def test_cron_only_calls_the_rebuild():
 def test_function_revoked_from_public_anon_authenticated():
     code = _code()
     assert "revoke all on function data_staging.rebuild_timer_clean() from public, anon, authenticated" in code
+
+
+def test_project_name_only_from_a_copy_of_the_same_project():
+    body = _body()
+    for src in ("i", "le", "cur"):
+        assert f"case when {src}.project_did = n.project_did then {src}.project end" in body, src
+    assert "case when le.project_did = n.project_did then fl.project end" in body
+    assert "from data_staging.stg_projects p" in body
+
+
+def test_forty_day_guard_before_any_write():
+    body = _body()
+    assert "v_src_40 < 0.9 * v_cur_40" in body
+    assert body.index("v_src_40 < 0.9 * v_cur_40") < body.index("insert into pg_temp.tmp_timer_clean")
+
+
+def test_preflight_and_apply_order_documented():
+    sql = _sql()
+    assert sql.index("do $preflight$") < sql.index("create or replace function data_staging.rebuild_timer_clean()")
+    assert "APPLY ORDER" in sql and "legacy-import" in sql
