@@ -7,10 +7,13 @@
 --   seen_at                              : when the row was last written
 --   full_visited_at                      : last time the asset was fully read
 --
--- Force a re-read of a project: delete its rows,
---   delete from pipeline.asset_signal_state where project_did = '...';
--- The next walk then treats every asset in that project as first sight and the
--- rolling walk covers it.
+-- Force a re-read of a project: mark every asset as moved,
+--   update pipeline.asset_signal_state set asset_tasks_ms = -1 where project_did = '...';
+-- The next signal walk re-reads them all (capped per walk, newest first).
+-- Deleting a project's rows does NOT re-read anything: every asset becomes a
+-- first sight (values saved, tasks not re-read), the rolling walk covers them
+-- within 12 h, and the project gets no rolling sweep row for about 12 h
+-- (its full_visited_at stamps are gone).
 --
 -- Rollback: drop table pipeline.asset_signal_state;
 
