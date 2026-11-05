@@ -35,4 +35,4 @@ alter table pipeline.asset_signal_state enable row level security;
 grant all on pipeline.asset_signal_state to service_role;
 
 comment on table pipeline.asset_signal_state is
-  'Last-seen Firebase RTDB change-signal values (asset-tasks, data, timer-activities; epoch ms) per Swift asset, used by the asset-signal walk to find changed assets (ADR 0007). Delete a project_did''s rows to force a full re-read.';
+  'Last-seen Firebase RTDB change-signal values (asset-tasks, data, timer-activities; epoch ms) per Swift asset, used by the asset-signal walk to find changed assets (ADR 0007). To force a re-read of a project set its asset_tasks_ms to -1; deleting a project_did''s rows only makes every asset a first sight (no re-read).';
