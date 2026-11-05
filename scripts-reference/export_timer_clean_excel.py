@@ -1,7 +1,9 @@
 """
 Export clean timer activities from Supabase to a single Excel file.
 
-Pulls from stg_timer_activities_clean (corrected, deduplicated, removals excluded).
+Pulls from stg_timer_activities_clean. Since migration 288 (2026-11-04) that table is
+refilled hourly from My Timers (stg_timer_entries_clean): members' My Timers fixes,
+duplicates once, entries over 10 hours counted as 10.
 All projects in one sheet, sorted by project then start_time.
 Same 16 columns as the per-project timer export.
 
@@ -324,8 +326,9 @@ def send_email(file_path, row_count, drive_link, loaded_at, run_id, month_start,
     <html><body style="font-family: Arial, sans-serif;">
     <h2>Timer Clean Data Export</h2>
     <p>The daily clean timer data export for <strong>{month_label}</strong> is ready.</p>
-    <p>This file contains <strong>corrected and deduplicated</strong> timer entries
-    from <code>stg_timer_activities_clean</code> — all projects in a single file.</p>
+    <p>This file contains the timer entries from <strong>My Timers</strong>, with the
+    changes members made there (edits, removals, approved requests). Duplicates are counted
+    once and an entry over 10 hours counts as 10. All projects are in a single file.</p>
 
     <table style="border-collapse: collapse; margin: 16px 0; border: 1px solid #ddd;">
         <tr style="background:#f5f5f5;">
@@ -348,7 +351,7 @@ def send_email(file_path, row_count, drive_link, loaded_at, run_id, month_start,
         <tr><td style="padding:4px 12px; font-weight:bold;">Data Period</td>
             <td style="padding:4px 12px;">{month_label}</td></tr>
         <tr><td style="padding:4px 12px; font-weight:bold;">Data Source</td>
-            <td style="padding:4px 12px;">stg_timer_activities_clean (corrected + deduplicated)</td></tr>
+            <td style="padding:4px 12px;">My Timers (members' fixes, duplicates once, 10-hour cap)</td></tr>
         <tr><td style="padding:4px 12px; font-weight:bold;">Pipeline Run</td>
             <td style="padding:4px 12px;">{loaded_at_str}</td></tr>
     </table>

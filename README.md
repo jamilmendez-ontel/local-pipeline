@@ -134,7 +134,8 @@ report (DRMC timer hours, revenue, task mix, Sheena's clean export) still reads
 and the old forms: it refills it every hour (pg_cron `rebuild-timer-clean-hourly`, :35) from
 `stg_timer_entries_clean`, so members' My Timers fixes, the 10-hour cap (an entry over 10 hours
 counts as 10 and its end is moved to start + 10 h) and exact duplicates counted once reach DRMC
-hours, revenue, task mix, the gap report and the clean export. Same table, same columns: no
+hours, revenue, task mix, the gap report and the clean export (whose email has said since
+2026-11-05 that the data comes from My Timers). Same table, same columns: no
 reader changed. Rows before 2025-09-01 PHT are frozen as the old system left them. It refuses
 to run (writes nothing) when My Timers' table is empty or under 90% of the reports' rows.
 From then on the old forms change nothing that a report reads; they are closed next, with the
