@@ -1,0 +1,46 @@
+-- =============================================================================
+-- 289_stg_daily_reports_emp_date_index.sql
+-- My Timers shift-end reminder claim timed out (OnPoint INIT-043): index the newest-report
+-- lookup inside analytics.v_employee_directory.
+--
+-- STATUS: APPLIED 2026-11-04 ~9:10 PM ET (outside the 12:01-1:15 AM and 6:05-6:45 AM ET
+--   reload windows) as one autocommit statement through MCP execute_sql.
+--   CREATE INDEX CONCURRENTLY cannot run inside a transaction block (not apply_migration).
+--   VERIFIED 9:14 PM ET: indisvalid = true, 1400 kB. The claim's select: 13.1 ms,
+--   Index Scan using idx_stg_dr_emp_work_date, lookup 228 pages, all from cache.
+--
+-- WHY
+--   * 2026-11-04 7:30 and 7:35 PM ET: /api/reminders/shift-end returned 500,
+--     "shift_reminders_due: canceling statement due to statement timeout" (anon 3 s). Normal:
+--     mean 185 ms, max 1.18 s over 181 calls. At 7:30 refresh_mv_timer_day_rollup (38 s) and
+--     refresh_mv_daily_report_task_rollup (36 s, 22 s at 7:35) ran at the same moment.
+--     The claim was retried 5 minutes later; nobody was due, nothing lost.
+--   * The cost: v_employee_directory takes report_display_name from each person's newest
+--     stg_daily_reports row (LEFT JOIN LATERAL ... ORDER BY work_date DESC LIMIT 1). With only
+--     idx_stg_dr_tasks_emp (emp_id) Postgres reads ALL of a person's rows (~365) and sorts
+--     them: 6,367 heap pages for the 76 members on every 5-minute claim, much of it from disk,
+--     the same table the DR rollup refresh reads. Leaving the column out of the query does not
+--     help: the planner does not remove the lateral join.
+--   * 25 app_my_timers functions read the view (people, invite lists, roles, me, ...); every
+--     whole-roster read pays the same scan.
+--
+-- PREFLIGHT (live OntelDB, 2026-11-04 ~8:45 PM ET)
+--   * EXPLAIN ANALYZE of the claim's select, index created inside a rolled-back transaction:
+--     228 ms / 7,321 pages -> 14.7 ms / 930 pages; the lookup 6,608 pages -> 228
+--     (Index Scan using the new index, Limit 1 per person). Rollback verified (no leftover).
+--   * Writes are light: 221 row updates + 2 inserts since the 11-03 restart. The existing
+--     emp_id index is 984 kB; this one is about the same size. idx_stg_dr_tasks_emp is kept
+--     (160,737 scans; its removal is a separate decision).
+--   * No view or function changes: nothing to re-create, no pg_depend impact.
+--
+-- ROLLBACK
+--   DROP INDEX CONCURRENTLY IF EXISTS data_staging.idx_stg_dr_emp_work_date;
+--
+-- VERIFY AFTER
+--   select indisvalid from pg_index where indexrelid = 'data_staging.idx_stg_dr_emp_work_date'::regclass;  -- true
+--   EXPLAIN of shift_reminders_due's select shows Index Scan using idx_stg_dr_emp_work_date.
+--   11-05: no "[shift-end] ... statement timeout" in Vercel logs; net._http_response has no 500.
+-- =============================================================================
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_stg_dr_emp_work_date
+  ON data_staging.stg_daily_reports USING btree (emp_id, work_date DESC);
