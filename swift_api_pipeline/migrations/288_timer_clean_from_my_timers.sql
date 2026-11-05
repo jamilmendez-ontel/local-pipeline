@@ -13,7 +13,13 @@
 -- members' own fixes, the 10-hour cap and exact duplicates counted once.
 -- Same table, same columns, same function name: no reader changes, no gap_report object touched.
 --
--- STATUS: NOT APPLIED (written 2026-11-04).
+-- STATUS: APPLIED 2026-11-04 ~9:10 PM ET via Supabase MCP apply_migration (PR #124, 0966993),
+--   after ontel-my-timers' legacy-import workflow was disabled (gh workflow disable, same night).
+--   VERIFIED: first run wrote 169,914 rows (run_id ...0003) and left the 257,511 older rows;
+--   427,625 -> 427,425 rows (the 45 rows with no project/email and the dropped duplicates left);
+--   0 old-system rows since the cutoff; max duration 600. Two more runs rewrote 0 rows.
+--   October after refreshing the MVs: DRMC rollup 14,418 -> 14,216 h (1,613 -> 1,614 member-days),
+--   revenue $461,325 -> $460,660, task mix 15,146 -> 14,787 h. Cron job 55 at :35.
 --
 -- WHY (agreed 2026-11-04)
 --   * The Timer Activity Entries email is retired (PR #123); members fix timers in My Timers.
