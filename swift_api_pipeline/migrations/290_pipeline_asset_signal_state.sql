@@ -1,4 +1,5 @@
 -- 290: last-seen Swift asset change-signal values, one row per asset.
+-- APPLIED 2026-11-05 13:16 ET via MCP apply_migration. Verified: table + PK(asset_did) + idx_asset_signal_state_project, RLS on, owner postgres, service_role=arwdDxt, anon no SELECT, agent.schema_metadata 1 row, 0 rows.
 -- Purpose (ADR 0007 in ontel-data-platform): the Cloud Run asset-task walker
 -- reads each asset's Firebase RTDB change signal (keys asset-tasks, data,
 -- timer-activities, each epoch-ms) and compares it with the values stored here
