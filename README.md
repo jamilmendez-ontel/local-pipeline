@@ -85,7 +85,7 @@ main.py
 │   │   └── transform.py → stg_assets (RPC), stg_asset_tasks (server-side SQL)
 │   ├── pipeline.py:user_priorities → raw_user_priorities → stg_user_priorities
 │   ├── extract_forms.py → raw_form_qa_ts13..ts19 (dynamic, `reference.ref_qa_forms`) → stg_qa_form
-│   └── extract_timer.py → raw_timer_activities → stg_timer_activities (no longer read by reports)
+│   └── extract_timer.py → raw_timer_activities → stg_timer_activities (mv_project_summary; no longer feeds the clean table)
 │   (pg_cron, migration 285) app_my_timers.entries_layout → refresh_timer_entries_clean() → stg_timer_entries_clean
 │       └── (pg_cron :35, migration 288) rebuild_timer_clean() → stg_timer_activities_clean (rows since 2025-09-01 PHT)
 │
