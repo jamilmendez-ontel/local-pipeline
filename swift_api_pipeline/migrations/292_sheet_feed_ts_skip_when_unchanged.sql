@@ -3,8 +3,11 @@
 -- OntelDB disk IO: the hourly TS sheet feed rebuild (pg_cron job 41, :55) skips when
 -- data_staging.stg_asset_tasks has not moved since the last build.
 --
--- STATUS: NOT APPLIED. Safe any time (CREATE OR REPLACE keeps the owner and the
---   postgres/service_role EXECUTE grants; the cron job and its argument are unchanged).
+-- STATUS: APPLIED 2026-11-06 7:16 AM ET through MCP execute_sql (the CREATE OR REPLACE below).
+--   VERIFIED: owner postgres, proacl {postgres=X, service_role=X}, SECURITY DEFINER and
+--   search_path kept; prosrc carries the guard. Before applying, the body minus the guard
+--   was md5-identical to the live prosrc (1c32d5f2...). Safe any time; the cron job and its
+--   argument are unchanged.
 --   This function was never in a migration before; the body below is the live definition
 --   from pg_get_functiondef on 2026-11-06 with only the guard block added.
 --
