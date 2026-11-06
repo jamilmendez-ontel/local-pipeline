@@ -164,6 +164,11 @@ Entries in the same group share the exact same start_time but differ in `end_tim
 
 ### Correction System (`timer_correction_review.py`)
 
+> **RETIRED 2026-11-05.** The daily email, the Correction / Removal forms, `timer_correction_review.py`
+> and its workflows were removed. Members fix their timers in My Timers, and since migration 288
+> `rebuild_timer_clean()` refills `stg_timer_activities_clean` from My Timers hourly (pg_cron job 55, :35).
+> The section below and the Correction Flow describe the old system for history only.
+
 **Daily email (`--send`):** Sends each tech their previous day's timer entries with:
 - Entry ID (12-char MD5 of full natural key)
 - "Correct" link → Google Form with duration picker
@@ -543,8 +548,6 @@ soft-delete via `is_deleted` + tombstone-on-cancel; reconcile sweeps drift)
 | `pipeline.yml` Cron 1 | 10:00 PM EST | orgs/projects only |
 | `pipeline.yml` Cron 2 | 12:01 AM EST | timer, user_priorities, forms |
 | `gmail-pipeline.yml` | On email (Apps Script) | aging + sales |
-| `timer-duplicate-resolve.yml` | On form submit | duplicate resolution |
-| `timer-correction-apply.yml` | Batched: 10 min after last form submit, 45 min cap, 5-min poller | correction + removal application (one rebuild per run) |
 | `scrape.yml` (gmail-scraper) | 4:00 AM UTC | package email scraper |
 
 ### Windows Task Scheduler

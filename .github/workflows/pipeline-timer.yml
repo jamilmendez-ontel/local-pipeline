@@ -1,8 +1,15 @@
 name: "Pipeline: Timer"
 
-# Run 1 of 2 for timer data (~1:15 AM ET / 13:15 PHT): extract, backfill,
-# Excel exports (raw + clean, Drive + email), corrections apply + clean
-# rebuild, MV refresh. Member emails live in pipeline-timer-emails.yml.
+# The one daily timer run (~1:15 AM ET / 13:15 PHT): Swift v1 extract,
+# backfill, Excel exports (raw + clean, Drive + email), MV refresh.
+#
+# Since 2026-11-05 this is the ONLY run of the v1 Swift timer extract (the
+# twice-daily pipeline-timer-emails.yml was retired with the old Timer
+# Correction / Removal forms). It no longer rebuilds the clean table: since
+# migration 288, data_staging.rebuild_timer_clean() refills
+# stg_timer_activities_clean from My Timers (stg_timer_entries_clean), run
+# hourly by pg_cron job 55 at :35. The clean export below therefore reads a
+# table at most ~1 hour old, independent of this run's extract.
 
 on:
   repository_dispatch:
@@ -78,7 +85,11 @@ jobs:
       #   04:21  timer transform deletes the whole current-month bucket and
       #          re-inserts it with asset_did NULL
       #          timer_correction_review --apply -> rebuild_timer_clean()
-      #          propagates those NULLs into stg_timer_activities_clean
+      #          propagated those NULLs into stg_timer_activities_clean
+      #          (until migration 288, 2026-11-04; the clean table now comes
+      #          from My Timers, so for timer rows this backfill now matters
+      #          only to stg_timer_activities and its readers,
+      #          mv_project_summary and v_timer_activities)
       #
       # Net effect: asset_did was ALWAYS NULL for the current month-to-date, and
       # only became populated once the month rolled over and the nightly DELETE
@@ -88,8 +99,7 @@ jobs:
       # attributed revenue was structurally blank for the current month, every
       # month.
       #
-      # Backfilling here closes the loop in the same run, before the clean-table
-      # rebuild below picks the values up. It is idempotent (every pass is
+      # Backfilling here closes the loop in the same run. It is idempotent (every pass is
       # `WHERE asset_did IS NULL`) and cheap.
       - name: Run backfill (asset_did) after the timer reload
         working-directory: ${{ env.PIPELINE_DIR }}
@@ -115,22 +125,12 @@ jobs:
         continue-on-error: true
         run: python -u upload_to_shared_drive.py --export timer
 
-      - name: Timer corrections - apply pending
-        working-directory: ${{ env.PIPELINE_DIR }}
-        continue-on-error: true
-        run: |
-          python -u timer_correction_review.py --apply || {
-            echo "Apply failed (often a transient pooler cap), retrying after 2 minutes..."
-            sleep 120
-            python -u timer_correction_review.py --apply
-          }
-
       # The analytics refresh in pipeline-asset-tasks runs at 04:18 UTC, three
       # minutes BEFORE this workflow starts, so it never sees the night's timer
       # data. Anything derived from stg_timer_activities_clean was therefore a
       # day stale, including mv_timer_revenue and mv_timer_revenue_daily. Refresh
-      # again here, after the reload + backfill + rebuild_timer_clean above, so
-      # the revenue MVs are built from tonight's fully populated clean table.
+      # again here, after the reload + backfill above. (The clean table itself is
+      # rebuilt hourly at :35 by pg_cron job 55 since migration 288.)
       # Non-fatal: a stale MV degrades, it does not corrupt.
       - name: Refresh analytics MVs (after the timer reload)
         working-directory: ${{ env.PIPELINE_DIR }}
@@ -158,10 +158,9 @@ jobs:
         continue-on-error: true
         run: python -u upload_to_shared_drive.py --export timer-clean
 
-      # Member-facing emails (--remind / --send / --resend) live in
-      # pipeline-timer-emails.yml (~06:30 PHT since 2026-09-28, previously
-      # ~6:00 AM ET / 18:00 PHT from 2026-08-28). This run is data + exports
-      # only. Do NOT add the send steps back here.
+      # The member-facing timer emails and the form apply step
+      # (timer_correction_review.py) were retired on 2026-11-04/05. My Timers
+      # replaces them. Do NOT add them back here.
 
       # Turn a silently-skipped clean export into a red run + email alert.
       # The export step is continue-on-error, so without this a transient

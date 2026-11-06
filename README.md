@@ -45,8 +45,7 @@ due). Logic check: `node scripts/sim_pipeline_trigger_scheduler.js`.
 | Workflow | Trigger | What it refreshes |
 |---|---|---|
 | `pipeline-orgs.yml` | Nightly Apps Script | Orgs + projects (Phase 1, must run first) |
-| `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | Run 1 of 2: `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + corrections apply + clean rebuild + MV refresh. **No member emails** since 2026-08-28 |
-| `pipeline-timer-emails.yml` | Apps Script ~18:30 ET (`triggerTimerEmails`) and ~09:00 ET (`triggerTimerEmailsSecond`), both pinned to America/New_York | Run 2 of 2: re-extract through today ET (`--through-today`) + backfill + apply/rebuild + MV refresh, then the member-facing steps (`--remind`, `--send`, `--resend`; **member emails RETIRED 2026-11-04**, `--send` only tracks duplicates now) for the last closed window: first = 12 AM to 6 PM ET (sent 18:30 ET), second = 6 PM to 12 AM ET (sent 09:00 ET next day). Manual backfill: workflow inputs `date` + `window`. Separate `pipeline-timer-emails` dispatch type; same `pipeline-timer` concurrency group. No exports |
+| `pipeline-timer.yml` | Apps Script ~1:15 AM ET (13:15 PHT) | The one daily timer run (since 2026-11-05, when `pipeline-timer-emails.yml` was retired): Swift v1 `stg_timer_activities` reload + asset_did backfill + Excel exports (raw + clean, Drive + email; Sheena's report reads the 13:15 PHT clean export) + MV refresh. No clean rebuild here: pg_cron job 55 rebuilds `stg_timer_activities_clean` from My Timers hourly at :35 (migration 288). **No member emails** |
 | `pipeline-priorities.yml` | Nightly Apps Script | `stg_user_priorities` |
 | `pipeline-forms.yml` | Nightly Apps Script | `stg_qa_form`. Before extraction, auto-discovers new TS projects' QA forms via the Swift REST API and registers them (see below) |
 | `pipeline-timer-discrepancies.yml` | Nightly Apps Script | Google Form → `stg_timer_discrepancies` |
@@ -56,8 +55,6 @@ due). Logic check: `node scripts/sim_pipeline_trigger_scheduler.js`.
 | `pipeline-asset-tasks-inc.yml` | Hourly GHA cron :20 (pilot); UTC-hour-05/06 run = strict audit gate | SHADOW: incremental asset-tasks walker → `*_inc` tables + drift audit (see below) |
 | `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
-| `timer-correction-apply.yml` | Apps Script batched window (2026-09-04): form submits on EITHER form open/extend a shared window in the "Timer Dispatch Coordination" sheet (closes 10 min after the last submit, capped 45 min after the first); a 5-min poller in the correction project fires ONE dispatch per window. Each run rebuilds the clean table exactly once. Replaces the per-click dispatch + double rebuild that drained the DB's disk IO budget | Apply timer-duration corrections and removals in batches. Responses whose entry-hash went stale (the entry changed after the review email — running timer completed, re-extract drift) are resolved via the form's Entry Details prefill to the entry's start-key group instead of being silently skipped; ambiguous matches still skip with a warning (2026-07-21) |
-| `timer-duplicate-resolve.yml` | Apps Script onFormSubmit | Resolve timer-duplicate reviews in real time |
 | `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
 | `dispatch-cadence-watch.yml` | GHA cron every 15 min (:07/:22/:37/:52); never `repository_dispatch` | Dispatch heartbeat (INIT-827): lists runs with the built-in `GITHUB_TOKEN` (`actions: read`), so it does not depend on the Apps Script PAT it watches. Breach = newest `repository_dispatch` run older than 30 min for any workflow, or for either 5-min heartbeat (Daily Reports Rolling = ontel Apps Script, User Priorities = nanoninth Apps Script, so a token dead in one project is caught too). Emails Jamil once per outage, a reminder every 6 h, once on recovery; the alerting state rides in `actions/cache`. 30 days of history: dispatches run 24/7, worst normal gap 5.6 min. `workflow_dispatch`: `dry_run`, `threshold_min` (0 exercises the email path; the next run sends the recovery email). Local: `python swift_api_pipeline/dispatch_cadence_watcher.py --dry-run` |
 | `holiday-feed-watch.yml` | Apps Script Mon 6 PM ET + cron Thu 22:00 UTC backstop | PH holiday proclamation watch: lawphil proclamation index (+ Official Gazette RSS when not 403-blocked) + Nager.Date vs `reference.ref_holidays`; emails Jamil proposed INSERT/UPDATE SQL (never writes the table), silent when nothing new (see below) |
@@ -112,22 +109,25 @@ earlier month). No asset means no market means no rate, so attributed revenue wa
 blank for the current month, every month.
 
 `pipeline-timer` therefore runs its own **backfill after the reload** and its own
-**analytics refresh after `rebuild_timer_clean()`** (the 04:18 refresh cannot see
+**analytics refresh after the reload** (the 04:18 refresh cannot see
 timer data that lands at 04:21). Do not remove either step, and do not rely on
 asset-tasks' backfill for timer rows. The durable fix is to populate `asset_did`
 during the transform's INSERT so no ordering dependency exists at all; until then
 these two steps are what keep the current month priced.
 
-**The Timer Activity Entries email is RETIRED (2026-11-04).** My Timers
-(https://ontel-my-timers.vercel.app) replaces it: members see and fix their own
-timers there. `timer_correction_review.py` sends no member email unless
-`TIMER_MEMBER_EMAILS=on` (emergency only): `--send` still tracks duplicates (the clean
-table counts a duplicate once, auto-resolve keeps the longest after 7 days) but sends
-nothing; `--apply` still applies form responses from old emails' Edit/Remove buttons,
-auto-resolves and rebuilds, with no confirmation email; `--remind` and `--resend` do
-nothing. Both workflows still run on their schedules for the data steps, because every
-report (DRMC timer hours, revenue, task mix, Sheena's clean export) still reads
-`stg_timer_activities_clean`.
+**The Timer Activity Entries email (2026-11-04) and the old Timer Correction /
+Removal forms (2026-11-05) are RETIRED.** My Timers (https://ontel-my-timers.vercel.app)
+replaces them: members see and fix their own timers there. On 2026-11-05 the code that
+only served the email and the forms was removed: `timer_correction_review.py` (all of
+`--send`, `--remind`, `--resend`, `--apply`) and its tests, the twice-daily
+`pipeline-timer-emails.yml`, the form-submit `timer-correction-apply.yml`, the form
+Apps Script files (`scripts/timer_correction_trigger.gs`, `timer_removal_trigger.gs`,
+`timer_duplicate_resolve_trigger.gs`), the `timer_emails_first` / `timer_emails_second`
+jobs in `scripts/pipeline_trigger.gs`, and the one-off audit scripts that built form
+links. The `app_timer.*` tables those modes wrote stay in the database (code-only
+removal). Side effect: the v1 Swift timer extract (`stg_timer_activities`, read only by
+`analytics.mv_project_summary` and `analytics.v_timer_activities`) now runs once a day,
+~1:15 AM ET, instead of three times.
 
 **Since migration 288 (2026-11-04) the reports read My Timers' answer.**
 `rebuild_timer_clean()` no longer builds `stg_timer_activities_clean` from the raw extract
@@ -138,11 +138,11 @@ hours, revenue, task mix, the gap report and the clean export (whose email has s
 2026-11-05 that the data comes from My Timers). Same table, same columns: no
 reader changed. Rows before 2025-09-01 PHT are frozen as the old system left them. It refuses
 to run (writes nothing) when My Timers' table is empty or under 90% of the reports' rows.
-From then on the old forms change nothing that a report reads; they are closed next, with the
-old workflow steps. Parity at the switch: 86% of the last 30 days' member-days unchanged,
+From then on the old forms changed nothing that a report reads; they were closed on
+2026-11-05 and their code removed (above). Parity at the switch: 86% of the last 30 days' member-days unchanged,
 October 15,146 h to 14,787 h. The history below describes the email while it ran.
 
-**Timer data runs twice a day; member emails only on the second run (since 2026-08-28).**
+**History (2026-08-28 to 2026-11-05; retired, kept for context): timer data ran twice a day, member emails only on the second run.**
 A stop pressed in the Swift app can reach Swift's report data hours later (three
 cases in Aug 2026, e.g. an 18:13 ET stop that was still NULL at the 01:19 ET
 extract and only appeared after 01:27 ET). With extract and send 9 minutes apart,
@@ -375,7 +375,6 @@ published).
 | `gmail_client.py` | Gmail API authentication |
 | `calendar_client.py` | Google Calendar API authentication |
 | `sheets_client.py` | Drive API authentication (used for Google Forms responses) |
-| `timer_correction_review.py` | Daily timer review emails + form-response apply (corrections/removals -> `app_timer.*` -> `rebuild_timer_clean()`). Since 2026-08-10 (#44): stale-response removals are surgical (duration-matched to the snapshot the member saw; no match = skip for manual review, never bulk group removal) and form prefill entry ids carry an `id:` prefix so Google Sheets can't mangle hex hashes into scientific notation. Since 2026-08-24: still-running timers (`end_time IS NULL`) are not actionable rows; they get an amber "timer still running" notice (site/task, start, elapsed, an "Open in Swift" task deep link resolved via `stg_asset_tasks` (DRMC `swiftTaskUrl` pattern; root link when the timer has no asset), no Edit/Remove) and the completed entry arrives via the resend pass as NEW. Ghost NULL-end rows with a completed sibling are dropped silently. Migration 241 stops a NULL-end removal from shielding Step 5 runaway-duplicate cleanup. Design: `docs/superpowers/specs/2026-08-24-timer-running-entries-design.md`. |
 | `schedule_feed_audit.py` | Swift task-record vs activity-feed schedule audit (12h calendar-path flip); maintains `pipeline.schedule_audit_anomalies`, serves corrections via `analytics.v_user_priorities_effective` |
 | `holiday_feed_watcher.py` | Weekly PH holiday proclamation watch (lawphil index + best-effort Official Gazette RSS subject-line parser + Nager.Date cross-check + staleness) against `reference.ref_holidays`; emails proposed SQL, never writes the table; run log `pipeline.holiday_watch_runs` |
 | `duplicate_asset_watcher.py` | Daily duplicate Swift asset watch over `stg_assets` (same project + path + name, >1 asset id); per copy: tasks touched, v2 timers, creation time decoded from the Swift id; verdict keep / delete / merge; impact = v1 timers left with a NULL asset (count, hours, last start); HTML email + xlsx attachment; `--out-dir` / `--html-out` write local copies; read-only |
@@ -440,7 +439,7 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 |---|---|
 | `SWIFT_PASSWORD`, `SUPABASE_PASSWORD` | All pipelines |
 | `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via the notifier account) |
-| `SHEETS_TOKEN_PICKLE` | Timer-discrepancies, timer-correction-apply, timer-duplicate-resolve |
+| `SHEETS_TOKEN_PICKLE` | Timer pipeline, timer clean export, roster gap watcher, employee sync |
 | `CALENDAR_TOKEN_PICKLE` | Calendar-events pipeline |
 | `DATE_VALIDATOR_DISPATCH_PAT` | Cross-repo dispatches (date-validator, report-automation) |
 

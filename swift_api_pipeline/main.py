@@ -271,9 +271,9 @@ def run_invoicing_pipeline():
 def run_timer_pipeline_full(through_today: bool = False):
     """Run timer extraction + transformation (append mode).
 
-    through_today=True ends the pull at today ET instead of yesterday. Used by the
-    run in front of the Timer Entries email (pipeline-timer-emails.yml), whose shift
-    day reaches 18:00 ET today. One extract + transform per month bucket; there are
+    through_today=True ends the pull at today ET instead of yesterday. It was used by
+    the run in front of the Timer Entries email (pipeline-timer-emails.yml, retired
+    2026-11-05); no workflow passes it now, it stays for a manual run. One extract + transform per month bucket; there are
     two only on the 1st of the month with through_today.
     """
     from extract_timer import run_timer_pipeline, calculate_date_ranges

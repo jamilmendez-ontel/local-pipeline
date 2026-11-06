@@ -7,9 +7,10 @@ Sunday (`Date Range: 2026-09-01 to 2026-09-27`) and only the first six hours of 
 shift day were in the table: 3 members and 5 entries were emailed where the shift day
 had 65 members and 569 entries.
 
-`through_today=True` ends the pull at today ET. Only pipeline-timer-emails.yml uses
-it; the ~1:15 AM ET run keeps the closed-day default because Sheena's clean export is
-built from it.
+`through_today=True` ends the pull at today ET. Its only workflow user,
+pipeline-timer-emails.yml, was retired on 2026-11-05 with the old timer forms; the flag
+stays available for a manual run. The ~1:15 AM ET run keeps the closed-day default
+because Sheena's clean export is built from it.
 
 On the 1st of the month ET the pull is two month buckets, never one range across the
 boundary: staging is replaced per bucket (DELETE WHERE start_date), so a range tagged
@@ -30,7 +31,6 @@ sys.path.insert(0, PIPELINE_DIR)
 
 import extract_timer  # noqa: E402
 from extract_timer import calculate_date_range, calculate_date_ranges  # noqa: E402
-from timer_correction_review import last_closed_window, window_bounds  # noqa: E402
 
 PHT = ZoneInfo("Asia/Manila")
 ET = ZoneInfo("America/New_York")
@@ -76,28 +76,6 @@ def test_through_today_is_the_run_that_failed():
     now = datetime(2026, 9, 29, 6, 25, tzinfo=PHT)
     assert calculate_date_ranges(now=now) == [("2026-09-01", "2026-09-27")]
     assert calculate_date_ranges(now=now, through_today=True) == [("2026-09-01", "2026-09-28")]
-
-
-def test_through_today_covers_the_window_being_emailed_every_day_of_a_year():
-    """For every 18:30 ET and 09:00 ET send, the pull holds the ET date of the closed window."""
-    for hour, minute in ((18, 30), (9, 0)):
-        send = datetime(2026, 1, 1, hour, minute, tzinfo=ET)
-        for _ in range(366):
-            day, part = last_closed_window(send)
-            lo, hi = window_bounds(day, part)
-            needed = {lo.astimezone(ET).date(), (hi - timedelta(seconds=1)).astimezone(ET).date()}
-            covered = _et_dates_covered(calculate_date_ranges(now=send, through_today=True))
-            assert needed <= covered, f"send {send:%Y-%m-%d %H:%M}: pull misses {sorted(needed - covered)}"
-            send += timedelta(days=1)
-
-
-def test_closed_day_default_does_not_cover_it():
-    """The regression itself: without through_today the 18:30 ET pull is a day short."""
-    send = datetime(2026, 9, 29, 18, 30, tzinfo=ET)
-    day, part = last_closed_window(send)
-    lo, hi = window_bounds(day, part)
-    needed = {lo.astimezone(ET).date(), (hi - timedelta(seconds=1)).astimezone(ET).date()}
-    assert not needed <= _et_dates_covered(calculate_date_ranges(now=send))
 
 
 def test_through_today_on_the_first_is_two_month_buckets():
@@ -222,12 +200,6 @@ def test_a_bucket_with_no_entries_does_not_stop_the_run(monkeypatch):
 def _timer_commands(workflow):
     text = open(os.path.join(WORKFLOWS, workflow), encoding="utf-8").read()
     return re.findall(r"^\s*python -u main\.py --pipeline timer\b.*$", text, flags=re.M)
-
-
-def test_email_workflow_pulls_through_today_on_the_run_and_the_retry():
-    cmds = _timer_commands("pipeline-timer-emails.yml")
-    assert len(cmds) == 2
-    assert all("--through-today" in c for c in cmds), cmds
 
 
 def test_nightly_workflow_keeps_the_closed_day_pull():

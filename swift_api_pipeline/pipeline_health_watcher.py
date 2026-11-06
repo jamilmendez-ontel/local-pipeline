@@ -169,8 +169,9 @@ def build_email_body(findings, checked_at):
         "",
         "Runbook: cron history -> select * from cron.job_run_details order by "
         "runid desc limit 50; refresh chain = analytics.refresh_dr_task_rollup_safe(); "
-        "rollup = analytics.refresh_timer_day_rollup_safe(); rebuild source guard "
-        "lives in timer_correction_review.rebuild_clean_table().",
+        "rollup = analytics.refresh_timer_day_rollup_safe(); rebuild = "
+        "data_staging.rebuild_timer_clean() (pg_cron job 55, hourly at :35; "
+        "migration 288 holds its source guard).",
         "",
         "(pipeline_health_watcher.py; silent when healthy)",
     ]
