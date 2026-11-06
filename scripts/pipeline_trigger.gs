@@ -100,38 +100,6 @@ function triggerLightPipelines() {
 }
 
 /**
- * Timer EMAILS run, twice a day on the EASTERN clock (since 2026-10-01):
- *   ~18:30 ET  triggerTimerEmails()        -> window (today, first):  12 AM to 6 PM ET
- *   ~09:00 ET  triggerTimerEmailsSecond()  -> window (yesterday, second): 6 PM to 12 AM ET
- * Both fire the same 'pipeline-timer-emails' dispatch; the Python side picks
- * the last CLOSED window by the clock, so the trigger only has to land after
- * the window closes. Pinned to America/New_York on purpose: the windows are
- * Eastern wall-clock, so a Manila-pinned trigger would fire BEFORE 6 PM ET
- * in winter and the run would pick the wrong window. (2026-09-28 to
- * 2026-09-30 this was one 06:30 Asia/Manila send on a 06:00 PHT shift day;
- * before that ~6:00 AM ET on the ET calendar date.)
- *
- * Minute 30 / minute 0 with +/-15 min jitter keeps both runs after their
- * window close (18:15-18:45, 08:45-09:15). Late stops that reach Swift after
- * a send are picked up in-thread by a later run's --resend.
- *
- * This is run 2 of 2 for timer data: it re-extracts, applies corrections,
- * rebuilds the clean table, then sends the member-facing emails
- * (--remind / --send / --resend). Run 1 (triggerLightPipelines, ~1:15 AM
- * ET / 13:15 PHT) is data + Excel exports only since 2026-08-28.
- *
- * DIFFERENT dispatch type from 'pipeline-timer' on purpose: the two runs must
- * never be fired by the same trigger.
- */
-function triggerTimerEmails() {
-  return fireDispatch_('pipeline-timer-emails');
-}
-
-function triggerTimerEmailsSecond() {
-  return fireDispatch_('pipeline-timer-emails');
-}
-
-/**
  * Trigger the daily QA Forms pipeline.
  * Schedule this at 12:17 AM EST daily (its own time-driven trigger).
  *
@@ -568,8 +536,6 @@ function scheduleTokenRotationReminder() {
  * Run this once after setup to confirm everything works.
  * Deliberately EXCLUDES triggerAssetTasksIncFullWalk: that dispatch starts a
  * ~2-3h full walk + a ~6-9 GB audit — fire it manually only when you mean it.
- * Also EXCLUDES triggerTimerEmails: that dispatch emails every member their
- * daily timer entries (and re-sends the day if it already went out).
  */
 function testAllDispatches() {
   fireDispatch_('pipeline-orgs');
@@ -746,7 +712,7 @@ function schedulePackageScraperTokenReminder() {
  *   LATER      before `at`
  *   DUE        at or after `at` and less than `graceMin` (default 60) past it
  *   MISSED     more than `graceMin` past `at`: skipped for today, so nothing
- *              fires hours late (timer emails must run soon after their window)
+ *              fires hours late
  * A job that returns false (dispatch failed) stays DUE and retries on the next
  * tick inside its grace window. State: Script Property SCHED_LAST_<id> = the
  * local date of the last success. `at` + graceMin must stay before midnight.
@@ -772,11 +738,9 @@ var SCHEDULE = [
   { id: 'open_items_data',           tz: SCHED_TZ_ET, at: '02:00', graceMin: 90, fn: triggerOpenItemsData },  // 90: the US spring-forward day has no 02:xx
   { id: 'calendar_am',               tz: SCHED_TZ_ET, at: '05:00', fn: triggerCalendarEvents },
   { id: 'duplicate_asset_watch',     tz: SCHED_TZ_ET, at: '09:00', fn: triggerDuplicateAssetWatch },
-  { id: 'timer_emails_second',       tz: SCHED_TZ_ET, at: '09:00', fn: triggerTimerEmailsSecond },
   { id: 'calendar_pm',               tz: SCHED_TZ_ET, at: '17:00', fn: triggerCalendarEvents },
   { id: 'holiday_feed_watch',        tz: SCHED_TZ_ET, at: '18:00', days: [1], fn: triggerHolidayFeedWatch },
   { id: 'asset_tasks_inc_full_walk', tz: SCHED_TZ_ET, at: '18:00', days: [6], fn: triggerAssetTasksIncFullWalk },
-  { id: 'timer_emails_first',        tz: SCHED_TZ_ET, at: '18:30', fn: triggerTimerEmails },
   { id: 'orgs',                      tz: SCHED_TZ_ET, at: '22:13', fn: triggerOrgs },
   { id: 'package_scrape',            tz: SCHED_TZ_PH, at: '18:00', fn: triggerPackageScrape },
   { id: 'employee_sync',             tz: SCHED_TZ_PH, at: '19:00', fn: triggerEmployeeSync },

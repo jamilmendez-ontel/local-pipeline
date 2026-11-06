@@ -1,5 +1,5 @@
 // Offline check of the SCHEDULE/runScheduler logic in pipeline_trigger.gs: stubs the Apps Script
-// services, runs setupScheduler() against the 2026-10-26 list of 20 triggers, then ticks every 5 min
+// services, runs setupScheduler() against the 2026-10-26 trigger list (minus the timer email handlers retired 2026-11-05), then ticks every 5 min
 // (with jitter) for 8 days across the US DST end and prints each dispatch in ET and PHT.
 // Usage: node scripts/sim_pipeline_trigger_scheduler.js
 const fs = require('fs'), vm = require('vm');
@@ -12,7 +12,7 @@ function fmt(d, tz, pat) {
   const dow = {Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6,Sun:7}[parts.weekday];
   return {'yyyy-MM-dd': `${parts.year}-${parts.month}-${parts.day}`, 'HH:mm': `${parts.hour}:${parts.minute}`, 'u': String(dow), 'H': String(+parts.hour)}[pat];
 }
-let triggers = ['triggerTimerEmailsSecond','triggerAssetTasks','triggerOrgs','triggerHolidayFeedWatch','triggerOpenItemsData','triggerCalendarEvents','triggerScheduleChangesSync','triggerDuplicateAssetWatch','triggerAssetTasksGC','triggerPackageScrape','checkForRevenueReports','triggerAssetTasksIncFullWalk','triggerLightPipelines','triggerCalendarEvents','triggerPrioritiesDaily','triggerScheduleFeedAudit','triggerPriorities','triggerForms','triggerScheduleChangesSync','triggerTimerEmails'].map(h => ({getHandlerFunction: () => h}));
+let triggers = ['triggerAssetTasks','triggerOrgs','triggerHolidayFeedWatch','triggerOpenItemsData','triggerCalendarEvents','triggerScheduleChangesSync','triggerDuplicateAssetWatch','triggerAssetTasksGC','triggerPackageScrape','checkForRevenueReports','triggerAssetTasksIncFullWalk','triggerLightPipelines','triggerCalendarEvents','triggerPrioritiesDaily','triggerScheduleFeedAudit','triggerPriorities','triggerForms','triggerScheduleChangesSync'].map(h => ({getHandlerFunction: () => h}));
 const builder = {timeBased(){return this}, everyMinutes(n){this.n=n; return this}, create(){ triggers.push({getHandlerFunction: () => 'runScheduler'}); }};
 const ctx = {
   Utilities: {formatDate: (d, tz, p) => fmt(d, tz, p), sleep(){}},
