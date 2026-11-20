@@ -1,5 +1,5 @@
 -- 294: DRMC reads OnPoint daily reports (from 2026-11-01) through its existing views.
--- NOT YET APPLIED.
+-- APPLIED 2026-11-20 ~5:00 AM ET (one transaction, out/m294/apply294.py): 4.6 s. Verified before COMMIT: 39,559 rows in v_daily_report_approvals = v_hr_report_review, 1,194 OnPoint person-days, MV 3 indexes + grants as before, hr_review_page OK. Dry run (rolled back): 0 rows changed outside OnPoint person-days, 0 HR review rows changed before Nov, reads 110-550 ms, refresh chain 4.5 s; rollback script tested. pg_cron jobid 9 refresh after apply: succeeded (05:00, 8.6 s incl. lock wait).
 --
 -- Why: the team files daily reports and clocks in on OnPoint from November 2026
 -- (Swift clock-in people per week: 96 on Oct 26 -> 26 on Nov 16). Migration 293
