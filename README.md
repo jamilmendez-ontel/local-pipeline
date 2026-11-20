@@ -53,6 +53,7 @@ due). Logic check: `node scripts/sim_pipeline_trigger_scheduler.js`.
 | `pipeline-calendar-events-autorerun.yml` | `workflow_run` on calendar-events failure | Safety net: waits 10 min then re-runs the failed calendar-events jobs, up to 2 automatic reruns (`run_attempt < 3`), so a failed run recovers in ~20-30 min instead of waiting ~12h for the next dispatch |
 | `pipeline-asset-tasks.yml` | Nightly Apps Script + 6 PM PHT chain | Heavy (~40-90 min, job limit 180 min since 2026-10-29): asset_tasks → MVs → end-of-run dispatches. `downstream=all` (nightly 12:01 AM ET: export + Fri compliance + Mon invoicing/PO; the validator is NOT fired here), `validator` (6 PM PHT run fired by gmail-scraper on success: date-validator only), `none` |
 | `pipeline-asset-tasks-inc.yml` | Hourly GHA cron :20 (pilot); UTC-hour-05/06 run = strict audit gate | SHADOW: incremental asset-tasks walker → `*_inc` tables + drift audit (see below) |
+| `onpoint-daily-reports.yml` | GHA cron every 15 min (:07/:22/:37/:52) + `repository_dispatch` `onpoint-daily-reports` | OnPoint daily reports (onpoint.ontel.co, where the team files and clocks in since 2026-11) -> `data_staging.stg_onpoint_daily_reports` + `stg_onpoint_users` (migration 293). Re-pulls the last 14 report dates each run (`workflow_dispatch` `days` for a backfill); DRMC reads them through `analytics.v_daily_report_approvals` / `v_hr_report_review` (migration 294). Failure email only |
 | `pipeline-open-items-data.yml` | Nightly Apps Script | OIR-scoped Swift snapshots + downstream report dispatch |
 | `gmail-pipeline.yml` | Apps Script gmail_trigger.gs (frequent) | AR aging + sales detail when Daily Revenue Report email arrives |
 | `pipeline-health-watch.yml` | Daily 18:00 UTC | Warehouse health checks (failed cron runs, stale refreshes, blank tables, slow rebuild; the rebuild alarm auto-resets its pg_stat high-water after firing so one outlier can't re-email daily); emails Jamil only on findings, silent when healthy |
@@ -316,6 +317,34 @@ so the feed wins whenever the two disagree.
   'running' rows reaped after 45 min). If no full run succeeded in 26h the
   next incremental self-upgrades to full (cron-drift/supersede insurance).
 
+### OnPoint daily reports -> DRMC (2026-11)
+
+From November 2026 the team files daily reports and clocks in on OnPoint, not Swift
+(Swift clock-in people per week fell from 96 to 26; Nov 9-19 had 654 person-days filed
+only in OnPoint). `run_onpoint_daily_reports.py` lands them (migration 293) and
+migration 294 lays each FILED OnPoint report (it has hours or a submit time) over the
+Swift report row of the same person and day, from 2026-11-01:
+
+- `analytics.v_onpoint_daily_reports`: one row per `emp_id` + `work_date`. OnPoint user ->
+  email -> `reference.ref_employee_emails` (else `ref_employees.email`) -> `emp_id`.
+  OnPoint `rejected` -> `in_progress`. "Approved" shells with no hours and no submit time
+  (bulk-created, leave-like) are ignored.
+- `analytics.v_daily_report_approvals`: for those person-days `task_status`,
+  `total_hours`, `clock_in_et`, `clock_in_late_minutes`, `submitted_on_et` come from
+  OnPoint and `is_awaiting_approval` / `no_approver_flag` are false (approval happens in
+  OnPoint, so the rows stay out of DRMC's Swift approve queue). Appended columns:
+  `source` (`onpoint` / `swift`), `first_clock_in`, `submitted_on`, `onpoint_undertime`,
+  `onpoint_report_id`.
+- `analytics.mv_hr_report_review` reads the same clock-in and submit time (rebuilt and
+  swapped by rename; `v_hr_report_review` was CREATE OR REPLACEd, never dropped).
+- `analytics.v_daily_report_lines`: the report drawer's lines (Swift requirement lines,
+  or the OnPoint report's notes + hours in their place).
+
+Not carried over (by decision, 2026-11-20): approver / approved-at and attachments.
+Swift pre-creates its daily report rows a year ahead; the overlay needs one per
+person-day, so before those run out (last week: 2026-12-28) DRMC must key on
+`emp_id` + `work_date` instead of the Swift `task_did`.
+
 ### Other extractors
 
 | Script | Output |
@@ -324,6 +353,7 @@ so the feed wins whenever the two disagree.
 | `extract_sales.py` | Gmail-based sales detail (`stg_sales_detail`) |
 | `extract_calendar_events.py` | Google Calendar events → `stg_calendar_events` (all kinds: leave/holiday/birthday/training/other) — incremental, AI-normalized. Since 2026-10-26 (Wave 2) every run also fills `person_note_normalized` (deterministic regex in `calendar_normalize.normalize_person_note`: `2pm onwards` / `2 PM Onwards` → `2:00 PM onwards`, `9am to 2pm` → `9:00 AM - 2:00 PM`, `until 12nn` → `Until 12:00 PM`; employee-id suffixes such as `200601` → NULL). The employee-id suffix also **decides the person** (since 2026-10-28, Jamil): when the id typed at the end of the event is in `ref_employees`, `emp_id` comes from it with `person_match_source = 'id_suffix'`, ahead of the name cache / exact / AI match (the creator is often filing for someone else). An id not in the roster (typo) falls back to name matching. One-time backfill of older rows: `_backfill_person_note.py` (dry run by default, `--apply` writes the note and re-points those people) |
 | `extract_daily_reports.py` | Daily reports + per-task work summaries. Every run re-reads each asset's live Swift `shortName` (`FullName_<emp_id>`) and the `stg_daily_reports` upsert refreshes `asset_name` on conflict (`emp_id` stays as first derived, so a malformed rename can never break the roster join) (since 2026-08-28; before that only status fields were updated, so a Swift rename such as a married surname never reached pre-created rows). Rolling window (default 30 days) plus a stale-status sweep: out-of-window tasks still non-terminal in staging get a status-only refresh, so late batch approvals (>30 days after the work date) still land. A weekly Apps Script trigger (`triggerDailyReportsDeep`, Sunday 5-6 AM ET) re-runs the same workflow with a 90-day window to also catch late requirement/timer edits. |
+| `run_onpoint_daily_reports.py` | OnPoint v1 API `time.approvals.list` (one report date + one status per call: it caps at 200 rows with no cursor, so a full page aborts the run) -> filed reports (submitted / approved / rejected) upserted into `data_raw.raw_onpoint_daily_reports` + `data_staging.stg_onpoint_daily_reports`; rows in the re-pulled window that OnPoint no longer lists are deleted in the same statement; a window with 0 reports aborts instead. `users.get` fills `stg_onpoint_users` (email = join key to the roster, refreshed daily). Token `ONPOINT_PAT` (time-admin scope). `--dry-run` pulls and counts only |
 | `extract_revenue_rates.py` | `reference.ref_task_revenue_rates` from a manually-maintained sheet |
 | `sync_schedule_changes.py` | HR schedule-changes sheet (all template tabs via Sheets v4) → `data_raw.raw_schedule_changes` + `data_staging.stg_schedule_change_history` + `analytics.v_employee_schedule_history` (migration 253) for the DRMC directory Schedule history section, plus `analytics.v_schedule_roster_reconciliation` (migration 255) comparing the current declared schedule with the roster shift. Scheduled daily at 8 PM PHT by `sync-schedule-changes.yml` (Apps Script `triggerScheduleChangesSync`, cron backstop 8 AM PHT); needs `SCHEDULE_SHEETS_TOKEN` pointing at a Sheets-scoped pickle (`sheets_rw_token.pickle` works; the drive-readonly `sheets_token.pickle` does not). Upsert-then-prune refresh, wipe guard at <50% of previous staging count. See `reference/schedule-changes-sheet.md`. |
 | `sync_employees.py` | HR "Active Employee Information" sheet → `reference.ref_employees` with per-change history rows (`effective_date`), approver columns → `reference.ref_employee_approvers`, resignation-on-absence = `is_active=false` + `resignation_date` = last approved work date (skipped when the sheet returns < 50% of the active count). Daily at 7 PM PHT since 2026-09-16 via `sync-employees.yml` (Apps Script `triggerEmployeeSync`, cron backstop 7 AM PHT); `--apply` writes, otherwise dry run. |
@@ -441,6 +471,7 @@ Gmail/Calendar/Sheets pipelines. In GHA they're injected from secrets
 | `NOTIFIER_CREDENTIALS_JSON`, `NOTIFIER_TOKEN_PICKLE` | All pipelines (Gmail send via the notifier account) |
 | `SHEETS_TOKEN_PICKLE` | Timer pipeline, timer clean export, roster gap watcher, employee sync |
 | `CALENDAR_TOKEN_PICKLE` | Calendar-events pipeline |
+| `ONPOINT_PAT` | OnPoint daily reports (OnPoint personal access token with `daily_reports:read` + `users:read`, time admin) |
 | `DATE_VALIDATOR_DISPATCH_PAT` | Cross-repo dispatches (date-validator, report-automation) |
 
 ## Database migrations

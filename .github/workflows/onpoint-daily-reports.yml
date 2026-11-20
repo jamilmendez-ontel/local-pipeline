@@ -1,0 +1,79 @@
+name: "Pipeline: OnPoint Daily Reports"
+
+# Lands filed OnPoint daily reports (onpoint.ontel.co) in OntelDB for DRMC
+# (migrations 293 + 294). Every 15 min on a GitHub schedule (GitHub can start a
+# scheduled run late, which is fine: each run re-pulls the last 14 days), plus
+# repository_dispatch for the Apps Script scheduler and a manual run with a
+# wider window for backfills.
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  repository_dispatch:
+    types: [onpoint-daily-reports]
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Trailing report-date window (days)"
+        required: false
+        default: "14"
+
+concurrency:
+  group: onpoint-daily-reports
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIPELINE_DIR: swift_api_pipeline
+
+jobs:
+  onpoint-daily-reports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          cat > .env <<'DOTENV'
+          SUPABASE_URL=https://voqfjfngdpcvevbkikud.supabase.co
+          SUPABASE_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+          SUPABASE_PORT=5432
+          SUPABASE_DB=postgres
+          SUPABASE_USER=postgres.voqfjfngdpcvevbkikud
+          SUPABASE_PASSWORD=${{ secrets.SUPABASE_PASSWORD }}
+          DOTENV
+
+      - name: Decode credentials
+        working-directory: ${{ env.PIPELINE_DIR }}
+        run: |
+          mkdir -p gmail_credentials
+          echo "${{ secrets.NOTIFIER_CREDENTIALS_JSON }}" | base64 -d > gmail_credentials/credentials.json
+          echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
+
+      - name: Run OnPoint daily reports pipeline
+        working-directory: ${{ env.PIPELINE_DIR }}
+        env:
+          ONPOINT_PAT: ${{ secrets.ONPOINT_PAT }}
+          # Bind via env (not template interpolation) so a dispatch payload can't inject shell.
+          DAYS_INPUT: ${{ github.event.client_payload.days || github.event.inputs.days || '14' }}
+        run: |
+          if ! [[ "$DAYS_INPUT" =~ ^[0-9]+$ ]] || [ "$DAYS_INPUT" -lt 1 ]; then
+            echo "Invalid days value: '$DAYS_INPUT' (must be a positive integer)" >&2
+            exit 1
+          fi
+          python -u run_onpoint_daily_reports.py --days "$DAYS_INPUT"
