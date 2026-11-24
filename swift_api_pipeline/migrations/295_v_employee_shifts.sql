@@ -3,10 +3,10 @@
 -- My Timers shift-end reminder claim still times out under batch load (OnPoint INIT-1306):
 -- a lean roster view without v_employee_directory's newest-daily-report lookup.
 --
--- STATUS: NOT APPLIED. Apply outside the reload windows (12:01-1:20 AM, 5:00-5:35 AM ET)
---   and outside 09:30-10:30 UTC, through MCP apply_migration (plain DDL, one transaction).
---   Apply BEFORE the ontel-my-timers migration that reads it (its migrate-production run
---   fails on a missing view, nothing half-applied).
+-- STATUS: APPLIED 2026-11-24 ~8:15 AM ET through MCP apply_migration (one transaction),
+--   before the ontel-my-timers migration shift_reminder_claim_lean_roster (PR #123).
+--   VERIFIED: my_timers_owner SELECT true; anon false; authenticated false;
+--   97 active rows = reference.ref_employees active (97); reloptions null (not security_invoker).
 --
 -- WHY
 --   * After migration 289 the claim still hit the anon 3 s limit 1-2 times a day:
