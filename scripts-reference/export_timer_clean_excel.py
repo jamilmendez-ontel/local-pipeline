@@ -66,7 +66,21 @@ DATETIME_COLS = frozenset({
 })
 REGULAR_COLS = frozenset(set(range(NUM_COLS)) - DATETIME_COLS)
 
-PIPELINE_NAME = "timer_extract"
+# The clean table is rebuilt from My Timers hourly at :35 by pg_cron job 55
+# (data_staging.rebuild_timer_clean(), migration 288). The v1 extract this guard used to
+# check ('timer_extract') was retired 2026-11-25.
+CLEAN_REBUILD_JOBID = 55
+CLEAN_MAX_AGE_HOURS = 3
+
+CLEAN_REBUILD_SQL = """
+    SELECT d.runid, d.status, d.return_message,
+           d.end_time AT TIME ZONE 'America/New_York' AS end_et,
+           EXTRACT(epoch FROM now() - d.end_time) / 3600.0 AS age_h
+    FROM cron.job_run_details d
+    WHERE d.jobid = $1
+    ORDER BY d.runid DESC
+    LIMIT 1
+"""
 
 QUERY = """
 SELECT
@@ -101,30 +115,28 @@ EMAIL_RECIPIENTS = [
 
 
 async def check_pipeline_guard(conn):
-    row = await conn.fetchrow("""
-        SELECT status, records_extracted, error_message,
-               started_at AT TIME ZONE 'America/New_York' AS started_et
-        FROM pipeline.pipeline_runs
-        WHERE pipeline_name = $1
-        ORDER BY started_at DESC
-        LIMIT 1
-    """, PIPELINE_NAME)
+    """Abort if the latest clean rebuild (pg_cron job 55) failed or is older than CLEAN_MAX_AGE_HOURS."""
+    row = await conn.fetchrow(CLEAN_REBUILD_SQL, CLEAN_REBUILD_JOBID)
 
     if row is None:
-        raise SystemExit(f"GUARD FAILED: No pipeline runs found for '{PIPELINE_NAME}'.")
+        raise SystemExit(f"GUARD FAILED: no runs found for pg_cron job {CLEAN_REBUILD_JOBID} (clean rebuild).")
 
     status = row["status"]
-    started = row["started_et"]
-    records = row["records_extracted"] or 0
-    error = row["error_message"]
+    end_et = row["end_et"]
+    age_h = float(row["age_h"]) if row["age_h"] is not None else None
 
-    print(f"Pipeline guard: {PIPELINE_NAME}")
-    print(f"  Latest run : {started:%Y-%m-%d %H:%M} ET | status={status} | rows={records:,}")
+    print(f"Pipeline guard: clean rebuild (pg_cron job {CLEAN_REBUILD_JOBID})")
+    print(f"  Latest run : {end_et:%Y-%m-%d %H:%M} ET | status={status}" if end_et else f"  Latest run : status={status}")
 
-    if status != "success" or error:
+    if status != "succeeded":
         raise SystemExit(
-            f"GUARD FAILED: Latest '{PIPELINE_NAME}' run is not successful "
-            f"(status={status}, error={error}). Aborting export."
+            f"GUARD FAILED: latest clean rebuild is not successful "
+            f"(status={status}, message={row['return_message']}). Aborting export."
+        )
+    if age_h is None or age_h > CLEAN_MAX_AGE_HOURS:
+        raise SystemExit(
+            f"GUARD FAILED: latest clean rebuild finished {age_h} h ago "
+            f"(limit {CLEAN_MAX_AGE_HOURS} h). Aborting export."
         )
     print("  Guard passed.\n")
 
@@ -231,15 +243,10 @@ async def export(output_dir):
             f"-> {file_path.name}"
         )
 
-        meta = await conn.fetchrow("""
-            SELECT started_at AT TIME ZONE 'America/New_York' AS latest_loaded_at,
-                   run_id
-            FROM pipeline.pipeline_runs
-            WHERE pipeline_name = $1 AND status = 'success'
-            ORDER BY started_at DESC LIMIT 1
-        """, PIPELINE_NAME)
-        loaded_at = meta["latest_loaded_at"] if meta else None
-        run_id = str(meta["run_id"]) if meta else None
+        # Email metadata: the clean rebuild (pg_cron job 55) that produced this data
+        meta = await conn.fetchrow(CLEAN_REBUILD_SQL, CLEAN_REBUILD_JOBID)
+        loaded_at = meta["end_et"] if meta else None
+        run_id = f"pg_cron job {CLEAN_REBUILD_JOBID} run {meta['runid']}" if meta else None
 
     finally:
         await conn.close()
