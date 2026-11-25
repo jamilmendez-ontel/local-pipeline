@@ -202,7 +202,7 @@ def _timer_commands(workflow):
     return re.findall(r"^\s*python -u main\.py --pipeline timer\b.*$", text, flags=re.M)
 
 
-def test_nightly_workflow_keeps_the_closed_day_pull():
-    cmds = _timer_commands("pipeline-timer.yml")
-    assert len(cmds) == 2
-    assert not any("--through-today" in c for c in cmds), cmds
+def test_nightly_workflow_no_longer_runs_the_v1_extract():
+    # The v1 Swift timer extract was retired 2026-11-25 (migration 297 moved its readers to
+    # stg_timer_activities_clean; the raw export reads timer sync v2).
+    assert _timer_commands("pipeline-timer.yml") == []
