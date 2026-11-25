@@ -2,7 +2,11 @@
 -- 296_tardy_us_shift_dst.sql
 -- DRMC tardy flag: US-hours roles keep their US clock time across the US DST change.
 --
--- STATUS: NOT APPLIED (PR open). Apply through MCP apply_migration after Jamil's go.
+-- STATUS: APPLIED 2026-11-25 09:07 UTC (04:07 AM ET), Jamil's go, one transaction through the session
+--   pooler with an md5 guard (before 6642982a435534aa1f2596ea6d90225a, after 2ea0665a0e14216a65d69967e707ab4a).
+--   VERIFIED live, Nov 2-24 weekdays: US-hours roles tardy 2.4% (median -10 min), other roles 1.7%;
+--   Oct 1.6% / 2.4%. Grants unchanged (postgres, service_role). mv_hr_report_review follows on its
+--   5-min refresh (refresh_dr_task_rollup_safe -> refresh_hr_report_review_safe).
 --
 -- WHY
 --   * reference.ref_employees.shift_time_in_pht holds one PHT clock time per person, set while
@@ -12,7 +16,9 @@
 --   * Measured 2026-11-25 (weekdays, Oct vs Nov 2-24): tardy 1.7% -> 50.6%; per-person median
 --     clock-in moved +59 min; 56 of 96 people moved 45-75 min.
 --   * Jamil 2026-11-25: Technical Analyst (TA), Technical Associate (TAS) and Project
---     Associate (PAS) roles are US-hours. Everyone else stays as is (PHT-anchored).
+--     Associate (PAS) roles are US-hours; Jamil then added QPI Associate, QPI Carrier Lead,
+--     Operations Manager and Creative Lead (they moved ~1 h in Nov too). Everyone else stays as is
+--     (PHT-anchored). Matches 11 positions / 85 people in ref_employees.
 --
 -- CHANGE (one expression, everything else = live definition md5 6642982a435534aa1f2596ea6d90225a)
 --   clock_in_late_minutes compares against shift_time_in_pht + adj, where for those roles
@@ -24,9 +30,8 @@
 --   next scheduled REFRESH.
 --
 -- DRY RUN (no DDL; same math applied to the live view's output, 2026-11-25)
---   TA/TAS/PA, Nov: tardy 70.0% -> 1.6%, median late +50 -> -10 min (Oct: -13). Oct unchanged.
---   Other roles: unchanged (14.1% Nov; QPI / Operations Manager / Creative Lead also moved ~1 h,
---   out of scope until Jamil says they are US-hours too).
+--   TA/TAS/PA only (first draft), Nov: tardy 70.0% -> 1.6%, median late +50 -> -10 min (Oct: -13). Oct unchanged.
+--   Other roles: unchanged.
 --
 -- PREFLIGHT
 --   * pg_get_viewdef md5 must still be 6642982a435534aa1f2596ea6d90225a before applying
@@ -167,7 +172,7 @@ CREATE OR REPLACE VIEW analytics.v_daily_report_approvals AS
             ((op.emp_id IS NULL) AND (t.task_status = 'submitted'::text) AND (t.approved_on IS NULL) AND (la.task_did IS NULL) AND (t.assigned_approver IS NULL)) AS no_approver_flag,
             e.shift_time_in_pht,
                 CASE
-                    WHEN ((eff.first_clock_in IS NOT NULL) AND (e.shift_time_in_pht ~* '^\s*\d{1,2}(:\d{2})?\s*(AM|PM)\s*$'::text)) THEN (mod(((floor((EXTRACT(epoch FROM (((eff.first_clock_in AT TIME ZONE 'Asia/Manila'::text))::time without time zone - ((e.shift_time_in_pht)::time without time zone + CASE WHEN (e."position" ~* '^\s*(Technical Analyst|Technical Associate|Project Associate)\M'::text) THEN ('-04:00:00'::interval - ((t.work_date + '12:00:00'::time without time zone) - (((t.work_date + '12:00:00'::time without time zone) AT TIME ZONE 'America/New_York'::text) AT TIME ZONE 'UTC'::text))) ELSE '00:00:00'::interval END))) / (60)::numeric)))::integer + 2160), 1440) - 720)
+                    WHEN ((eff.first_clock_in IS NOT NULL) AND (e.shift_time_in_pht ~* '^\s*\d{1,2}(:\d{2})?\s*(AM|PM)\s*$'::text)) THEN (mod(((floor((EXTRACT(epoch FROM (((eff.first_clock_in AT TIME ZONE 'Asia/Manila'::text))::time without time zone - ((e.shift_time_in_pht)::time without time zone + CASE WHEN (e."position" ~* '^\s*(Technical Analyst|Technical Associate|Project Associate|QPI Associate|QPI Carrier Lead|Operations Manager|Creative Lead)\M'::text) THEN ('-04:00:00'::interval - ((t.work_date + '12:00:00'::time without time zone) - (((t.work_date + '12:00:00'::time without time zone) AT TIME ZONE 'America/New_York'::text) AT TIME ZONE 'UTC'::text))) ELSE '00:00:00'::interval END))) / (60)::numeric)))::integer + 2160), 1440) - 720)
                     ELSE NULL::integer
                 END AS clock_in_late_minutes,
                 CASE
