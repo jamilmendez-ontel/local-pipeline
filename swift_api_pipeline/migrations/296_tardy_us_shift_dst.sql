@@ -5,7 +5,7 @@
 -- STATUS: APPLIED 2026-11-25 09:07 UTC (04:07 AM ET), Jamil's go, one transaction through the session
 --   pooler with an md5 guard (before 6642982a435534aa1f2596ea6d90225a, after 2ea0665a0e14216a65d69967e707ab4a).
 --   VERIFIED live, Nov 2-24 weekdays: US-hours roles tardy 2.4% (median -10 min), other roles 1.7%;
---   Oct 1.6% / 2.4%. Grants unchanged (postgres, service_role). mv_hr_report_review follows on its
+--   Oct: US-hours 1.6%, other roles 2.4%. Grants unchanged (postgres, service_role). mv_hr_report_review follows on its
 --   5-min refresh (refresh_dr_task_rollup_safe -> refresh_hr_report_review_safe).
 --
 -- WHY
@@ -38,12 +38,17 @@
 --     (regenerate with out/m296/gen.py if it changed).
 --   * Run outside 09:30-10:30 UTC and other batch windows (2026-11-20 restart lesson).
 --
+-- REVIEW (premerge 2026-11-25): no defects. Assumption checked: 0 roster rows for these roles changed
+--   since 11-01 (no shift recorded under EST). Watch: 190501 and 230108 (Technical Analyst II) did not
+--   move in Nov and now read ~1 h early (PHT-fixed start?), so they cannot read tardy below ~90 min late.
+--   Edge: a PHT-morning start on the DST change date itself is 1 h off for that one day.
+--
 -- ROLLBACK
 --   Apply 296_tardy_us_shift_dst_ROLLBACK.sql (the exact pre-296 definition).
 --
 -- VERIFY AFTER
 --   select md5(pg_get_viewdef('analytics.v_daily_report_approvals'::regclass));  -- new md5, record it
---   tardy % for TA/TAS/PA Nov 2-24 weekdays ~1.6%; Oct unchanged.
+--   tardy % for the US-hours roles, Nov 2-24 weekdays ~2.4%; Oct unchanged.
 -- =============================================================================
 
 CREATE OR REPLACE VIEW analytics.v_daily_report_approvals AS
