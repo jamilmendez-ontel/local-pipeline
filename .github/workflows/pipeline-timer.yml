@@ -1,11 +1,13 @@
 name: "Pipeline: Timer"
 
-# The one daily timer run (~1:15 AM ET / 13:15 PHT): Swift v1 extract,
-# backfill, Excel exports (raw + clean, Drive + email), MV refresh.
+# The one daily timer run (~1:15 AM ET / 13:15 PHT): backfill, Excel exports
+# (raw + clean, Drive + email), MV refresh.
 #
-# Since 2026-11-05 this is the ONLY run of the v1 Swift timer extract (the
-# twice-daily pipeline-timer-emails.yml was retired with the old Timer
-# Correction / Removal forms). It no longer rebuilds the clean table: since
+# The v1 Swift timer extract (`main.py --pipeline timer`) was RETIRED here on
+# 2026-11-25: its last readers moved to the clean table (migration 297) and the
+# raw export now reads timer sync v2 (data_staging.stg_timer_activities_inc, the
+# live Swift mirror My Timers reads). v1's stg_timer_activities is frozen at its
+# 2026-11-25 01:19 ET load. This workflow no longer rebuilds the clean table: since
 # migration 288, data_staging.rebuild_timer_clean() refills
 # stg_timer_activities_clean from My Timers (stg_timer_entries_clean), run
 # hourly by pg_cron job 55 at :35. The clean export below therefore reads a
@@ -63,17 +65,9 @@ jobs:
           echo "${{ secrets.NOTIFIER_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/token.pickle
           echo "${{ secrets.SHEETS_TOKEN_PICKLE }}" | base64 -d > gmail_credentials/sheets_token.pickle
 
-      - name: Run timer pipeline (with retry)
-        working-directory: ${{ env.PIPELINE_DIR }}
-        run: |
-          python -u main.py --pipeline timer || {
-            echo "Timer failed, retrying after 2 minutes..."
-            sleep 120
-            python -u main.py --pipeline timer
-          }
-
-      # MUST run AFTER the timer transform, and this workflow is the only place
-      # that can be true.
+      # Since the v1 extract was retired (2026-11-25) the backfill below no longer
+      # races a timer reload; it still fills asset_did on stg_qa_form and is kept.
+      # History of why it ran after the timer transform:
       #
       # transform_timer_activities does `DELETE FROM stg_timer_activities WHERE
       # start_date = $1` for the extraction MONTH bucket, then re-INSERTs with a
@@ -117,7 +111,6 @@ jobs:
       - name: Export timer data
         working-directory: scripts-reference
         run: |
-          echo "Timer pipeline succeeded — running export..."
           python -u export_timer_excel.py
 
       - name: Upload timer to shared Drive

@@ -70,35 +70,35 @@ DATETIME_COLS = frozenset({
 })
 REGULAR_COLS = frozenset(set(range(NUM_COLS)) - DATETIME_COLS)
 
-PIPELINE_NAME = "timer_extract"
+# Source since 2026-11-25: timer sync v2 (data_staging.stg_timer_activities_inc), the live
+# Swift timer mirror My Timers reads. The v1 extract (pipeline 'timer_extract') was retired.
+# v2 writes no pipeline_runs row, so the guard checks that the feed is alive instead.
+FRESHNESS_HOURS = 26
+
+FRESHNESS_SQL = """
+    SELECT max(GREATEST(updated_at, loaded_at)) AT TIME ZONE 'America/New_York' AS newest_et,
+           EXTRACT(epoch FROM now() - max(GREATEST(updated_at, loaded_at))) / 3600.0 AS age_h,
+           (SELECT sync_id::text FROM data_staging.stg_timer_activities_inc
+             ORDER BY GREATEST(updated_at, loaded_at) DESC NULLS LAST LIMIT 1) AS sync_id
+    FROM data_staging.stg_timer_activities_inc
+"""
 
 
 async def check_pipeline_guard(conn):
-    """Abort if the latest timer_extract run failed."""
-    row = await conn.fetchrow("""
-        SELECT status, records_extracted, error_message,
-               started_at AT TIME ZONE 'America/New_York' AS started_et
-        FROM pipeline.pipeline_runs
-        WHERE pipeline_name = $1
-        ORDER BY started_at DESC
-        LIMIT 1
-    """, PIPELINE_NAME)
+    """Abort if timer sync v2 has not written anything for FRESHNESS_HOURS."""
+    row = await conn.fetchrow(FRESHNESS_SQL)
 
-    if row is None:
-        raise SystemExit(f"GUARD FAILED: No pipeline runs found for '{PIPELINE_NAME}'. Aborting export.")
+    if row is None or row["newest_et"] is None:
+        raise SystemExit("GUARD FAILED: timer sync v2 table is empty. Aborting export.")
 
-    status  = row["status"]
-    started = row["started_et"]
-    records = row["records_extracted"] or 0
-    error   = row["error_message"]
+    age_h = float(row["age_h"])
+    print("Pipeline guard: timer sync v2 freshness")
+    print(f"  Newest write: {row['newest_et']:%Y-%m-%d %H:%M} ET ({age_h:.1f} h ago)")
 
-    print(f"Pipeline guard: {PIPELINE_NAME}")
-    print(f"  Latest run : {started:%Y-%m-%d %H:%M} ET | status={status} | rows={records:,}")
-
-    if status != "success" or error:
+    if age_h > FRESHNESS_HOURS:
         raise SystemExit(
-            f"GUARD FAILED: Latest '{PIPELINE_NAME}' run is not successful "
-            f"(status={status}, error={error}). Aborting export."
+            f"GUARD FAILED: timer sync v2 has not written for {age_h:.1f} h "
+            f"(limit {FRESHNESS_HOURS} h). Aborting export."
         )
 
     print("  Guard passed.\n")
@@ -122,8 +122,9 @@ SELECT
     t.user_name,
     t.user_email,
     t.user_role
-FROM data_staging.stg_timer_activities t
-WHERE t.project = $1
+FROM data_staging.stg_timer_activities_inc t
+WHERE t.vanished_at IS NULL
+  AND t.project = $1
   AND t.start_time >= $2
   AND t.start_time < $3
 ORDER BY t.start_time
@@ -147,13 +148,15 @@ SELECT
     t.user_name,
     t.user_email,
     t.user_role
-FROM data_staging.stg_timer_activities t
-WHERE t.start_time >= $1
+FROM data_staging.stg_timer_activities_inc t
+WHERE t.vanished_at IS NULL
+  AND t.start_time >= $1
   AND t.start_time < $2
   AND (t.project_did, t.user_email, t.start_time) IN (
       SELECT t2.project_did, t2.user_email, t2.start_time
-      FROM data_staging.stg_timer_activities t2
-      WHERE t2.start_time >= $1
+      FROM data_staging.stg_timer_activities_inc t2
+      WHERE t2.vanished_at IS NULL
+        AND t2.start_time >= $1
         AND t2.start_time < $2
       GROUP BY t2.project_did, t2.user_email, t2.start_time
       HAVING COUNT(*) > 1
@@ -355,16 +358,10 @@ async def export(output_dir: Path):
             dup_results.append(("All Projects", dup_path, dup_count))
             print(f"\nDuplicates: {dup_count} rows -> {dup_filename}")
 
-        # Fetch latest loaded_at and run_id for email metadata
-        meta = await conn.fetchrow("""
-            SELECT started_at AT TIME ZONE 'America/New_York' AS latest_loaded_at,
-                   run_id
-            FROM pipeline.pipeline_runs
-            WHERE pipeline_name = $1 AND status = 'success'
-            ORDER BY started_at DESC LIMIT 1
-        """, PIPELINE_NAME)
-        loaded_at = meta["latest_loaded_at"] if meta else None
-        run_id = str(meta["run_id"]) if meta else None
+        # Email metadata: newest timer sync v2 write and its sync id
+        meta = await conn.fetchrow(FRESHNESS_SQL)
+        loaded_at = meta["newest_et"] if meta else None
+        run_id = meta["sync_id"] if meta else None
 
     finally:
         await conn.close()

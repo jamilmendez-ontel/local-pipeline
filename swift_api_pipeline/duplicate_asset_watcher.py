@@ -18,7 +18,8 @@ carries Swift's own asset id) points at it. Verdicts:
                 time), DELETE the rest.
   merge_needed  two or more active copies: nothing is safe to delete; someone
                 moves the work onto one copy first.
-Impact per group = v1 timers (data_staging.stg_timer_activities) on the same
+Impact per group = clean timers (data_staging.stg_timer_activities_clean, My Timers' answer;
+v1 stg_timer_activities was retired 2026-11-25) on the same
 project + path + name whose asset_did is NULL: count, hours, last start.
 
 Cadence (stateless, no run table): every run emails the groups whose newest
@@ -108,11 +109,11 @@ LEFT JOIN data_staging.stg_projects p ON p.project_did = s.project_did
 ORDER BY p.project_name, g.aname, s.asset_did
 """
 
-# v1 timers the duplicate left without an asset (same project + path + name)
+# clean timers the duplicate left without an asset (same project + path + name)
 BLANK_TIMERS_SQL = _GROUPS_CTE + """
 SELECT g.project_did, g.asset_id, g.aname AS asset_name, t.user_email,
        t.start_time, t.end_time, t.duration_min, t.task
-FROM data_staging.stg_timer_activities t
+FROM data_staging.stg_timer_activities_clean t
 JOIN g ON g.project_did = t.project_did
       AND g.asset_id IS NOT DISTINCT FROM t.site_id
       AND g.aname = trim(t.site_name)
@@ -171,7 +172,7 @@ def classify_group(assets):
 
 
 def attach_blank_timers(groups, blank_rows):
-    """Attach the v1 timers each group left without an asset; returns the groups."""
+    """Attach the clean timers each group left without an asset; returns the groups."""
     by_key = {(g["project_did"], g["asset_id"], g["asset_name"]): g for g in groups}
     for r in blank_rows:
         g = by_key.get(_key(r))
@@ -443,7 +444,7 @@ def build_email_html(groups, now, full, total):
         f'<tr><td style="background:#fff;border-top:1px solid {LINE};border-radius:0 0 14px 14px;padding:14px 26px;'
         f'font:400 11px {SANS};color:{MUTED}">A duplicate is one site created more than once in the same project with the '
         f'same path and name. The old timer and QA form loads match assets by name and path, so they cannot tell the '
-        f'copies apart and leave the asset empty. Blank timers = old-load timers on that site with no asset. '
+        f'copies apart and leave the asset empty. Blank timers = timers on that site with no asset. '
         f'Sent by duplicate_asset_watcher.py (local-pipeline); it never changes Swift or the database.</td></tr>')
     out.append('</table></div>')
     return "".join(out)
@@ -534,7 +535,7 @@ def build_workbook(groups, now, full, total, scope=None):
     ws.cell(note, 1, "How to read this").font = bold
     for i, line in enumerate([
         "A duplicate = one site created more than once in the same Swift project with the same path and name.",
-        "Blank timers = old-load timers (stg_timer_activities) on that site whose asset is empty because of the duplicate.",
+        "Blank timers = timers (stg_timer_activities_clean) on that site whose asset is empty because of the duplicate.",
         "Action: delete each copy marked DELETE in Swift; the next timer load fills the asset back in.",
         "HAS WORK = more than one copy has tasks or timers; move the work onto one copy before deleting.",
         "Snapshot values written by duplicate_asset_watcher.py (local-pipeline); it never changes Swift or the database.",
@@ -641,7 +642,7 @@ def main():
     try:
         db = get_db()
         rows = retry_db(lambda: db.fetch(DUPLICATES_SQL), description="read duplicate assets")
-        blanks = retry_db(lambda: db.fetch(BLANK_TIMERS_SQL), description="read blank v1 timers")
+        blanks = retry_db(lambda: db.fetch(BLANK_TIMERS_SQL), description="read blank timers")
         groups = attach_blank_timers([classify_group(g["assets"]) for g in group_rows(rows)], blanks)
         picked = sort_groups(select_groups(groups, now, full))
         s_all = summarize(groups)
