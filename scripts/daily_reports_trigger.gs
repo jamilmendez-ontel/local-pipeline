@@ -6,7 +6,9 @@
  * 1. Create a standalone Apps Script at script.google.com (or bind to any sheet)
  * 2. Paste this code
  * 3. Set GITHUB_TOKEN in Script Properties (same PAT used for other triggers)
- * 4. Create two time-based triggers:
+ * 4. Create the time-based triggers below. triggerDailyReportsRolling (every
+ *    5 min) also starts the OnPoint loader about every 15 min (2026-11-26).
+ *    Older notes:
  *    - triggerDaily: runs every day in the 3-4 AM EST window
  *    - triggerRequirements: runs every day in the 3-4 AM EST window
  *      (the function checks if today is 2nd-5th or 17th-20th before firing)
@@ -95,6 +97,66 @@ function fireDispatch(mode, days) {
  */
 function triggerDailyReportsRolling() {
   fireRollingDispatch(30);
+  // Rides along on this 5-min trigger (2026-11-26): GitHub's own cron started
+  // the OnPoint loader only ~3 times a day instead of every 15 min. Any error
+  // here is caught so it can never stop the rolling dispatch above.
+  try {
+    maybeFireOnpointDispatch();
+  } catch (e) {
+    console.log("❌ OnPoint dispatch error (rolling unaffected): " + e);
+  }
+}
+
+/**
+ * OnPoint daily reports loader (event: onpoint-daily-reports) every ~15 min.
+ * Called from triggerDailyReportsRolling(), so it needs no trigger of its own.
+ * A Script Property remembers the last successful dispatch; the next one goes
+ * out once 14 minutes have passed (a 5-min trigger lands about every 15 min).
+ * A failed dispatch is not recorded, so the next 5-min tick retries it.
+ * The workflow keeps its GitHub cron as a backstop; extra runs are harmless
+ * (each run re-pulls the last 14 days and upserts).
+ */
+var ONPOINT_DISPATCH_EVERY_MIN = 14;
+var ONPOINT_LAST_PROP = "ONPOINT_LAST_DISPATCH_MS";
+
+function maybeFireOnpointDispatch() {
+  var props = PropertiesService.getScriptProperties();
+  var last = Number(props.getProperty(ONPOINT_LAST_PROP) || 0);
+  var now = Date.now();
+  if (now - last < ONPOINT_DISPATCH_EVERY_MIN * 60 * 1000) {
+    return false;
+  }
+  if (fireOnpointDispatch()) {
+    props.setProperty(ONPOINT_LAST_PROP, String(now));
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Fire repository_dispatch for the OnPoint loader. Also safe to run by hand.
+ */
+function fireOnpointDispatch() {
+  var url = "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/dispatches";
+  var options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "token " + getToken(),
+      "Accept": "application/vnd.github.v3+json"
+    },
+    payload: JSON.stringify({ event_type: "onpoint-daily-reports" }),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+  if (code === 204) {
+    console.log("✅ Dispatched onpoint-daily-reports");
+    return true;
+  }
+  console.log("❌ OnPoint dispatch failed: " + code + " " + response.getContentText());
+  return false;
 }
 
 /**

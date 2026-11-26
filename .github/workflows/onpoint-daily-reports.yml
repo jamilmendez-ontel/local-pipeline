@@ -1,10 +1,12 @@
 name: "Pipeline: OnPoint Daily Reports"
 
 # Lands filed OnPoint daily reports (onpoint.ontel.co) in OntelDB for DRMC
-# (migrations 293 + 294). Every 15 min on a GitHub schedule (GitHub can start a
-# scheduled run late, which is fine: each run re-pulls the last 14 days), plus
-# repository_dispatch for the Apps Script scheduler and a manual run with a
-# wider window for backfills.
+# (migrations 293 + 294). Started about every 15 min by repository_dispatch
+# from the Apps Script 5-min trigger (scripts/daily_reports_trigger.gs,
+# triggerDailyReportsRolling, since 2026-11-26). The GitHub cron below stays as
+# a backstop only: it fired about 3 times a day, not every 15 min. Extra runs are
+# harmless (each re-pulls the last 14 days). Manual run with a wider window for
+# backfills.
 
 on:
   schedule:
